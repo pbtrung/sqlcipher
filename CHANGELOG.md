@@ -1,7 +1,9 @@
 # SQLCipher Change Log
 Notable changes to this project are documented in this file.
 
-## [4.16.0] - (? 2026 - [4.16.0 changes])
+## [4.17.0] - (? 2026 - [4.17.0 changes])
+
+## [4.16.0] - (May 2026 - [4.16.0 changes])
 - Update baseline to SQLite 3.53.1
 - Allocate LTC temp variables on stack
 - Omit extra warn-level log on lock failure
@@ -340,6 +342,8 @@ Notable changes to this project are documented in this file.
 ### Security
 - Change KDF iteration length from 4,000 to 64,000
 
+[4.17.0]: https://github.com/sqlcipher/sqlcipher/tree/v4.17.0
+[4.17.0 changes]: https://github.com/sqlcipher/sqlcipher/compare/v4.17.0...v4.17.0
 [4.16.0]: https://github.com/sqlcipher/sqlcipher/tree/v4.16.0
 [4.16.0 changes]: https://github.com/sqlcipher/sqlcipher/compare/v4.15.0...v4.16.0
 [4.15.0]: https://github.com/sqlcipher/sqlcipher/tree/v4.15.0
