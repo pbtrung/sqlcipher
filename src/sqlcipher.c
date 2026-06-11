@@ -1228,8 +1228,8 @@ static int sqlcipher_cipher_ctx_cmp(cipher_ctx *c1, cipher_ctx *c2) {
 
   sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlcipher_cipher_ctx_cmp: c1=%p c2=%p sqlcipher_memcmp(c1->pass, c2_pass)=%d are_equal=%d",
     c1, c2,
-    (c1->pass == NULL || c2->pass == NULL) ?
-      -1 :
+    (c1->pass == NULL || c2->pass == NULL || c1->pass_sz != c2->pass_sz) ?
+      1 :
       sqlcipher_memcmp(
         (const unsigned char*)c1->pass,
         (const unsigned char*)c2->pass,
@@ -2073,7 +2073,7 @@ cleanup:
 }
 
 static int sqlcipher_codec_ctx_migrate(codec_ctx *ctx) {
-  int i, pass_sz, keyspec_sz, nRes, user_version, rc, rc_cleanup, oflags;
+  int i, pass_sz, keyspec_sz, nRes, user_version, rc, rc_cleanup, oflags, migrated_db_filename_sz;
   Db *pDb = 0;
   sqlite3 *db = ctx->pBt->db;
   const char *db_filename = sqlite3_db_filename(db, "main");
@@ -2103,13 +2103,17 @@ static int sqlcipher_codec_ctx_migrate(codec_ctx *ctx) {
   }
 
   for(i = 3; i > 0; i--) {
-    pragma_compat = sqlite3_mprintf("PRAGMA cipher_compatibility = %d;", i);
+    if(!(pragma_compat = sqlite3_mprintf("PRAGMA cipher_compatibility = %d;", i))) {
+      sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: failed to format pragma_compat", __func__);
+      goto handle_error;
+    }
+
     rc = sqlcipher_check_connection(db_filename, pass, pass_sz, pragma_compat, &user_version, &journal_mode);
     if(rc == SQLITE_OK) {
       sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: version %d format found", i);
       goto migrate;
     }
-    if(pragma_compat) sqlcipher_free(pragma_compat, sqlite3Strlen30(pragma_compat)); 
+    sqlite3_free(pragma_compat);
     pragma_compat = NULL;
   }
   
@@ -2119,12 +2123,22 @@ static int sqlcipher_codec_ctx_migrate(codec_ctx *ctx) {
 
 migrate:
 
-  temp = sqlite3_mprintf("%s-migrated", db_filename);
+  if(!(temp = sqlite3_mprintf("%s-migrated", db_filename))) {
+    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: failed to format temp filename", __func__);
+    goto handle_error;
+  }
+
   /* overallocate migrated_db_filename, because sqlite3OsOpen will read past the null terminator
    * to determine whether the filename was URI formatted */
-  migrated_db_filename = sqlcipher_malloc(sqlite3Strlen30(temp)+2); 
+  migrated_db_filename_sz = sqlite3Strlen30(temp)+2;
+  if(!(migrated_db_filename = sqlcipher_malloc(migrated_db_filename_sz))) {
+    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: failed to allocate migrated db filename", __func__);
+    goto handle_error;
+  }
+
   memcpy(migrated_db_filename, temp, sqlite3Strlen30(temp));
-  sqlcipher_free(temp, sqlite3Strlen30(temp));
+  sqlite3_free(temp);
+  temp = NULL;
 
   attach_command = sqlite3_mprintf("ATTACH DATABASE '%s' as migrate;", migrated_db_filename); 
   set_user_version = sqlite3_mprintf("PRAGMA migrate.user_version = %d;", user_version);
@@ -2286,12 +2300,12 @@ handle_error:
 cleanup:
   if(pass) sqlcipher_free(pass, pass_sz);
   if(keyspec) sqlcipher_free(keyspec, keyspec_sz);
-  if(attach_command) sqlcipher_free(attach_command, sqlite3Strlen30(attach_command)); 
-  if(migrated_db_filename) sqlcipher_free(migrated_db_filename, sqlite3Strlen30(migrated_db_filename)); 
-  if(set_user_version) sqlcipher_free(set_user_version, sqlite3Strlen30(set_user_version)); 
-  if(set_journal_mode) sqlcipher_free(set_journal_mode, sqlite3Strlen30(set_journal_mode)); 
-  if(journal_mode) sqlcipher_free(journal_mode, sqlite3Strlen30(journal_mode)); 
-  if(pragma_compat) sqlcipher_free(pragma_compat, sqlite3Strlen30(pragma_compat)); 
+  if(attach_command) sqlite3_free(attach_command);
+  if(migrated_db_filename) sqlcipher_free(migrated_db_filename, migrated_db_filename_sz);
+  if(set_user_version) sqlite3_free(set_user_version);
+  if(set_journal_mode) sqlite3_free(set_journal_mode);
+  if(journal_mode) sqlite3_free(journal_mode);
+  if(pragma_compat) sqlite3_free(pragma_compat);
 #if defined(_WIN32) || defined(SQLITE_OS_WINRT)
   if(w_db_filename) sqlcipher_free(w_db_filename, w_db_filename_sz);
   if(w_migrated_db_filename) sqlcipher_free(w_migrated_db_filename, w_migrated_db_filename_sz);
