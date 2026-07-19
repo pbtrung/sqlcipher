@@ -539,6 +539,88 @@ crypto_libtomcrypt.o:  $(TOP)/src/crypto_libtomcrypt.c $(DEPS_OBJ_COMMON)
 crypto_cc.o: $(TOP)/src/crypto_cc.c $(DEPS_OBJ_COMMON)
 	$(T.cc.sqlite) $(CFLAGS.libsqlite3) -c $(TOP)/src/crypto_cc.c
 
+#
+# leancrypto (https://github.com/smuellerDD/leancrypto), vendored as a
+# git submodule at third_party/leancrypto and built from source (never
+# a system package) as the basis of the Ascon-Keccak-512/HKDF-SHA3-512
+# crypto provider. See doc/crypto.md for the cryptographic design.
+#
+LEANCRYPTO_DIR = $(TOP)/third_party/leancrypto
+LEANCRYPTO_BUILD_DIR = $(LEANCRYPTO_DIR)/build
+LEANCRYPTO_LIB = $(LEANCRYPTO_BUILD_DIR)/libleancrypto.a
+
+# -I flags for the leancrypto public headers used directly by
+# src/crypto_leancrypto.c, plus the two generated (configure_file)
+# headers that only exist under the Meson build directory.
+LEANCRYPTO_CFLAGS = \
+  -I$(LEANCRYPTO_DIR)/aead/api -I$(LEANCRYPTO_DIR)/hash/api \
+  -I$(LEANCRYPTO_DIR)/kdf/api -I$(LEANCRYPTO_DIR)/internal/api \
+  -I$(LEANCRYPTO_DIR)/sym/api -I$(LEANCRYPTO_DIR)/hmac/api \
+  -I$(LEANCRYPTO_DIR)/drng/api \
+  -I$(LEANCRYPTO_BUILD_DIR)/internal/api -I$(LEANCRYPTO_BUILD_DIR)/hash/api
+
+# Only the subsystems actually used (Ascon-Keccak AEAD, SHA3, HKDF) are
+# enabled. PQC algorithms, the GPLv2-licensed X.509/PKCS7/PKCS8 parsers,
+# apps, and tests are disabled to keep the vendored tree minimal and
+# fully permissively-licensed. HMAC is enabled because leancrypto's own
+# HKDF implementation is the standard HMAC-based RFC 5869 construction
+# (parameterized here with SHA3-512) and calls into the generic HMAC
+# subsystem regardless of which hash it's used with. chacha20/
+# chacha20poly1305 are enabled only as a workaround: leancrypto's Meson
+# build only compiles the shared AEAD dispatch code (aead_api.c, which
+# Ascon-Keccak's own implementation calls into) when at least one of
+# {hash_crypt, symhmac/symkmac, chacha20poly1305, aes_gcm} is also
+# enabled; chacha20poly1305 is the smallest such option and is otherwise
+# unused by this project.
+LEANCRYPTO_MESON_OPTS = \
+  --default-library=static \
+  -Ddisable-asm=true \
+  -Dsha2-256=enabled -Dsha2-512=disabled -Dsha3=enabled \
+  -Dascon=disabled -Dascon_keccak=enabled \
+  -Dchacha20=enabled -Dchacha20poly1305=enabled -Dchacha20_drng=disabled \
+  -Ddrbg_hash=disabled -Ddrbg_hmac=disabled -Ddrbg_ctr=disabled \
+  -Dhash_crypt=disabled -Dhmac=enabled -Dhkdf=enabled \
+  -Dkdf_ctr=disabled -Dkdf_fb=disabled -Dkdf_dpi=disabled -Dpbkdf2=disabled \
+  -Dkmac=disabled -Dkmac_drng=disabled -Dcshake_drng=disabled -Dxdrbg=disabled \
+  -Dhotp=disabled -Dtotp=disabled \
+  -Ddilithium_87=disabled -Ddilithium_65=disabled -Ddilithium_44=disabled \
+  -Ddilithium_ed25519=disabled -Ddilithium_ed448=disabled \
+  -Ddilithium_keygen=disabled -Ddilithium_siggen=disabled -Ddilithium_sigver=disabled \
+  -Dkyber_1024=disabled -Dkyber_768=disabled -Dkyber_512=disabled \
+  -Dkyber_x25519=disabled -Dkyber_x448=disabled \
+  -Dbike_5=disabled -Dbike_3=disabled -Dbike_1=disabled \
+  -Dhqc_256=disabled -Dhqc_192=disabled -Dhqc_128=disabled \
+  -Dsphincs_shake_256s=disabled -Dsphincs_shake_256f=disabled \
+  -Dsphincs_shake_192s=disabled -Dsphincs_shake_192f=disabled \
+  -Dsphincs_shake_128s=disabled -Dsphincs_shake_128f=disabled \
+  -Dsphincs_keygen=disabled -Dsphincs_siggen=disabled -Dsphincs_sigver=disabled \
+  -Daes_block=disabled -Daes_ecb=disabled -Daes_cbc=disabled -Daes_ctr=disabled \
+  -Daes_kw=disabled -Daes_gcm=disabled -Daes_xts=disabled \
+  -Dapps=disabled -Dtests=disabled \
+  -Dx509_parser=disabled -Dx509_csr_parser=disabled \
+  -Dx509_generator=disabled -Dx509_csr_generator=disabled \
+  -Dpkcs7_parser=disabled -Dpkcs7_generator=disabled \
+  -Dpkcs8_parser=disabled -Dpkcs8_generator=disabled
+
+$(LEANCRYPTO_LIB): $(LEANCRYPTO_DIR)/meson.build
+	@if [ ! -f $(LEANCRYPTO_BUILD_DIR)/build.ninja ]; then \
+		meson setup $(LEANCRYPTO_BUILD_DIR) $(LEANCRYPTO_DIR) $(LEANCRYPTO_MESON_OPTS); \
+	fi
+	meson compile -C $(LEANCRYPTO_BUILD_DIR)
+
+# Everything that compiles or links against the SQLCipher codec needs
+# leancrypto built first; hooking this onto $(MAKE_SANITY_CHECK) and
+# sqlite3.h/sqlite3.c (both already depend on it, see below and the
+# amalgamation rules) covers the library, the CLI shell, testfixture,
+# and the various tool/fuzzer binaries.
+$(MAKE_SANITY_CHECK): $(LEANCRYPTO_LIB)
+T.cc.sqlite += $(LEANCRYPTO_CFLAGS)
+LDFLAGS.libsqlite3 += $(LEANCRYPTO_LIB)
+
+leancrypto-clean:
+	rm -rf $(LEANCRYPTO_BUILD_DIR)
+clean: leancrypto-clean
+
 # END SQLCIPHER
 
 #
@@ -1821,7 +1903,7 @@ TESTFIXTURE_SRC1 = sqlite3.c
 TESTFIXTURE_SRC = $(TESTSRC) tclsqlite-ex.c
 TESTFIXTURE_SRC += $(TESTFIXTURE_SRC$(USE_AMALGAMATION))
 
-testfixture$(T.exe):	$(T.tcl.env.sh) has_tclsh85 $(TESTFIXTURE_SRC)
+testfixture$(T.exe):	$(T.tcl.env.sh) has_tclsh85 $(TESTFIXTURE_SRC) $(LEANCRYPTO_LIB)
 	$(T.link.tcl) -DSQLITE_NO_SYNC=1 $(TESTFIXTURE_FLAGS) \
 		-o $@ $(TESTFIXTURE_SRC) \
 		$$TCL_LIB_SPEC $$TCL_INCLUDE_SPEC $$TCL_LIBS \
