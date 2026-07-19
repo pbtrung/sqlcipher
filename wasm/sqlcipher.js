@@ -1,0 +1,10025 @@
+// This code implements the `-sMODULARIZE` settings by taking the generated
+// JS program code (INNER_JS_CODE) and wrapping it in a factory function.
+
+// Single threaded MINIMAL_RUNTIME programs do not need access to
+// document.currentScript, so a simple export declaration is enough.
+var Sqlite3Wasm = (() => {
+  // When MODULARIZE this JS may be executed later,
+  // after document.currentScript is gone, so we save it.
+  // In EXPORT_ES6 mode we can just use 'import.meta.url'.
+  var _scriptName = globalThis.document?.currentScript?.src;
+  return async function(moduleArg = {}) {
+    var Module = moduleArg;
+// include: shell.js
+// include: minimum_runtime_check.js
+// end include: minimum_runtime_check.js
+// The Module object: Our interface to the outside world. We import
+// and export values on it. There are various ways Module can be used:
+// 1. Not defined. We create it here
+// 2. A function parameter, function(moduleArg) => Promise<Module>
+// 3. pre-run appended it, var Module = {}; ..generated code..
+// 4. External script tag defines var Module.
+// We need to check if Module already exists (e.g. case 3 above).
+// Substitution will be replaced with actual code on later stage of the build,
+// this way Closure Compiler will not mangle it (e.g. case 4. above).
+// Note that if you want to run closure, and also to use Module
+// after the generated code, you will need to define   var Module = {};
+// before the code. Then that object will be used in the code, and you
+// can continue to use Module afterwards as well.
+
+// Determine the runtime environment we are in. You can customize this by
+// setting the ENVIRONMENT setting at compile time (see settings.js).
+
+// Attempt to auto-detect the environment
+var ENVIRONMENT_IS_WEB = !!globalThis.window;
+var ENVIRONMENT_IS_WORKER = !!globalThis.WorkerGlobalScope;
+// N.b. Electron.js environment is simultaneously a NODE-environment, but
+// also a web environment.
+var ENVIRONMENT_IS_NODE = globalThis.process?.versions?.node && globalThis.process?.type != 'renderer';
+var ENVIRONMENT_IS_SHELL = !ENVIRONMENT_IS_WEB && !ENVIRONMENT_IS_NODE && !ENVIRONMENT_IS_WORKER;
+
+// --pre-jses are emitted after the Module integration code, so that they can
+// refer to Module (if they choose; they can also define Module)
+
+
+var programArgs = [];
+var thisProgram = './this.program';
+var quit_ = (status, toThrow) => {
+  throw toThrow;
+};
+
+if (typeof __filename != 'undefined') { // Node
+  _scriptName = __filename;
+} else
+if (ENVIRONMENT_IS_WORKER) {
+  _scriptName = self.location.href;
+}
+
+// `/` should be present at the end if `scriptDirectory` is not empty
+var scriptDirectory = '';
+function locateFile(path) {
+  if (Module['locateFile']) {
+    return Module['locateFile'](path, scriptDirectory);
+  }
+  return scriptDirectory + path;
+}
+
+// Hooks that are implemented differently in different runtime environments.
+var readAsync, readBinary;
+
+if (ENVIRONMENT_IS_NODE) {
+
+  // These modules will usually be used on Node.js. Load them eagerly to avoid
+  // the complexity of lazy-loading.
+  var fs = require('node:fs');
+
+  scriptDirectory = __dirname + '/';
+
+// include: node_shell_read.js
+readBinary = (filename) => {
+  // We need to re-wrap `file://` strings to URLs.
+  filename = isFileURI(filename) ? new URL(filename) : filename;
+  var ret = fs.readFileSync(filename);
+  return ret;
+};
+
+readAsync = async (filename, binary = true) => {
+  // See the comment in the `readBinary` function.
+  filename = isFileURI(filename) ? new URL(filename) : filename;
+  var ret = fs.readFileSync(filename, binary ? undefined : 'utf8');
+  return ret;
+};
+// end include: node_shell_read.js
+  if (process.argv.length > 1) {
+    thisProgram = process.argv[1].replace(/\\/g, '/');
+  }
+
+  programArgs = process.argv.slice(2);
+
+  quit_ = (status, toThrow) => {
+    process.exitCode = status;
+    throw toThrow;
+  };
+
+} else
+
+// Note that this includes Node.js workers when relevant (pthreads is enabled).
+// Node.js workers are detected as a combination of ENVIRONMENT_IS_WORKER and
+// ENVIRONMENT_IS_NODE.
+if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
+  try {
+    scriptDirectory = new URL('.', _scriptName).href; // includes trailing slash
+  } catch {
+    // Must be a `blob:` or `data:` URL (e.g. `blob:http://site.com/etc/etc`), we cannot
+    // infer anything from them.
+  }
+
+  {
+// include: web_or_worker_shell_read.js
+if (ENVIRONMENT_IS_WORKER) {
+    readBinary = (url) => {
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', url, false);
+      xhr.responseType = 'arraybuffer';
+      xhr.send(null);
+      return new Uint8Array(/** @type{!ArrayBuffer} */(xhr.response));
+    };
+  }
+
+  readAsync = async (url) => {
+    // Fetch has some additional restrictions over XHR, like it can't be used on a file:// url.
+    // See https://github.com/github/fetch/pull/92#issuecomment-140665932
+    // Cordova or Electron apps are typically loaded from a file:// url.
+    // So use XHR on webview if URL is a file URL.
+    if (isFileURI(url)) {
+      return new Promise((resolve, reject) => {
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', url, true);
+        xhr.responseType = 'arraybuffer';
+        xhr.onload = () => {
+          if (xhr.status == 200 || (xhr.status == 0 && xhr.response)) { // file URLs can return 0
+            resolve(xhr.response);
+            return;
+          }
+          reject(xhr.status);
+        };
+        xhr.onerror = reject;
+        xhr.send(null);
+      });
+    }
+    var response = await fetch(url, { credentials: 'same-origin' });
+    if (response.ok) {
+      return response.arrayBuffer();
+    }
+    throw new Error(response.status + ' : ' + response.url);
+  };
+// end include: web_or_worker_shell_read.js
+  }
+} else
+{
+}
+
+var out = console.log.bind(console);
+var err = console.error.bind(console);
+
+// end include: shell.js
+
+// include: preamble.js
+// === Preamble library stuff ===
+
+// Documentation for the public APIs defined in this file must be updated in:
+//    site/source/docs/api_reference/preamble.js.rst
+// A prebuilt local version of the documentation is available at:
+//    site/build/text/docs/api_reference/preamble.js.txt
+// You can also build docs locally as HTML or other formats in site/
+// An online HTML version (which may be of a different version of Emscripten)
+//    is up at http://kripken.github.io/emscripten-site/docs/api_reference/preamble.js.html
+
+var wasmBinary;
+
+// Wasm globals
+
+//========================================
+// Runtime essentials
+//========================================
+
+// whether we are quitting the application. no code should run after this.
+// set in exit() and abort()
+var ABORT = false;
+
+// set by exit() and abort().  Passed to 'onExit' handler.
+// NOTE: This is also used as the process return code in shell environments
+// but only when noExitRuntime is false.
+var EXITSTATUS;
+
+// In STRICT mode, we only define assert() when ASSERTIONS is set.  i.e. we
+// don't define it at all in release modes.  This matches the behaviour of
+// MINIMAL_RUNTIME.
+// TODO(sbc): Make this the default even without STRICT enabled.
+/** @type {function(*, string=)} */
+function assert(condition, text) {
+  if (!condition) {
+    // This build was created without ASSERTIONS defined.  `assert()` should not
+    // ever be called in this configuration but in case there are callers in
+    // the wild leave this simple abort() implementation here for now.
+    abort(text);
+  }
+}
+
+/**
+ * Indicates whether filename is delivered via file protocol (as opposed to http/https)
+ * @noinline
+ */
+var isFileURI = (filename) => filename.startsWith('file://');
+
+// include: runtime_common.js
+// include: runtime_exceptions.js
+// Base Emscripten EH error class
+class EmscriptenEH {}
+
+class EmscriptenSjLj extends EmscriptenEH {}
+
+// end include: runtime_exceptions.js
+// include: runtime_debug.js
+// end include: runtime_debug.js
+// Memory management
+
+var runtimeInitialized = false;
+
+
+
+// When ALLOW_MEMORY_GROWTH is enabled, the conversion from Wasm
+// memory to ArrayBuffer requires some additional logic.
+function getMemoryBuffer() {
+  return wasmMemory.buffer;
+}
+
+function updateMemoryViews() {
+  // If we already have a heap that is resizeable/growable buffer we don't
+  // need to do anything in updateMemoryViews.
+  if (HEAP8?.buffer?.resizable) return;
+  var b = getMemoryBuffer();
+  Module['HEAP8'] = HEAP8 = new Int8Array(b);
+  Module['HEAP16'] = HEAP16 = new Int16Array(b);
+  Module['HEAPU8'] = HEAPU8 = new Uint8Array(b);
+  Module['HEAPU16'] = HEAPU16 = new Uint16Array(b);
+  Module['HEAP32'] = HEAP32 = new Int32Array(b);
+  Module['HEAPU32'] = HEAPU32 = new Uint32Array(b);
+  Module['HEAPF32'] = HEAPF32 = new Float32Array(b);
+  Module['HEAPF64'] = HEAPF64 = new Float64Array(b);
+  Module['HEAP64'] = HEAP64 = new BigInt64Array(b);
+  Module['HEAPU64'] = HEAPU64 = new BigUint64Array(b);
+}
+
+// include: memoryprofiler.js
+// end include: memoryprofiler.js
+// end include: runtime_common.js
+function preRun() {
+  var preRun = Module['preRun'];
+  if (preRun) {
+    if (typeof preRun == 'function') preRun = [preRun];
+    onPreRuns.push(...preRun);
+  }
+  // Begin ATPRERUNS hooks
+  callRuntimeCallbacks(onPreRuns);
+  // End ATPRERUNS hooks
+}
+
+function initRuntime() {
+  runtimeInitialized = true;
+
+  // Begin ATINITS hooks
+  if (!Module['noFSInit'] && !FS.initialized) FS.init();
+TTY.init();
+  // End ATINITS hooks
+
+  wasmExports['__wasm_call_ctors']();
+
+  // Begin ATPOSTCTORS hooks
+  FS.ignorePermissions = false;
+  // End ATPOSTCTORS hooks
+
+}
+
+function postRun() {
+
+  var postRun = Module['postRun'];
+  if (postRun) {
+    if (typeof postRun == 'function') postRun = [postRun];
+    onPostRuns.push(...postRun);
+  }
+
+  // Begin ATPOSTRUNS hooks
+  callRuntimeCallbacks(onPostRuns);
+  // End ATPOSTRUNS hooks
+}
+
+/**
+ * @param {string|number=} what
+ */
+function abort(what) {
+  Module['onAbort']?.(what);
+
+  what = `Aborted(${what})`;
+  // TODO(sbc): Should we remove printing and leave it up to whoever
+  // catches the exception?
+  err(what);
+
+  ABORT = true;
+
+  what += '. Build with -sASSERTIONS for more info.';
+
+  // Use a wasm runtime error, because a JS error might be seen as a foreign
+  // exception, which means we'd run destructors on it. We need the error to
+  // simply make the program stop.
+  // FIXME This approach does not work in Wasm EH because it currently does not assume
+  // all RuntimeErrors are from traps; it decides whether a RuntimeError is from
+  // a trap or not based on a hidden field within the object. So at the moment
+  // we don't have a way of throwing a wasm trap from JS. TODO Make a JS API that
+  // allows this in the wasm spec.
+
+  // Suppress closure compiler warning here. Closure compiler's builtin extern
+  // definition for WebAssembly.RuntimeError claims it takes no arguments even
+  // though it can.
+  // TODO(https://github.com/google/closure-compiler/pull/3913): Remove if/when upstream closure gets fixed.
+  /** @suppress {checkTypes} */
+  var e = new WebAssembly.RuntimeError(what);
+
+  // Throw the error whether or not MODULARIZE is set because abort is used
+  // in code paths apart from instantiation where an exception is expected
+  // to be thrown when abort is called.
+  throw e;
+}
+
+var wasmBinaryFile;
+
+function findWasmBinary() {
+  return locateFile('sqlcipher.wasm');
+}
+
+function getBinarySync(file) {
+  if (readBinary) {
+    return readBinary(file);
+  }
+  // Throwing a plain string here, even though it not normally advisable since
+  // this gets turning into an `abort` in instantiateArrayBuffer.
+  throw 'both async and sync fetching of the wasm failed';
+}
+
+async function getWasmBinary(binaryFile) {
+  // If we don't have the binary yet, load it asynchronously using readAsync.
+  if (!wasmBinary) {
+    // Fetch the binary using readAsync
+    try {
+      var response = await readAsync(binaryFile);
+      return new Uint8Array(response);
+    } catch {
+      // Fall back to getBinarySync below;
+    }
+  }
+
+  // Otherwise, getBinarySync should be able to get it synchronously
+  return getBinarySync(binaryFile);
+}
+
+async function instantiateArrayBuffer(binaryFile, imports) {
+  try {
+    var binary = await getWasmBinary(binaryFile);
+    var instance = await WebAssembly.instantiate(binary, imports);
+    return instance;
+  } catch (reason) {
+    err(`failed to asynchronously prepare wasm: ${reason}`);
+
+    abort(reason);
+  }
+}
+
+async function instantiateAsync(binary, binaryFile, imports) {
+  if (!binary
+      // Don't use streaming for file:// delivered objects in a webview, fetch them synchronously.
+      && !isFileURI(binaryFile)
+      // Avoid instantiateStreaming() on Node.js environment for now, as while
+      // Node.js v18.1.0 implements it, it does not have a full fetch()
+      // implementation yet.
+      //
+      // Reference:
+      //   https://github.com/emscripten-core/emscripten/pull/16917
+      && !ENVIRONMENT_IS_NODE
+     ) {
+    try {
+      var response = fetch(binaryFile, { credentials: 'same-origin' });
+      var instantiationResult = await WebAssembly.instantiateStreaming(response, imports);
+      return instantiationResult;
+    } catch (reason) {
+      // We expect the most common failure cause to be a bad MIME type for the binary,
+      // in which case falling back to ArrayBuffer instantiation should work.
+      err(`wasm streaming compile failed: ${reason}`);
+      err('falling back to ArrayBuffer instantiation');
+      // fall back of instantiateArrayBuffer below
+    };
+  }
+  return instantiateArrayBuffer(binaryFile, imports);
+}
+
+function getWasmImports() {
+  // prepare imports
+  var imports = {
+    'env': wasmImports,
+    'wasi_snapshot_preview1': wasmImports,
+  };
+  return imports;
+}
+
+// Create the wasm instance.
+// Receives the wasm imports, returns the exports.
+async function createWasm() {
+  // Load the wasm module and create an instance of using native support in the JS engine.
+  // handle a generated wasm instance, receiving its exports and
+  // performing other necessary setup
+  function receiveInstance(instance) {
+    wasmExports = instance.exports;
+
+    assignWasmExports(wasmExports);
+
+    updateMemoryViews();
+
+    return wasmExports;
+  }
+
+  // Prefer streaming instantiation if available.
+  function receiveInstantiationResult(result) {
+    // 'result' is a ResultObject object which has both the module and instance.
+    // receiveInstance() will swap in the exports (to Module.asm) so they can be called
+    // TODO: Due to Closure regression https://github.com/google/closure-compiler/issues/3193, the above line no longer optimizes out down to the following line.
+    // When the regression is fixed, can restore the above PTHREADS-enabled path.
+    return receiveInstance(result['instance']);
+  }
+
+  var info = getWasmImports();
+
+  // User shell pages can write their own Module.instantiateWasm = function(imports, successCallback) callback
+  // to manually instantiate the Wasm module themselves. This allows pages to
+  // run the instantiation parallel to any other async startup actions they are
+  // performing.
+  // Also pthreads and wasm workers initialize the wasm instance through this
+  // path.
+  var instantiateWasm = Module['instantiateWasm'];
+  if (instantiateWasm) {
+    return new Promise((resolve) => {
+        instantiateWasm(info, (inst) => resolve(receiveInstance(inst)));
+    });
+  }
+
+  wasmBinaryFile ??= findWasmBinary();
+  var result = await instantiateAsync(wasmBinary, wasmBinaryFile, info);
+  var exports = receiveInstantiationResult(result);
+  return exports;
+}
+
+// end include: preamble.js
+
+// Begin JS library code
+
+
+  class ExitStatus {
+      name = 'ExitStatus';
+      constructor(status) {
+        this.message = `Program terminated with exit(${status})`;
+        this.status = status;
+      }
+    }
+
+  /** @type {!Int16Array} */
+  var HEAP16;
+
+  /** @type {!Int32Array} */
+  var HEAP32;
+
+  /** not-@type {!BigInt64Array} */
+  var HEAP64;
+
+  /** @type {!Int8Array} */
+  var HEAP8;
+
+  /** @type {!Float32Array} */
+  var HEAPF32;
+
+  /** @type {!Float64Array} */
+  var HEAPF64;
+
+  /** @type {!Uint16Array} */
+  var HEAPU16;
+
+  /** @type {!Uint32Array} */
+  var HEAPU32;
+
+  /** not-@type {!BigUint64Array} */
+  var HEAPU64;
+
+  /** @type {!Uint8Array} */
+  var HEAPU8;
+
+  var callRuntimeCallbacks = (callbacks) => {
+      while (callbacks.length > 0) {
+        // Pass the module as the first argument.
+        callbacks.shift()(Module);
+      }
+    };
+  var onPostRuns = [];
+  var addOnPostRun = (cb) => onPostRuns.push(cb);
+
+  var onPreRuns = [];
+  var addOnPreRun = (cb) => onPreRuns.push(cb);
+
+
+  
+    /**
+   * @param {number} ptr
+   * @param {string} type
+   */
+  function getValue(ptr, type = 'i8') {
+    if (type.endsWith('*')) type = '*';
+    switch (type) {
+      case 'i1': return HEAP8[ptr];
+      case 'i8': return HEAP8[ptr];
+      case 'i16': return HEAP16[((ptr)>>1)];
+      case 'i32': return HEAP32[((ptr)>>2)];
+      case 'i64': return HEAP64[((ptr)>>3)];
+      case 'float': return HEAPF32[((ptr)>>2)];
+      case 'double': return HEAPF64[((ptr)>>3)];
+      case '*': return HEAPU32[((ptr)>>2)];
+      default: abort(`invalid type for getValue: ${type}`);
+    }
+  }
+
+  var noExitRuntime = true;
+
+  
+    /**
+   * @param {number} ptr
+   * @param {number} value
+   * @param {string} type
+   */
+  function setValue(ptr, value, type = 'i8') {
+    if (type.endsWith('*')) type = '*';
+    switch (type) {
+      case 'i1': HEAP8[ptr] = value; break;
+      case 'i8': HEAP8[ptr] = value; break;
+      case 'i16': HEAP16[((ptr)>>1)] = value; break;
+      case 'i32': HEAP32[((ptr)>>2)] = value; break;
+      case 'i64': HEAP64[((ptr)>>3)] = BigInt(value); break;
+      case 'float': HEAPF32[((ptr)>>2)] = value; break;
+      case 'double': HEAPF64[((ptr)>>3)] = value; break;
+      case '*': HEAPU32[((ptr)>>2)] = value; break;
+      default: abort(`invalid type for setValue: ${type}`);
+    }
+  }
+
+  var stackRestore = (val) => __emscripten_stack_restore(val);
+
+  var stackSave = () => _emscripten_stack_get_current();
+
+  
+
+  var UTF8Decoder = globalThis.TextDecoder && new TextDecoder();
+  
+  
+    /**
+   * heapOrArray is either a regular array, or a JavaScript typed array view.
+   * @param {number} idx
+   * @param {number=} maxBytesToRead
+   * @param {boolean=} ignoreNul
+   * @return {number}
+   */
+  var findStringEnd = (heapOrArray, idx, maxBytesToRead, ignoreNul) => {
+      var maxIdx = idx + maxBytesToRead;
+      if (ignoreNul) return maxIdx;
+      // TextDecoder needs to know the byte length in advance, it doesn't stop on
+      // null terminator by itself.
+      // As a tiny code save trick, compare idx against maxIdx using a negation,
+      // so that maxBytesToRead=undefined/NaN means Infinity.
+      while (heapOrArray[idx] && !(idx >= maxIdx)) ++idx;
+      return idx;
+    };
+  
+    /**
+   * Given a pointer 'idx' to a null-terminated UTF8-encoded string in the given
+   * array that contains uint8 values, returns a copy of that string as a
+   * Javascript String object.
+   * heapOrArray is either a regular array, or a JavaScript typed array view.
+   * @param {number=} idx
+   * @param {number=} maxBytesToRead
+   * @param {boolean=} ignoreNul - If true, the function will not stop on a NUL character.
+   * @return {string}
+   */
+  var UTF8ArrayToString = (heapOrArray, idx = 0, maxBytesToRead, ignoreNul) => {
+  
+      var endPtr = findStringEnd(heapOrArray, idx, maxBytesToRead, ignoreNul);
+  
+      // When using conditional TextDecoder, skip it for short strings as the overhead of the native call is not worth it.
+      if (endPtr - idx > 16 && heapOrArray.buffer && UTF8Decoder) {
+        return UTF8Decoder.decode(heapOrArray.subarray(idx, endPtr));
+      }
+      var str = '';
+      while (idx < endPtr) {
+        // For UTF8 byte structure, see:
+        // http://en.wikipedia.org/wiki/UTF-8#Description
+        // https://www.ietf.org/rfc/rfc2279.txt
+        // https://tools.ietf.org/html/rfc3629
+        var u0 = heapOrArray[idx++];
+        if (!(u0 & 0x80)) { str += String.fromCharCode(u0); continue; }
+        var u1 = heapOrArray[idx++] & 63;
+        if ((u0 & 0xE0) == 0xC0) { str += String.fromCharCode(((u0 & 31) << 6) | u1); continue; }
+        var u2 = heapOrArray[idx++] & 63;
+        if ((u0 & 0xF0) == 0xE0) {
+          u0 = ((u0 & 15) << 12) | (u1 << 6) | u2;
+        } else {
+          u0 = ((u0 & 7) << 18) | (u1 << 12) | (u2 << 6) | (heapOrArray[idx++] & 63);
+        }
+  
+        if (u0 < 0x10000) {
+          str += String.fromCharCode(u0);
+        } else {
+          var ch = u0 - 0x10000;
+          str += String.fromCharCode(0xD800 | (ch >> 10), 0xDC00 | (ch & 0x3FF));
+        }
+      }
+      return str;
+    };
+  
+    /**
+   * Given a pointer 'ptr' to a null-terminated UTF8-encoded string in the
+   * emscripten HEAP, returns a copy of that string as a Javascript String object.
+   *
+   * @param {number} ptr
+   * @param {number=} maxBytesToRead - An optional length that specifies the
+   *   maximum number of bytes to read. You can omit this parameter to scan the
+   *   string until the first 0 byte. If maxBytesToRead is passed, and the string
+   *   at [ptr, ptr+maxBytesToReadr[ contains a null byte in the middle, then the
+   *   string will cut short at that byte index.
+   * @param {boolean=} ignoreNul - If true, the function will not stop on a NUL character.
+   * @return {string}
+   */
+  var UTF8ToString = (ptr, maxBytesToRead, ignoreNul) => {
+      return ptr ? UTF8ArrayToString(HEAPU8, ptr, maxBytesToRead, ignoreNul) : '';
+    };
+  var ___assert_fail = (condition, filename, line, func) =>
+      abort(`Assertion failed: ${UTF8ToString(condition)}, at: ` + [filename ? UTF8ToString(filename) : 'unknown filename', line, func ? UTF8ToString(func) : 'unknown function']);
+
+  var wasmTableMirror = [];
+  
+  
+  var getWasmTableEntry = (funcPtr) => {
+      var func = wasmTableMirror[funcPtr];
+      if (!func) {
+        /** @suppress {checkTypes} */
+        wasmTableMirror[funcPtr] = func = wasmTable.get(funcPtr);
+      }
+      return func;
+    };
+  var ___call_sighandler = (fp, sig) => getWasmTableEntry(fp)(sig);
+
+  var PATH = {
+  isAbs:(path) => path.charAt(0) === '/',
+  splitPath:(filename) => {
+        var splitPathRe = /^(\/?|)([\s\S]*?)((?:\.{1,2}|[^\/]+?|)(\.[^.\/]*|))(?:[\/]*)$/;
+        return splitPathRe.exec(filename).slice(1);
+      },
+  normalizeArray:(parts, allowAboveRoot) => {
+        // if the path tries to go above the root, `up` ends up > 0
+        var up = 0;
+        for (var i = parts.length - 1; i >= 0; i--) {
+          var last = parts[i];
+          if (last === '.') {
+            parts.splice(i, 1);
+          } else if (last === '..') {
+            parts.splice(i, 1);
+            up++;
+          } else if (up) {
+            parts.splice(i, 1);
+            up--;
+          }
+        }
+        // if the path is allowed to go above the root, restore leading ..s
+        if (allowAboveRoot) {
+          for (; up; up--) {
+            parts.unshift('..');
+          }
+        }
+        return parts;
+      },
+  normalize:(path) => {
+        var isAbsolute = PATH.isAbs(path),
+            trailingSlash = path.slice(-1) === '/';
+        // Normalize the path
+        path = PATH.normalizeArray(path.split('/').filter((p) => !!p), !isAbsolute).join('/');
+        if (!path && !isAbsolute) {
+          path = '.';
+        }
+        if (path && trailingSlash) {
+          path += '/';
+        }
+        return (isAbsolute ? '/' : '') + path;
+      },
+  dirname:(path) => {
+        var result = PATH.splitPath(path),
+            root = result[0],
+            dir = result[1];
+        if (!root && !dir) {
+          // No dirname whatsoever
+          return '.';
+        }
+        if (dir) {
+          // It has a dirname, strip trailing slash
+          dir = dir.slice(0, -1);
+        }
+        return root + dir;
+      },
+  basename:(path) => path && path.match(/([^\/]+|\/)\/*$/)[1],
+join:(...paths) => PATH.normalize(paths.join('/')),
+join2:(l, r) => PATH.normalize(l + '/' + r),
+};
+
+var initRandomFill = () => {
+    // This block is not needed on v19+ since crypto.getRandomValues is builtin
+    if (ENVIRONMENT_IS_NODE) {
+      var nodeCrypto = require('node:crypto');
+      return (view) => (nodeCrypto.randomFillSync(view), 0);
+    }
+
+    return (view) => (crypto.getRandomValues(view), 0);
+  };
+var randomFill = (view) => (randomFill = initRandomFill())(view);
+
+
+
+var PATH_FS = {
+resolve:(...args) => {
+      var resolvedPath = '',
+        resolvedAbsolute = false;
+      for (var i = args.length - 1; i >= -1 && !resolvedAbsolute; i--) {
+        var path = (i >= 0) ? args[i] : FS.cwd();
+        // Skip empty and invalid entries
+        if (typeof path != 'string') {
+          throw new TypeError('Arguments to path.resolve must be strings');
+        } else if (!path) {
+          return ''; // an invalid portion invalidates the whole thing
+        }
+        resolvedPath = path + '/' + resolvedPath;
+        resolvedAbsolute = PATH.isAbs(path);
+      }
+      // At this point the path should be resolved to a full absolute path, but
+      // handle relative paths to be safe (might happen when process.cwd() fails)
+      resolvedPath = PATH.normalizeArray(resolvedPath.split('/').filter((p) => !!p), !resolvedAbsolute).join('/');
+      return ((resolvedAbsolute ? '/' : '') + resolvedPath) || '.';
+    },
+relative:(from, to) => {
+      from = PATH_FS.resolve(from).slice(1);
+      to = PATH_FS.resolve(to).slice(1);
+      function trim(arr) {
+        var start = 0;
+        for (; start < arr.length; start++) {
+          if (arr[start] !== '') break;
+        }
+        var end = arr.length - 1;
+        for (; end >= 0; end--) {
+          if (arr[end] !== '') break;
+        }
+        if (start > end) return [];
+        return arr.slice(start, end - start + 1);
+      }
+      var fromParts = trim(from.split('/'));
+      var toParts = trim(to.split('/'));
+      var length = Math.min(fromParts.length, toParts.length);
+      var samePartsLength = length;
+      for (var i = 0; i < length; i++) {
+        if (fromParts[i] !== toParts[i]) {
+          samePartsLength = i;
+          break;
+        }
+      }
+      var outputParts = [];
+      for (var i = samePartsLength; i < fromParts.length; i++) {
+        outputParts.push('..');
+      }
+      outputParts = outputParts.concat(toParts.slice(samePartsLength));
+      return outputParts.join('/');
+    },
+};
+
+
+
+var FS_stdin_getChar_buffer = [];
+
+var lengthBytesUTF8 = (str) => {
+    var len = 0;
+    for (var i = 0; i < str.length; ++i) {
+      // Gotcha: charCodeAt returns a 16-bit word that is a UTF-16 encoded code
+      // unit, not a Unicode code point of the character! So decode
+      // UTF16->UTF32->UTF8.
+      // See http://unicode.org/faq/utf_bom.html#utf16-3
+      var c = str.charCodeAt(i); // possibly a lead surrogate
+      if (c <= 0x7F) {
+        len++;
+      } else if (c <= 0x7FF) {
+        len += 2;
+      } else if (c >= 0xD800 && c <= 0xDFFF) {
+        len += 4; ++i;
+      } else {
+        len += 3;
+      }
+    }
+    return len;
+  };
+
+var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
+    // Parameter maxBytesToWrite is not optional. Negative values, 0, null,
+    // undefined and false each don't write out any bytes.
+    if (!(maxBytesToWrite > 0))
+      return 0;
+
+    var startIdx = outIdx;
+    var endIdx = outIdx + maxBytesToWrite - 1; // -1 for string null terminator.
+    for (var i = 0; i < str.length; ++i) {
+      // For UTF8 byte structure, see http://en.wikipedia.org/wiki/UTF-8#Description
+      // and https://www.ietf.org/rfc/rfc2279.txt
+      // and https://tools.ietf.org/html/rfc3629
+      var u = str.codePointAt(i);
+      if (u <= 0x7F) {
+        if (outIdx >= endIdx) break;
+        heap[outIdx++] = u;
+      } else if (u <= 0x7FF) {
+        if (outIdx + 1 >= endIdx) break;
+        heap[outIdx++] = 0xC0 | (u >> 6);
+        heap[outIdx++] = 0x80 | (u & 63);
+      } else if (u <= 0xFFFF) {
+        if (outIdx + 2 >= endIdx) break;
+        heap[outIdx++] = 0xE0 | (u >> 12);
+        heap[outIdx++] = 0x80 | ((u >> 6) & 63);
+        heap[outIdx++] = 0x80 | (u & 63);
+      } else {
+        if (outIdx + 3 >= endIdx) break;
+        heap[outIdx++] = 0xF0 | (u >> 18);
+        heap[outIdx++] = 0x80 | ((u >> 12) & 63);
+        heap[outIdx++] = 0x80 | ((u >> 6) & 63);
+        heap[outIdx++] = 0x80 | (u & 63);
+        // Gotcha: if codePoint is over 0xFFFF, it is represented as a surrogate pair in UTF-16.
+        // We need to manually skip over the second code unit for correct iteration.
+        i++;
+      }
+    }
+    // Null-terminate the pointer to the buffer.
+    heap[outIdx] = 0;
+    return outIdx - startIdx;
+  };
+/** @type {function(string, boolean=, number=)} */
+  var intArrayFromString = (stringy, dontAddNull, length) => {
+      var len = length > 0 ? length : lengthBytesUTF8(stringy)+1;
+      var u8array = new Array(len);
+      var numBytesWritten = stringToUTF8Array(stringy, u8array, 0, u8array.length);
+      if (dontAddNull) u8array.length = numBytesWritten;
+      return u8array;
+    };
+  var FS_stdin_getChar = () => {
+      if (!FS_stdin_getChar_buffer.length) {
+        var result = null;
+        if (ENVIRONMENT_IS_NODE) {
+          // we will read data by chunks of BUFSIZE
+          var BUFSIZE = 256;
+          var buf = Buffer.alloc(BUFSIZE);
+          var bytesRead = 0;
+  
+          // For some reason we must suppress a closure warning here, even though
+          // fd definitely exists on process.stdin, and is even the proper way to
+          // get the fd of stdin,
+          // https://github.com/nodejs/help/issues/2136#issuecomment-523649904
+          // This started to happen after moving this logic out of library_tty.js,
+          // so it is related to the surrounding code in some unclear manner.
+          /** @suppress {missingProperties} */
+          var fd = process.stdin.fd;
+  
+          try {
+            bytesRead = fs.readSync(fd, buf, 0, BUFSIZE);
+          } catch(e) {
+            // Cross-platform differences: on Windows, reading EOF throws an
+            // exception, but on other OSes, reading EOF returns 0. Uniformize
+            // behavior by treating the EOF exception to return 0.
+            if (e.toString().includes('EOF')) bytesRead = 0;
+            else throw e;
+          }
+  
+          if (bytesRead > 0) {
+            result = buf.slice(0, bytesRead).toString('utf-8');
+          }
+        } else
+        if (globalThis.window?.prompt) {
+          // Browser.
+          result = window.prompt('Input: ');  // returns null on cancel
+          if (result !== null) {
+            result += '\n';
+          }
+        } else
+        {}
+        if (!result) {
+          return null;
+        }
+        FS_stdin_getChar_buffer = intArrayFromString(result, true);
+      }
+      return FS_stdin_getChar_buffer.shift();
+    };
+  var TTY = {
+  ttys:[],
+  init() {
+        // https://github.com/emscripten-core/emscripten/pull/1555
+        // if (ENVIRONMENT_IS_NODE) {
+        //   // currently, FS.init does not distinguish if process.stdin is a file or TTY
+        //   // device, it always assumes it's a TTY device. because of this, we're forcing
+        //   // process.stdin to UTF8 encoding to at least make stdin reading compatible
+        //   // with text files until FS.init can be refactored.
+        //   process.stdin.setEncoding('utf8');
+        // }
+      },
+  shutdown() {
+        // https://github.com/emscripten-core/emscripten/pull/1555
+        // if (ENVIRONMENT_IS_NODE) {
+        //   // inolen: any idea as to why node -e 'process.stdin.read()' wouldn't exit immediately (with process.stdin being a tty)?
+        //   // isaacs: because now it's reading from the stream, you've expressed interest in it, so that read() kicks off a _read() which creates a ReadReq operation
+        //   // inolen: I thought read() in that case was a synchronous operation that just grabbed some amount of buffered data if it exists?
+        //   // isaacs: it is. but it also triggers a _read() call, which calls readStart() on the handle
+        //   // isaacs: do process.stdin.pause() and i'd think it'd probably close the pending call
+        //   process.stdin.pause();
+        // }
+      },
+  register(dev, ops) {
+        TTY.ttys[dev] = { input: [], output: [], ops: ops };
+        FS.registerDevice(dev, TTY.stream_ops);
+      },
+  stream_ops:{
+  open(stream) {
+          var tty = TTY.ttys[stream.node.rdev];
+          if (!tty) {
+            throw new FS.ErrnoError(43);
+          }
+          stream.tty = tty;
+          stream.seekable = false;
+        },
+  close(stream) {
+          // flush any pending line data
+          stream.tty.ops.fsync(stream.tty);
+        },
+  fsync(stream) {
+          stream.tty.ops.fsync(stream.tty);
+        },
+  read(stream, buffer, offset, length, pos /* ignored */) {
+          if (!stream.tty || !stream.tty.ops.get_char) {
+            throw new FS.ErrnoError(60);
+          }
+          var bytesRead = 0;
+          for (var i = 0; i < length; i++) {
+            var result;
+            try {
+              result = stream.tty.ops.get_char(stream.tty);
+            } catch (e) {
+              throw new FS.ErrnoError(29);
+            }
+            if (result === undefined && bytesRead === 0) {
+              throw new FS.ErrnoError(6);
+            }
+            if (result === null || result === undefined) break;
+            bytesRead++;
+            buffer[offset+i] = result;
+          }
+          if (bytesRead) {
+            stream.node.atime = Date.now();
+          }
+          return bytesRead;
+        },
+  write(stream, buffer, offset, length, pos) {
+          if (!stream.tty || !stream.tty.ops.put_char) {
+            throw new FS.ErrnoError(60);
+          }
+          try {
+            for (var i = 0; i < length; i++) {
+              stream.tty.ops.put_char(stream.tty, buffer[offset+i]);
+            }
+          } catch (e) {
+            throw new FS.ErrnoError(29);
+          }
+          if (length) {
+            stream.node.mtime = stream.node.ctime = Date.now();
+          }
+          return i;
+        },
+  },
+  default_tty_ops:{
+  get_char(tty) {
+          return FS_stdin_getChar();
+        },
+  put_char(tty, val) {
+          if (val === null || val === 10) {
+            out(UTF8ArrayToString(tty.output));
+            tty.output = [];
+          } else {
+            if (val != 0) tty.output.push(val); // val == 0 would cut text output off in the middle.
+          }
+        },
+  fsync(tty) {
+          if (tty.output?.length > 0) {
+            out(UTF8ArrayToString(tty.output));
+            tty.output = [];
+          }
+        },
+  ioctl_tcgets(tty) {
+          // typical setting
+          return {
+            c_iflag: 25856,
+            c_oflag: 5,
+            c_cflag: 191,
+            c_lflag: 35387,
+            c_cc: [
+              0x03, 0x1c, 0x7f, 0x15, 0x04, 0x00, 0x01, 0x00, 0x11, 0x13, 0x1a, 0x00,
+              0x12, 0x0f, 0x17, 0x16, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+              0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ]
+          };
+        },
+  ioctl_tcsets(tty, optional_actions, data) {
+          // currently just ignore
+          return 0;
+        },
+  ioctl_tiocgwinsz(tty) {
+          return [24, 80];
+        },
+  },
+  default_tty1_ops:{
+  put_char(tty, val) {
+          if (val === null || val === 10) {
+            err(UTF8ArrayToString(tty.output));
+            tty.output = [];
+          } else {
+            if (val != 0) tty.output.push(val);
+          }
+        },
+  fsync(tty) {
+          if (tty.output?.length > 0) {
+            err(UTF8ArrayToString(tty.output));
+            tty.output = [];
+          }
+        },
+  },
+  };
+  
+  
+  var zeroMemory = (ptr, size) => HEAPU8.fill(0, ptr, ptr + size);
+  
+  var alignMemory = (size, alignment) => {
+      return Math.ceil(size / alignment) * alignment;
+    };
+  var mmapAlloc = (size) => {
+      size = alignMemory(size, 65536);
+      var ptr = _emscripten_builtin_memalign(65536, size);
+      if (ptr) zeroMemory(ptr, size);
+      return ptr;
+    };
+  var MEMFS = {
+  ops_table:null,
+  mount(mount) {
+        return MEMFS.createNode(null, '/', 16895, 0);
+      },
+  createNode(parent, name, mode, dev) {
+        if (FS.isBlkdev(mode) || FS.isFIFO(mode)) {
+          // not supported
+          throw new FS.ErrnoError(63);
+        }
+        MEMFS.ops_table ||= {
+          dir: {
+            node: {
+              getattr: MEMFS.node_ops.getattr,
+              setattr: MEMFS.node_ops.setattr,
+              lookup: MEMFS.node_ops.lookup,
+              mknod: MEMFS.node_ops.mknod,
+              rename: MEMFS.node_ops.rename,
+              unlink: MEMFS.node_ops.unlink,
+              rmdir: MEMFS.node_ops.rmdir,
+              readdir: MEMFS.node_ops.readdir,
+              symlink: MEMFS.node_ops.symlink
+            },
+            stream: {
+              llseek: MEMFS.stream_ops.llseek
+            }
+          },
+          file: {
+            node: {
+              getattr: MEMFS.node_ops.getattr,
+              setattr: MEMFS.node_ops.setattr
+            },
+            stream: {
+              llseek: MEMFS.stream_ops.llseek,
+              read: MEMFS.stream_ops.read,
+              write: MEMFS.stream_ops.write,
+              mmap: MEMFS.stream_ops.mmap,
+              msync: MEMFS.stream_ops.msync
+            }
+          },
+          link: {
+            node: {
+              getattr: MEMFS.node_ops.getattr,
+              setattr: MEMFS.node_ops.setattr,
+              readlink: MEMFS.node_ops.readlink
+            },
+            stream: {}
+          },
+          chrdev: {
+            node: {
+              getattr: MEMFS.node_ops.getattr,
+              setattr: MEMFS.node_ops.setattr
+            },
+            stream: FS.chrdev_stream_ops
+          }
+        };
+        var node = FS.createNode(parent, name, mode, dev);
+        if (FS.isDir(node.mode)) {
+          node.node_ops = MEMFS.ops_table.dir.node;
+          node.stream_ops = MEMFS.ops_table.dir.stream;
+          node.contents = {};
+        } else if (FS.isFile(node.mode)) {
+          node.node_ops = MEMFS.ops_table.file.node;
+          node.stream_ops = MEMFS.ops_table.file.stream;
+          // The actual number of bytes used in the typed array, as opposed to
+          // contents.length which gives the whole capacity.
+          node.usedBytes = 0;
+          // The byte data of the file is stored in a typed array.
+          // Note: typed arrays are not resizable like normal JS arrays are, so
+          // there is a small penalty involved for appending file writes that
+          // continuously grow a file similar to std::vector capacity vs used.
+          node.contents = MEMFS.emptyFileContents ??= new Uint8Array(0);
+        } else if (FS.isLink(node.mode)) {
+          node.node_ops = MEMFS.ops_table.link.node;
+          node.stream_ops = MEMFS.ops_table.link.stream;
+        } else if (FS.isChrdev(node.mode)) {
+          node.node_ops = MEMFS.ops_table.chrdev.node;
+          node.stream_ops = MEMFS.ops_table.chrdev.stream;
+        }
+        node.atime = node.mtime = node.ctime = Date.now();
+        // add the new node to the parent
+        if (parent) {
+          parent.contents[name] = node;
+          parent.atime = parent.mtime = parent.ctime = node.atime;
+        }
+        return node;
+      },
+  getFileDataAsTypedArray(node) {
+        return node.contents.subarray(0, node.usedBytes); // Make sure to not return excess unused bytes.
+      },
+  expandFileStorage(node, newCapacity) {
+        var prevCapacity = node.contents.length;
+        if (prevCapacity >= newCapacity) return; // No need to expand, the storage was already large enough.
+        // Don't expand strictly to the given requested limit if it's only a very
+        // small increase, but instead geometrically grow capacity.
+        // For small filesizes (<1MB), perform size*2 geometric increase, but for
+        // large sizes, do a much more conservative size*1.125 increase to avoid
+        // overshooting the allocation cap by a very large margin.
+        var CAPACITY_DOUBLING_MAX = 1024 * 1024;
+        newCapacity = Math.max(newCapacity, (prevCapacity * (prevCapacity < CAPACITY_DOUBLING_MAX ? 2.0 : 1.125)) >>> 0);
+        if (prevCapacity) newCapacity = Math.max(newCapacity, 256); // At minimum allocate 256b for each file when expanding.
+        var oldContents = MEMFS.getFileDataAsTypedArray(node);
+        node.contents = new Uint8Array(newCapacity); // Allocate new storage.
+        node.contents.set(oldContents);
+      },
+  resizeFileStorage(node, newSize) {
+        if (node.usedBytes == newSize) return;
+        var oldContents = node.contents;
+        node.contents = new Uint8Array(newSize); // Allocate new storage.
+        node.contents.set(oldContents.subarray(0, Math.min(newSize, node.usedBytes))); // Copy old data over to the new storage.
+        node.usedBytes = newSize;
+      },
+  node_ops:{
+  getattr(node) {
+          var attr = {};
+          // device numbers reuse inode numbers.
+          attr.dev = FS.isChrdev(node.mode) ? node.id : 1;
+          attr.ino = node.id;
+          attr.mode = node.mode;
+          attr.nlink = 1;
+          attr.uid = 0;
+          attr.gid = 0;
+          attr.rdev = node.rdev;
+          if (FS.isDir(node.mode)) {
+            attr.size = 4096;
+          } else if (FS.isFile(node.mode)) {
+            attr.size = node.usedBytes;
+          } else if (FS.isLink(node.mode)) {
+            attr.size = node.link.length;
+          } else {
+            attr.size = 0;
+          }
+          attr.atime = new Date(node.atime);
+          attr.mtime = new Date(node.mtime);
+          attr.ctime = new Date(node.ctime);
+          // NOTE: In our implementation, st_blocks = Math.ceil(st_size/st_blksize),
+          //       but this is not required by the standard.
+          attr.blksize = 4096;
+          attr.blocks = Math.ceil(attr.size / attr.blksize);
+          return attr;
+        },
+  setattr(node, attr) {
+          for (const key of ["mode", "atime", "mtime", "ctime"]) {
+            if (attr[key] != null) {
+              node[key] = attr[key];
+            }
+          }
+          if (attr.size !== undefined) {
+            MEMFS.resizeFileStorage(node, attr.size);
+          }
+        },
+  lookup(parent, name) {
+          // This error may happen quite a bit. To avoid overhead we reuse it (and
+          // suffer a lack of stack info).
+          if (!MEMFS.doesNotExistError) {
+            MEMFS.doesNotExistError = new FS.ErrnoError(44);
+            /** @suppress {checkTypes} */
+            MEMFS.doesNotExistError.stack = '<generic error, no stack>';
+          }
+          throw MEMFS.doesNotExistError;
+        },
+  mknod(parent, name, mode, dev) {
+          return MEMFS.createNode(parent, name, mode, dev);
+        },
+  rename(old_node, new_dir, new_name) {
+          var new_node;
+          try {
+            new_node = FS.lookupNode(new_dir, new_name);
+          } catch (e) {}
+          if (new_node) {
+            if (FS.isDir(old_node.mode)) {
+              // if we're overwriting a directory at new_name, make sure it's empty.
+              for (var i in new_node.contents) {
+                throw new FS.ErrnoError(55);
+              }
+            }
+            FS.hashRemoveNode(new_node);
+          }
+          // do the internal rewiring
+          delete old_node.parent.contents[old_node.name];
+          new_dir.contents[new_name] = old_node;
+          old_node.name = new_name;
+          new_dir.ctime = new_dir.mtime = old_node.parent.ctime = old_node.parent.mtime = Date.now();
+        },
+  unlink(parent, name) {
+          delete parent.contents[name];
+          parent.ctime = parent.mtime = Date.now();
+        },
+  rmdir(parent, name) {
+          var node = FS.lookupNode(parent, name);
+          for (var i in node.contents) {
+            throw new FS.ErrnoError(55);
+          }
+          delete parent.contents[name];
+          parent.ctime = parent.mtime = Date.now();
+        },
+  readdir(node) {
+          return ['.', '..', ...Object.keys(node.contents)];
+        },
+  symlink(parent, newname, oldpath) {
+          var node = MEMFS.createNode(parent, newname, 0o777 | 40960, 0);
+          node.link = oldpath;
+          return node;
+        },
+  readlink(node) {
+          if (!FS.isLink(node.mode)) {
+            throw new FS.ErrnoError(28);
+          }
+          return node.link;
+        },
+  },
+  stream_ops:{
+  read(stream, buffer, offset, length, position) {
+          var contents = stream.node.contents;
+          if (position >= stream.node.usedBytes) return 0;
+          var size = Math.min(stream.node.usedBytes - position, length);
+          buffer.set(contents.subarray(position, position + size), offset);
+          return size;
+        },
+  write(stream, buffer, offset, length, position, canOwn) {
+          // If the buffer is located in main memory (HEAP), and if
+          // memory can grow, we can't hold on to references of the
+          // memory buffer, as they may get invalidated. That means we
+          // need to copy its contents.
+          if (buffer.buffer === HEAP8.buffer) {
+            canOwn = false;
+          }
+  
+          if (!length) return 0;
+          var node = stream.node;
+          node.mtime = node.ctime = Date.now();
+  
+          if (canOwn) {
+            node.contents = buffer.subarray(offset, offset + length);
+            node.usedBytes = length;
+          } else if (node.usedBytes === 0 && position === 0) { // If this is a simple first write to an empty file, do a fast set since we don't need to care about old data.
+            node.contents = buffer.slice(offset, offset + length);
+            node.usedBytes = length;
+          } else {
+            MEMFS.expandFileStorage(node, position+length);
+            // Use typed array write which is available.
+            node.contents.set(buffer.subarray(offset, offset + length), position);
+            node.usedBytes = Math.max(node.usedBytes, position + length);
+          }
+          return length;
+        },
+  llseek(stream, offset, whence) {
+          var position = offset;
+          if (whence === 1) {
+            position += stream.position;
+          } else if (whence === 2) {
+            if (FS.isFile(stream.node.mode)) {
+              position += stream.node.usedBytes;
+            }
+          }
+          if (position < 0) {
+            throw new FS.ErrnoError(28);
+          }
+          return position;
+        },
+  mmap(stream, length, position, prot, flags) {
+          if (!FS.isFile(stream.node.mode)) {
+            throw new FS.ErrnoError(43);
+          }
+          var ptr;
+          var allocated;
+          var contents = stream.node.contents;
+          // Only make a new copy when MAP_PRIVATE is specified.
+          if (!(flags & 2) && contents.buffer === HEAP8.buffer) {
+            // We can't emulate MAP_SHARED when the file is not backed by the
+            // buffer we're mapping to (e.g. the HEAP buffer).
+            allocated = false;
+            ptr = contents.byteOffset;
+          } else {
+            allocated = true;
+            ptr = mmapAlloc(length);
+            if (!ptr) {
+              throw new FS.ErrnoError(48);
+            }
+            if (contents) {
+              // Try to avoid unnecessary slices.
+              if (position > 0 || position + length < contents.length) {
+                if (contents.subarray) {
+                  contents = contents.subarray(position, position + length);
+                } else {
+                  contents = Array.prototype.slice.call(contents, position, position + length);
+                }
+              }
+              HEAP8.set(contents, ptr);
+            }
+          }
+          return { ptr, allocated };
+        },
+  msync(stream, buffer, offset, length, mmapFlags) {
+          MEMFS.stream_ops.write(stream, buffer, 0, length, offset, false);
+          // should we check if bytesWritten and length are the same?
+          return 0;
+        },
+  },
+  };
+  
+  var FS_modeStringToFlags = (str) => {
+      if (typeof str != 'string') return str;
+      var flagModes = {
+        'r': 0,
+        'r+': 2,
+        'w': 512 | 64 | 1,
+        'w+': 512 | 64 | 2,
+        'a': 1024 | 64 | 1,
+        'a+': 1024 | 64 | 2,
+      };
+      var flags = flagModes[str];
+      if (typeof flags == 'undefined') {
+        throw new Error(`Unknown file open mode: ${str}`);
+      }
+      return flags;
+    };
+  
+  var FS_fileDataToTypedArray = (data) => {
+      if (typeof data == 'string') {
+        data = intArrayFromString(data, true);
+      }
+      if (!data.subarray) {
+        data = new Uint8Array(data);
+      }
+      return data;
+    };
+  
+  var FS_getMode = (canRead, canWrite) => {
+      var mode = 0;
+      if (canRead) mode |= 292 | 73;
+      if (canWrite) mode |= 146;
+      return mode;
+    };
+  
+  
+  var asyncLoad = async (url) => {
+      var arrayBuffer = await readAsync(url);
+      return new Uint8Array(arrayBuffer);
+    };
+  
+  
+  var FS_createDataFile = (...args) => FS.createDataFile(...args);
+  
+  var getUniqueRunDependency = (id) => {
+      return id;
+    };
+  
+  var dependenciesPromise = null;
+  var resolveRunDependencies = async () => dependenciesPromise;
+  var runDependencies = 0;
+  
+  
+  var dependenciesPromiseResolve = null;
+  var removeRunDependency = (id) => {
+      runDependencies--;
+  
+      Module['monitorRunDependencies']?.(runDependencies);
+  
+      if (!runDependencies) {
+        dependenciesPromiseResolve();
+      }
+    };
+  
+  
+  var addRunDependency = (id) => {
+      if (!runDependencies) {
+        dependenciesPromise = new Promise((resolve) => dependenciesPromiseResolve = resolve);
+      }
+      runDependencies++;
+  
+      Module['monitorRunDependencies']?.(runDependencies);
+  
+    };
+  
+  
+  var preloadPlugins = [];
+  var FS_handledByPreloadPlugin = async (byteArray, fullname) => {
+      // Ensure plugins are ready.
+      if (typeof Browser != 'undefined') Browser.init();
+  
+      for (var plugin of preloadPlugins) {
+        if (plugin['canHandle'](fullname)) {
+          return plugin['handle'](byteArray, fullname);
+        }
+      }
+      // If no plugin handled this file then return the original/unmodified
+      // byteArray.
+      return byteArray;
+    };
+  var FS_preloadFile = async (parent, name, url, canRead, canWrite, dontCreateFile, canOwn, preFinish) => {
+      // TODO we should allow people to just pass in a complete filename instead
+      // of parent and name being that we just join them anyways
+      var fullname = name ? PATH_FS.resolve(PATH.join2(parent, name)) : parent;
+      var dep = getUniqueRunDependency(`cp ${fullname}`); // might have several active requests for the same fullname
+      addRunDependency(dep);
+  
+      try {
+        var byteArray = url;
+        if (typeof url == 'string') {
+          byteArray = await asyncLoad(url);
+        }
+  
+        byteArray = await FS_handledByPreloadPlugin(byteArray, fullname);
+        preFinish?.();
+        if (!dontCreateFile) {
+          FS_createDataFile(parent, name, byteArray, canRead, canWrite, canOwn);
+        }
+      } finally {
+        removeRunDependency(dep);
+      }
+    };
+  var FS_createPreloadedFile = (parent, name, url, canRead, canWrite, onload, onerror, dontCreateFile, canOwn, preFinish) => {
+      FS_preloadFile(parent, name, url, canRead, canWrite, dontCreateFile, canOwn, preFinish).then(onload).catch(onerror);
+    };
+  var FS = {
+  root:null,
+  mounts:[],
+  devices:{
+  },
+  streams:[],
+  nextInode:1,
+  nameTable:null,
+  currentPath:"/",
+  initialized:false,
+  ignorePermissions:true,
+  filesystems:null,
+  syncFSRequests:0,
+  ErrnoError:class {
+        name = 'ErrnoError';
+        // We set the `name` property to be able to identify `FS.ErrnoError`
+        // - the `name` is a standard ECMA-262 property of error objects. Kind of good to have it anyway.
+        // - when using PROXYFS, an error can come from an underlying FS
+        // as different FS objects have their own FS.ErrnoError each,
+        // the test `err instanceof FS.ErrnoError` won't detect an error coming from another filesystem, causing bugs.
+        // we'll use the reliable test `err.name == "ErrnoError"` instead
+        constructor(errno) {
+          this.errno = errno;
+        }
+      },
+  FSStream:class {
+        shared = {};
+        get object() {
+          return this.node;
+        }
+        set object(val) {
+          this.node = val;
+        }
+        get isRead() {
+          return (this.flags & 2097155) !== 1;
+        }
+        get isWrite() {
+          return (this.flags & 2097155) !== 0;
+        }
+        get isAppend() {
+          return (this.flags & 1024);
+        }
+        get flags() {
+          return this.shared.flags;
+        }
+        set flags(val) {
+          this.shared.flags = val;
+        }
+        get position() {
+          return this.shared.position;
+        }
+        set position(val) {
+          this.shared.position = val;
+        }
+      },
+  FSNode:class {
+        node_ops = {};
+        stream_ops = {};
+        readMode = 292 | 73;
+        writeMode = 146;
+        mounted = null;
+        constructor(parent, name, mode, rdev) {
+          if (!parent) {
+            parent = this;  // root node sets parent to itself
+          }
+          this.parent = parent;
+          this.mount = parent.mount;
+          this.id = FS.nextInode++;
+          this.name = name;
+          this.mode = mode;
+          this.rdev = rdev;
+          this.atime = this.mtime = this.ctime = Date.now();
+        }
+        get read() {
+          return (this.mode & this.readMode) === this.readMode;
+        }
+        set read(val) {
+          val ? this.mode |= this.readMode : this.mode &= ~this.readMode;
+        }
+        get write() {
+          return (this.mode & this.writeMode) === this.writeMode;
+        }
+        set write(val) {
+          val ? this.mode |= this.writeMode : this.mode &= ~this.writeMode;
+        }
+        get isFolder() {
+          return FS.isDir(this.mode);
+        }
+        get isDevice() {
+          return FS.isChrdev(this.mode);
+        }
+        // The per-inode readiness wait-queue. The node carries a Set of listener
+        // entries {cb}; producers (SOCKFS, PIPEFS) call notifyListeners on a
+        // readiness transition, and poll()/epoll consume it. It lives on the node
+        // (not the fd) so dup'd fds share one queue. Only nodes that derive real
+        // readiness (sockets, pipes, and an epoll's own node) ever use this -
+        // always-ready types (regular files, ttys) never register or notify.
+        addListener(cb, exclusive = false) {
+          var entry = {cb, exclusive};
+          var listeners = (this.listeners ??= new Set());
+          listeners.add(entry);
+          return {listeners, entry};
+        }
+        notifyListeners(flags) {
+          // Iterates the set without copying, which is safe ONLY under a
+          // load-bearing contract that every internal listener must honour:
+          //   1. A listener must not run user code synchronously (a poll waiter only
+          //      resolves a Promise; an epoll registration only re-lists +
+          //      re-notifies; the epoll callback only schedules a tick). User code
+          //      runs on a later tick, never inside this loop.
+          //   2. A listener may delete entries only from ITS OWN waiter, never from
+          //      a sibling node's set that may be mid-iteration. (Deleting an entry
+          //      of the set being iterated here is fine - a Set tolerates removal of
+          //      a not-yet-visited entry mid-iteration; mutating a *different* node's
+          //      set is fine because that set is not being iterated.)
+          // Violating either gives silently skipped wakeups that are near-impossible
+          // to reproduce. Any new producer/listener must preserve it.
+          if (!this.listeners) return;
+          // Fire every non-exclusive listener. Among EPOLLEXCLUSIVE registrations
+          // (one fd watched by several epolls) wake only one, rotating round-robin
+          // per node, to avoid a thundering herd. (Only epoll registrations are ever
+          // exclusive; poll waiters and a node's own consumers are not.)
+          var excl;
+          for (var entry of this.listeners) {
+            if (entry.exclusive) (excl ||= []).push(entry);
+            else entry.cb(flags);
+          }
+          if (excl) {
+            var i = (this.exclTurn || 0) % excl.length;
+            this.exclTurn = i + 1;
+            excl[i].cb(flags);
+          }
+        }
+      },
+  lookupPath(path, opts = {}) {
+        if (!path) {
+          throw new FS.ErrnoError(44);
+        }
+        opts.follow_mount ??= true
+  
+        if (!PATH.isAbs(path)) {
+          path = FS.cwd() + '/' + path;
+        }
+  
+        // limit max consecutive symlinks to SYMLOOP_MAX.
+        linkloop: for (var nlinks = 0; nlinks < 40; nlinks++) {
+          // split the absolute path
+          var parts = path.split('/').filter((p) => !!p);
+  
+          // start at the root
+          var current = FS.root;
+          var current_path = '/';
+  
+          for (var i = 0; i < parts.length; i++) {
+            var islast = (i === parts.length-1);
+            if (islast && opts.parent) {
+              // stop resolving
+              break;
+            }
+  
+            if (parts[i] === '.') {
+              continue;
+            }
+  
+            if (parts[i] === '..') {
+              current_path = PATH.dirname(current_path);
+              if (FS.isRoot(current)) {
+                path = current_path + '/' + parts.slice(i + 1).join('/');
+                // We're making progress here, don't let many consecutive ..'s
+                // lead to ELOOP
+                nlinks--;
+                continue linkloop;
+              } else {
+                current = current.parent;
+              }
+              continue;
+            }
+  
+            current_path = PATH.join2(current_path, parts[i]);
+            try {
+              current = FS.lookupNode(current, parts[i]);
+            } catch (e) {
+              // if noent_okay is true, suppress a ENOENT in the last component
+              // and return an object with an undefined node. This is needed for
+              // resolving symlinks in the path when creating a file.
+              if ((e?.errno === 44) && islast && opts.noent_okay) {
+                return { path: current_path };
+              }
+              throw e;
+            }
+  
+            // jump to the mount's root node if this is a mountpoint
+            if (FS.isMountpoint(current) && (!islast || opts.follow_mount)) {
+              current = current.mounted.root;
+            }
+  
+            // by default, lookupPath will not follow a symlink if it is the final path component.
+            // setting opts.follow = true will override this behavior.
+            if (FS.isLink(current.mode) && (!islast || opts.follow)) {
+              if (!current.node_ops.readlink) {
+                throw new FS.ErrnoError(52);
+              }
+              var link = current.node_ops.readlink(current);
+              if (!PATH.isAbs(link)) {
+                link = PATH.dirname(current_path) + '/' + link;
+              }
+              path = link + '/' + parts.slice(i + 1).join('/');
+              continue linkloop;
+            }
+          }
+          return { path: current_path, node: current };
+        }
+        throw new FS.ErrnoError(32);
+      },
+  getPath(node) {
+        var path;
+        while (true) {
+          if (FS.isRoot(node)) {
+            var mount = node.mount.mountpoint;
+            if (!path) return mount;
+            return mount[mount.length-1] !== '/' ? `${mount}/${path}` : mount + path;
+          }
+          path = path ? `${node.name}/${path}` : node.name;
+          node = node.parent;
+        }
+      },
+  hashName(parentid, name) {
+        var hash = 0;
+  
+        for (var i = 0; i < name.length; i++) {
+          hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
+        }
+        return ((parentid + hash) >>> 0) % FS.nameTable.length;
+      },
+  hashAddNode(node) {
+        var hash = FS.hashName(node.parent.id, node.name);
+        node.name_next = FS.nameTable[hash];
+        FS.nameTable[hash] = node;
+      },
+  hashRemoveNode(node) {
+        var hash = FS.hashName(node.parent.id, node.name);
+        if (FS.nameTable[hash] === node) {
+          FS.nameTable[hash] = node.name_next;
+        } else {
+          var current = FS.nameTable[hash];
+          while (current) {
+            if (current.name_next === node) {
+              current.name_next = node.name_next;
+              break;
+            }
+            current = current.name_next;
+          }
+        }
+      },
+  lookupNode(parent, name) {
+        var errCode = FS.mayLookup(parent);
+        if (errCode) {
+          throw new FS.ErrnoError(errCode);
+        }
+        var hash = FS.hashName(parent.id, name);
+        for (var node = FS.nameTable[hash]; node; node = node.name_next) {
+          var nodeName = node.name;
+          if (node.parent.id === parent.id && nodeName === name) {
+            return node;
+          }
+        }
+        // if we failed to find it in the cache, call into the VFS
+        return FS.lookup(parent, name);
+      },
+  createNode(parent, name, mode, rdev) {
+        var node = new FS.FSNode(parent, name, mode, rdev);
+  
+        FS.hashAddNode(node);
+  
+        return node;
+      },
+  destroyNode(node) {
+        FS.hashRemoveNode(node);
+      },
+  isRoot(node) {
+        return node === node.parent;
+      },
+  isMountpoint(node) {
+        return !!node.mounted;
+      },
+  isFile(mode) {
+        return (mode & 61440) === 32768;
+      },
+  isDir(mode) {
+        return (mode & 61440) === 16384;
+      },
+  isLink(mode) {
+        return (mode & 61440) === 40960;
+      },
+  isChrdev(mode) {
+        return (mode & 61440) === 8192;
+      },
+  isBlkdev(mode) {
+        return (mode & 61440) === 24576;
+      },
+  isFIFO(mode) {
+        return (mode & 61440) === 4096;
+      },
+  isSocket(mode) {
+        return (mode & 49152) === 49152;
+      },
+  flagsToPermissionString(flag) {
+        var perms = ['r', 'w', 'rw'][flag & 3];
+        if ((flag & 512)) {
+          perms += 'w';
+        }
+        return perms;
+      },
+  nodePermissions(node, perms) {
+        if (FS.ignorePermissions) {
+          return 0;
+        }
+        // return 0 if any user, group or owner bits are set.
+        if (perms.includes('r') && !(node.mode & 292)) {
+          return 2;
+        }
+        if (perms.includes('w') && !(node.mode & 146)) {
+          return 2;
+        }
+        if (perms.includes('x') && !(node.mode & 73)) {
+          return 2;
+        }
+        return 0;
+      },
+  mayLookup(dir) {
+        if (!FS.isDir(dir.mode)) return 54;
+        var errCode = FS.nodePermissions(dir, 'x');
+        if (errCode) return errCode;
+        if (!dir.node_ops.lookup) return 2;
+        return 0;
+      },
+  mayCreate(dir, name) {
+        if (!FS.isDir(dir.mode)) {
+          return 54;
+        }
+        try {
+          var node = FS.lookupNode(dir, name);
+          return 20;
+        } catch (e) {
+        }
+        return FS.nodePermissions(dir, 'wx');
+      },
+  mayDelete(dir, name, isdir) {
+        var node;
+        try {
+          node = FS.lookupNode(dir, name);
+        } catch (e) {
+          return e.errno;
+        }
+        var errCode = FS.nodePermissions(dir, 'wx');
+        if (errCode) {
+          return errCode;
+        }
+        if (isdir) {
+          if (!FS.isDir(node.mode)) {
+            return 54;
+          }
+          if (FS.isRoot(node) || FS.getPath(node) === FS.cwd()) {
+            return 10;
+          }
+        } else if (FS.isDir(node.mode)) {
+          return 31;
+        }
+        return 0;
+      },
+  mayOpen(node, flags) {
+        if (!node) {
+          return 44;
+        }
+        if (FS.isLink(node.mode)) {
+          return 32;
+        }
+        var mode = FS.flagsToPermissionString(flags);
+        if (FS.isDir(node.mode)) {
+          // opening for write
+          // TODO: check for O_SEARCH? (== search for dir only)
+          if (mode !== 'r' || (flags & (512 | 64))) {
+            return 31;
+          }
+        }
+        return FS.nodePermissions(node, mode);
+      },
+  checkOpExists(op, err) {
+        if (!op) {
+          throw new FS.ErrnoError(err);
+        }
+        return op;
+      },
+  MAX_OPEN_FDS:4096,
+  nextfd() {
+        for (var fd = 0; fd <= FS.MAX_OPEN_FDS; fd++) {
+          if (!FS.streams[fd]) {
+            return fd;
+          }
+        }
+        throw new FS.ErrnoError(33);
+      },
+  getStreamChecked(fd) {
+        var stream = FS.getStream(fd);
+        if (!stream) {
+          throw new FS.ErrnoError(8);
+        }
+        return stream;
+      },
+  getStream:(fd) => FS.streams[fd],
+  createStream(stream, fd = -1) {
+  
+        // clone it, so we can return an instance of FSStream
+        stream = Object.assign(new FS.FSStream(), stream);
+        if (fd == -1) {
+          fd = FS.nextfd();
+        }
+        stream.fd = fd;
+        FS.streams[fd] = stream;
+        return stream;
+      },
+  closeStream(fd) {
+        FS.streams[fd] = null;
+      },
+  dupStream(origStream, fd = -1) {
+        var stream = FS.createStream(origStream, fd);
+        stream.stream_ops?.dup?.(stream);
+        return stream;
+      },
+  doSetAttr(stream, node, attr) {
+        var setattr = stream?.stream_ops.setattr;
+        var arg = setattr ? stream : node;
+        setattr ??= node.node_ops.setattr;
+        FS.checkOpExists(setattr, 63)
+        try {
+          setattr(arg, attr);
+        } catch (e) {
+          if (e instanceof RangeError) {
+            throw new FS.ErrnoError(22);
+          }
+          throw e;
+        }
+      },
+  chrdev_stream_ops:{
+  open(stream) {
+          var device = FS.getDevice(stream.node.rdev);
+          // override node's stream ops with the device's
+          stream.stream_ops = device.stream_ops;
+          // forward the open call
+          stream.stream_ops.open?.(stream);
+        },
+  llseek() {
+          throw new FS.ErrnoError(70);
+        },
+  },
+  major:(dev) => ((dev) >> 8),
+  minor:(dev) => ((dev) & 0xff),
+  makedev:(ma, mi) => ((ma) << 8 | (mi)),
+  registerDevice(dev, ops) {
+        FS.devices[dev] = { stream_ops: ops };
+      },
+  getDevice:(dev) => FS.devices[dev],
+  getMounts(mount) {
+        var mounts = [];
+        var check = [mount];
+  
+        while (check.length) {
+          var m = check.pop();
+  
+          mounts.push(m);
+  
+          check.push(...m.mounts);
+        }
+  
+        return mounts;
+      },
+  syncfs(populate, callback) {
+        if (typeof populate == 'function') {
+          callback = populate;
+          populate = false;
+        }
+  
+        FS.syncFSRequests++;
+  
+        if (FS.syncFSRequests > 1) {
+          err(`warning: ${FS.syncFSRequests} FS.syncfs operations in flight at once, probably just doing extra work`);
+        }
+  
+        var mounts = FS.getMounts(FS.root.mount);
+        var completed = 0;
+  
+        function doCallback(errCode) {
+          FS.syncFSRequests--;
+          return callback(errCode);
+        }
+  
+        function done(errCode) {
+          if (errCode) {
+            if (!done.errored) {
+              done.errored = true;
+              return doCallback(errCode);
+            }
+            return;
+          }
+          if (++completed >= mounts.length) {
+            doCallback(null);
+          }
+        };
+  
+        // sync all mounts
+        for (var mount of mounts) {
+          if (mount.type.syncfs) {
+            mount.type.syncfs(mount, populate, done);
+          } else {
+            done(null);
+          }
+        }
+      },
+  mount(type, opts, mountpoint) {
+        var root = mountpoint === '/';
+        var pseudo = !mountpoint;
+        var node;
+  
+        if (root && FS.root) {
+          throw new FS.ErrnoError(10);
+        } else if (!root && !pseudo) {
+          var lookup = FS.lookupPath(mountpoint, { follow_mount: false });
+  
+          mountpoint = lookup.path;  // use the absolute path
+          node = lookup.node;
+  
+          if (FS.isMountpoint(node)) {
+            throw new FS.ErrnoError(10);
+          }
+  
+          if (!FS.isDir(node.mode)) {
+            throw new FS.ErrnoError(54);
+          }
+        }
+  
+        var mount = {
+          type,
+          opts,
+          mountpoint,
+          mounts: []
+        };
+  
+        // create a root node for the fs
+        var mountRoot = type.mount(mount);
+        mountRoot.mount = mount;
+        mount.root = mountRoot;
+  
+        if (root) {
+          FS.root = mountRoot;
+        } else if (node) {
+          // set as a mountpoint
+          node.mounted = mount;
+  
+          // add the new mount to the current mount's children
+          if (node.mount) {
+            node.mount.mounts.push(mount);
+          }
+        }
+  
+        return mountRoot;
+      },
+  unmount(mountpoint) {
+        var lookup = FS.lookupPath(mountpoint, { follow_mount: false });
+  
+        if (!FS.isMountpoint(lookup.node)) {
+          throw new FS.ErrnoError(28);
+        }
+  
+        // destroy the nodes for this mount, and all its child mounts
+        var node = lookup.node;
+        var mount = node.mounted;
+        var mounts = FS.getMounts(mount);
+  
+        for (var [hash, current] of Object.entries(FS.nameTable)) {
+          while (current) {
+            var next = current.name_next;
+  
+            if (mounts.includes(current.mount)) {
+              FS.destroyNode(current);
+            }
+  
+            current = next;
+          }
+        }
+  
+        // no longer a mountpoint
+        node.mounted = null;
+  
+        // remove this mount from the child mounts
+        var idx = node.mount.mounts.indexOf(mount);
+        node.mount.mounts.splice(idx, 1);
+      },
+  lookup(parent, name) {
+        return parent.node_ops.lookup(parent, name);
+      },
+  mknod(path, mode, dev) {
+        var lookup = FS.lookupPath(path, { parent: true });
+        var parent = lookup.node;
+        var name = PATH.basename(path);
+        if (!name) {
+          throw new FS.ErrnoError(28);
+        }
+        if (name === '.' || name === '..') {
+          throw new FS.ErrnoError(20);
+        }
+        var errCode = FS.mayCreate(parent, name);
+        if (errCode) {
+          throw new FS.ErrnoError(errCode);
+        }
+        if (!parent.node_ops.mknod) {
+          throw new FS.ErrnoError(63);
+        }
+        return parent.node_ops.mknod(parent, name, mode, dev);
+      },
+  statfs(path) {
+        return FS.statfsNode(FS.lookupPath(path, {follow: true}).node);
+      },
+  statfsStream(stream) {
+        // We keep a separate statfsStream function because noderawfs overrides
+        // it. In noderawfs, stream.node is sometimes null. Instead, we need to
+        // look at stream.path.
+        return FS.statfsNode(stream.node);
+      },
+  statfsNode(node) {
+        // NOTE: None of the defaults here are true. We're just returning safe and
+        //       sane values. Currently nodefs and rawfs replace these defaults,
+        //       other file systems leave them alone.
+        var rtn = {
+          bsize: 4096,
+          frsize: 4096,
+          blocks: 1e6,
+          bfree: 5e5,
+          bavail: 5e5,
+          files: FS.nextInode,
+          ffree: FS.nextInode - 1,
+          fsid: 42,
+          flags: 2,
+          namelen: 255,
+        };
+  
+        if (node.node_ops.statfs) {
+          Object.assign(rtn, node.node_ops.statfs(node.mount.opts.root));
+        }
+        return rtn;
+      },
+  create(path, mode = 0o666) {
+        mode &= 4095;
+        mode |= 32768;
+        return FS.mknod(path, mode, 0);
+      },
+  mkdir(path, mode = 0o777) {
+        mode &= 511 | 512;
+        mode |= 16384;
+        return FS.mknod(path, mode, 0);
+      },
+  mkdirTree(path, mode) {
+        var dirs = path.split('/');
+        var d = '';
+        for (var dir of dirs) {
+          if (!dir) continue;
+          if (d || PATH.isAbs(path)) d += '/';
+          d += dir;
+          try {
+            FS.mkdir(d, mode);
+          } catch(e) {
+            if (e.errno != 20) throw e;
+          }
+        }
+      },
+  mkdev(path, mode, dev) {
+        if (typeof dev == 'undefined') {
+          dev = mode;
+          mode = 0o666;
+        }
+        mode |= 8192;
+        return FS.mknod(path, mode, dev);
+      },
+  symlink(oldpath, newpath) {
+        if (!PATH_FS.resolve(oldpath)) {
+          throw new FS.ErrnoError(44);
+        }
+        var lookup = FS.lookupPath(newpath, { parent: true });
+        var parent = lookup.node;
+        if (!parent) {
+          throw new FS.ErrnoError(44);
+        }
+        var newname = PATH.basename(newpath);
+        var errCode = FS.mayCreate(parent, newname);
+        if (errCode) {
+          throw new FS.ErrnoError(errCode);
+        }
+        if (!parent.node_ops.symlink) {
+          throw new FS.ErrnoError(63);
+        }
+        return parent.node_ops.symlink(parent, newname, oldpath);
+      },
+  link(oldpath, newpath, flags) {
+        var lookup = FS.lookupPath(newpath, { parent: true });
+        var parent = lookup.node;
+        if (!parent) {
+          throw new FS.ErrnoError(44);
+        }
+        var newname = PATH.basename(newpath);
+        var errCode = FS.mayCreate(parent, newname);
+        if (errCode) {
+          throw new FS.ErrnoError(errCode);
+        }
+        // Hardlinks are only supported by filesystem backends that provide a
+        // `link` node op (e.g. NODERAWFS backed by the host). NODEFS omits it:
+        // a host hardlink cannot be confined to the mount root.
+        if (!parent.node_ops.link) {
+          throw new FS.ErrnoError(34);
+        }
+        return parent.node_ops.link(parent, newname, oldpath, flags);
+      },
+  rename(old_path, new_path) {
+        var old_dirname = PATH.dirname(old_path);
+        var new_dirname = PATH.dirname(new_path);
+        var old_name = PATH.basename(old_path);
+        var new_name = PATH.basename(new_path);
+        // parents must exist
+        var lookup, old_dir, new_dir;
+  
+        // let the errors from non existent directories percolate up
+        lookup = FS.lookupPath(old_path, { parent: true });
+        old_dir = lookup.node;
+        lookup = FS.lookupPath(new_path, { parent: true });
+        new_dir = lookup.node;
+  
+        if (!old_dir || !new_dir) throw new FS.ErrnoError(44);
+        // need to be part of the same mount
+        if (old_dir.mount !== new_dir.mount) {
+          throw new FS.ErrnoError(75);
+        }
+        // source must exist
+        var old_node = FS.lookupNode(old_dir, old_name);
+        // old path should not be an ancestor of the new path
+        var relative = PATH_FS.relative(old_path, new_dirname);
+        if (relative.charAt(0) !== '.') {
+          throw new FS.ErrnoError(28);
+        }
+        // new path should not be an ancestor of the old path
+        relative = PATH_FS.relative(new_path, old_dirname);
+        if (relative.charAt(0) !== '.') {
+          throw new FS.ErrnoError(55);
+        }
+        // see if the new path already exists
+        var new_node;
+        try {
+          new_node = FS.lookupNode(new_dir, new_name);
+        } catch (e) {
+          // not fatal
+        }
+        // early out if nothing needs to change
+        if (old_node === new_node) {
+          return;
+        }
+        // we'll need to delete the old entry
+        var isdir = FS.isDir(old_node.mode);
+        var errCode = FS.mayDelete(old_dir, old_name, isdir);
+        if (errCode) {
+          throw new FS.ErrnoError(errCode);
+        }
+        // need delete permissions if we'll be overwriting.
+        // need create permissions if new doesn't already exist.
+        errCode = new_node ?
+          FS.mayDelete(new_dir, new_name, isdir) :
+          FS.mayCreate(new_dir, new_name);
+        if (errCode) {
+          throw new FS.ErrnoError(errCode);
+        }
+        if (!old_dir.node_ops.rename) {
+          throw new FS.ErrnoError(63);
+        }
+        if (FS.isMountpoint(old_node) || (new_node && FS.isMountpoint(new_node))) {
+          throw new FS.ErrnoError(10);
+        }
+        // if we are going to change the parent, check write permissions
+        if (new_dir !== old_dir) {
+          errCode = FS.nodePermissions(old_dir, 'w');
+          if (errCode) {
+            throw new FS.ErrnoError(errCode);
+          }
+        }
+        // remove the node from the lookup hash
+        FS.hashRemoveNode(old_node);
+        // do the underlying fs rename
+        try {
+          old_dir.node_ops.rename(old_node, new_dir, new_name);
+          // update old node (we do this here to avoid each backend
+          // needing to)
+          old_node.parent = new_dir;
+        } catch (e) {
+          throw e;
+        } finally {
+          // add the node back to the hash (in case node_ops.rename
+          // changed its name)
+          FS.hashAddNode(old_node);
+        }
+      },
+  rmdir(path) {
+        var lookup = FS.lookupPath(path, { parent: true });
+        var parent = lookup.node;
+        var name = PATH.basename(path);
+        var node = FS.lookupNode(parent, name);
+        var errCode = FS.mayDelete(parent, name, true);
+        if (errCode) {
+          throw new FS.ErrnoError(errCode);
+        }
+        if (!parent.node_ops.rmdir) {
+          throw new FS.ErrnoError(63);
+        }
+        if (FS.isMountpoint(node)) {
+          throw new FS.ErrnoError(10);
+        }
+        parent.node_ops.rmdir(parent, name);
+        FS.destroyNode(node);
+      },
+  readdir(path) {
+        var lookup = FS.lookupPath(path, { follow: true });
+        var node = lookup.node;
+        var readdir = FS.checkOpExists(node.node_ops.readdir, 54);
+        return readdir(node);
+      },
+  unlink(path) {
+        var lookup = FS.lookupPath(path, { parent: true });
+        var parent = lookup.node;
+        if (!parent) {
+          throw new FS.ErrnoError(44);
+        }
+        var name = PATH.basename(path);
+        var node = FS.lookupNode(parent, name);
+        var errCode = FS.mayDelete(parent, name, false);
+        if (errCode) {
+          // According to POSIX, we should map EISDIR to EPERM, but
+          // we instead do what Linux does (and we must, as we use
+          // the musl linux libc).
+          throw new FS.ErrnoError(errCode);
+        }
+        if (!parent.node_ops.unlink) {
+          throw new FS.ErrnoError(63);
+        }
+        if (FS.isMountpoint(node)) {
+          throw new FS.ErrnoError(10);
+        }
+        parent.node_ops.unlink(parent, name);
+        FS.destroyNode(node);
+      },
+  readlink(path) {
+        var lookup = FS.lookupPath(path);
+        var link = lookup.node;
+        if (!link) {
+          throw new FS.ErrnoError(44);
+        }
+        if (!link.node_ops.readlink) {
+          throw new FS.ErrnoError(28);
+        }
+        return link.node_ops.readlink(link);
+      },
+  stat(path, dontFollow) {
+        var lookup = FS.lookupPath(path, { follow: !dontFollow });
+        var node = lookup.node;
+        var getattr = FS.checkOpExists(node.node_ops.getattr, 63);
+        return getattr(node);
+      },
+  fstat(fd) {
+        var stream = FS.getStreamChecked(fd);
+        var node = stream.node;
+        var getattr = stream.stream_ops.getattr;
+        var arg = getattr ? stream : node;
+        getattr ??= node.node_ops.getattr;
+        FS.checkOpExists(getattr, 63)
+        return getattr(arg);
+      },
+  lstat(path) {
+        return FS.stat(path, true);
+      },
+  doChmod(stream, node, mode, dontFollow) {
+        FS.doSetAttr(stream, node, {
+          mode: (mode & 4095) | (node.mode & ~4095),
+          ctime: Date.now(),
+          dontFollow
+        });
+      },
+  chmod(path, mode, dontFollow) {
+        var node;
+        if (typeof path == 'string') {
+          var lookup = FS.lookupPath(path, { follow: !dontFollow });
+          node = lookup.node;
+        } else {
+          node = path;
+        }
+        FS.doChmod(null, node, mode, dontFollow);
+      },
+  lchmod(path, mode) {
+        FS.chmod(path, mode, true);
+      },
+  fchmod(fd, mode) {
+        var stream = FS.getStreamChecked(fd);
+        FS.doChmod(stream, stream.node, mode, false);
+      },
+  doChown(stream, node, dontFollow) {
+        FS.doSetAttr(stream, node, {
+          timestamp: Date.now(),
+          dontFollow
+          // we ignore the uid / gid for now
+        });
+      },
+  chown(path, uid, gid, dontFollow) {
+        var node;
+        if (typeof path == 'string') {
+          var lookup = FS.lookupPath(path, { follow: !dontFollow });
+          node = lookup.node;
+        } else {
+          node = path;
+        }
+        FS.doChown(null, node, dontFollow);
+      },
+  lchown(path, uid, gid) {
+        FS.chown(path, uid, gid, true);
+      },
+  fchown(fd, uid, gid) {
+        var stream = FS.getStreamChecked(fd);
+        FS.doChown(stream, stream.node, false);
+      },
+  doTruncate(stream, node, len) {
+        if (FS.isDir(node.mode)) {
+          throw new FS.ErrnoError(31);
+        }
+        if (!FS.isFile(node.mode)) {
+          throw new FS.ErrnoError(28);
+        }
+        var errCode = FS.nodePermissions(node, 'w');
+        if (errCode) {
+          throw new FS.ErrnoError(errCode);
+        }
+        FS.doSetAttr(stream, node, {
+          size: len,
+          timestamp: Date.now()
+        });
+      },
+  truncate(path, len) {
+        if (len < 0) {
+          throw new FS.ErrnoError(28);
+        }
+        var node;
+        if (typeof path == 'string') {
+          var lookup = FS.lookupPath(path, { follow: true });
+          node = lookup.node;
+        } else {
+          node = path;
+        }
+        FS.doTruncate(null, node, len);
+      },
+  ftruncate(fd, len) {
+        var stream = FS.getStreamChecked(fd);
+        if (len < 0 || (stream.flags & 2097155) === 0) {
+          throw new FS.ErrnoError(28);
+        }
+        FS.doTruncate(stream, stream.node, len);
+      },
+  utime(path, atime, mtime, dontFollow) {
+        var lookup = FS.lookupPath(path, { follow: !dontFollow });
+        FS.doSetAttr(null, lookup.node, {
+          atime: atime,
+          mtime: mtime,
+          dontFollow
+        });
+      },
+  open(path, flags, mode = 0o666) {
+        if (path === "") {
+          throw new FS.ErrnoError(44);
+        }
+        flags = FS_modeStringToFlags(flags);
+        if ((flags & 64)) {
+          mode = (mode & 4095) | 32768;
+        } else {
+          mode = 0;
+        }
+        var node;
+        var isDirPath;
+        if (typeof path == 'object') {
+          node = path;
+        } else {
+          isDirPath = path.endsWith("/");
+          // noent_okay makes it so that if the final component of the path
+          // doesn't exist, lookupPath returns `node: undefined`. `path` will be
+          // updated to point to the target of all symlinks.
+          var lookup = FS.lookupPath(path, {
+            follow: !(flags & 131072),
+            noent_okay: true
+          });
+          node = lookup.node;
+          path = lookup.path;
+        }
+        // perhaps we need to create the node
+        var created = false;
+        if ((flags & 64)) {
+          if (node) {
+            // if O_CREAT and O_EXCL are set, error out if the node already exists
+            if ((flags & 128)) {
+              throw new FS.ErrnoError(20);
+            }
+          } else if (isDirPath) {
+            throw new FS.ErrnoError(31);
+          } else {
+            // node doesn't exist, try to create it
+            // Ignore the permission bits here to ensure we can `open` this new
+            // file below. We use chmod below to apply the permissions once the
+            // file is open.
+            node = FS.mknod(path, mode | 0o777, 0);
+            created = true;
+          }
+        }
+        if (!node) {
+          throw new FS.ErrnoError(44);
+        }
+        // can't truncate a device
+        if (FS.isChrdev(node.mode)) {
+          flags &= ~512;
+        }
+        // if asked only for a directory, then this must be one
+        if ((flags & 65536) && !FS.isDir(node.mode)) {
+          throw new FS.ErrnoError(54);
+        }
+        // check permissions, if this is not a file we just created now (it is ok to
+        // create and write to a file with read-only permissions; it is read-only
+        // for later use)
+        if (!created) {
+          var errCode = FS.mayOpen(node, flags);
+          if (errCode) {
+            throw new FS.ErrnoError(errCode);
+          }
+        }
+        // do truncation if necessary
+        if ((flags & 512) && !created) {
+          FS.truncate(node, 0);
+        }
+        // we've already handled these, don't pass down to the underlying vfs
+        flags &= ~(128 | 512 | 131072);
+  
+        // register the stream with the filesystem
+        var stream = FS.createStream({
+          node,
+          path: FS.getPath(node),  // we want the absolute path to the node
+          flags,
+          seekable: true,
+          position: 0,
+          stream_ops: node.stream_ops,
+          // used by the file family libc calls (fopen, fwrite, ferror, etc.)
+          ungotten: [],
+          error: false
+        });
+        // call the new stream's open function
+        if (stream.stream_ops.open) {
+          stream.stream_ops.open(stream);
+        }
+        if (created) {
+          FS.chmod(node, mode & 0o777);
+        }
+        return stream;
+      },
+  close(stream) {
+        if (FS.isClosed(stream)) {
+          throw new FS.ErrnoError(8);
+        }
+        if (stream.getdents) stream.getdents = null; // free readdir state
+        // The fd is going away: wake anything waiting on it (poll/epoll) with
+        // POLLNVAL so a blocking wait unblocks and an epoll registration is evicted
+        // on its next derive. Only sockets/pipes/epoll ever carry a wait-queue, so
+        // for every other stream (incl. nodeless noderawfs stdio) this is a no-op.
+        stream.node?.notifyListeners(32);
+        try {
+          if (stream.stream_ops.close) {
+            stream.stream_ops.close(stream);
+          }
+        } catch (e) {
+          throw e;
+        } finally {
+          FS.closeStream(stream.fd);
+        }
+        stream.fd = null;
+      },
+  isClosed(stream) {
+        return stream.fd === null;
+      },
+  llseek(stream, offset, whence) {
+        if (FS.isClosed(stream)) {
+          throw new FS.ErrnoError(8);
+        }
+        if (!stream.seekable || !stream.stream_ops.llseek) {
+          throw new FS.ErrnoError(70);
+        }
+        if (whence != 0 && whence != 1 && whence != 2) {
+          throw new FS.ErrnoError(28);
+        }
+        stream.position = stream.stream_ops.llseek(stream, offset, whence);
+        stream.ungotten = [];
+        return stream.position;
+      },
+  read(stream, buffer, offset, length, position) {
+        if (length < 0 || position < 0) {
+          throw new FS.ErrnoError(28);
+        }
+        if (FS.isClosed(stream)) {
+          throw new FS.ErrnoError(8);
+        }
+        if ((stream.flags & 2097155) === 1) {
+          throw new FS.ErrnoError(8);
+        }
+        if (FS.isDir(stream.node.mode)) {
+          throw new FS.ErrnoError(31);
+        }
+        if (!stream.stream_ops.read) {
+          throw new FS.ErrnoError(28);
+        }
+        var seeking = typeof position != 'undefined';
+        if (!seeking) {
+          position = stream.position;
+        } else if (!stream.seekable) {
+          throw new FS.ErrnoError(70);
+        }
+        var bytesRead = stream.stream_ops.read(stream, buffer, offset, length, position);
+        if (!seeking) stream.position += bytesRead;
+        return bytesRead;
+      },
+  write(stream, buffer, offset, length, position, canOwn) {
+        if (length < 0 || position < 0) {
+          throw new FS.ErrnoError(28);
+        }
+        if (FS.isClosed(stream)) {
+          throw new FS.ErrnoError(8);
+        }
+        if ((stream.flags & 2097155) === 0) {
+          throw new FS.ErrnoError(8);
+        }
+        if (FS.isDir(stream.node.mode)) {
+          throw new FS.ErrnoError(31);
+        }
+        if (!stream.stream_ops.write) {
+          throw new FS.ErrnoError(28);
+        }
+        if (stream.seekable && stream.flags & 1024) {
+          // seek to the end before writing in append mode
+          FS.llseek(stream, 0, 2);
+        }
+        var seeking = typeof position != 'undefined';
+        if (!seeking) {
+          position = stream.position;
+        } else if (!stream.seekable) {
+          throw new FS.ErrnoError(70);
+        }
+        var bytesWritten = stream.stream_ops.write(stream, buffer, offset, length, position, canOwn);
+        if (!seeking) stream.position += bytesWritten;
+        return bytesWritten;
+      },
+  mmap(stream, length, position, prot, flags) {
+        // User requests writing to file (prot & PROT_WRITE != 0).
+        // Checking if we have permissions to write to the file unless
+        // MAP_PRIVATE flag is set. According to POSIX spec it is possible
+        // to write to file opened in read-only mode with MAP_PRIVATE flag,
+        // as all modifications will be visible only in the memory of
+        // the current process.
+        if ((prot & 2) !== 0
+            && (flags & 2) === 0
+            && (stream.flags & 2097155) !== 2) {
+          throw new FS.ErrnoError(2);
+        }
+        if ((stream.flags & 2097155) === 1) {
+          throw new FS.ErrnoError(2);
+        }
+        if (!stream.stream_ops.mmap) {
+          throw new FS.ErrnoError(43);
+        }
+        if (!length) {
+          throw new FS.ErrnoError(28);
+        }
+        return stream.stream_ops.mmap(stream, length, position, prot, flags);
+      },
+  msync(stream, buffer, offset, length, mmapFlags) {
+        if (!stream.stream_ops.msync) {
+          return 0;
+        }
+        return stream.stream_ops.msync(stream, buffer, offset, length, mmapFlags);
+      },
+  ioctl(stream, cmd, arg) {
+        if (!stream.stream_ops.ioctl) {
+          throw new FS.ErrnoError(59);
+        }
+        return stream.stream_ops.ioctl(stream, cmd, arg);
+      },
+  readFile(path, opts = {}) {
+        opts.flags = opts.flags ?? 0;
+        opts.encoding = opts.encoding ?? 'binary';
+        if (opts.encoding !== 'utf8' && opts.encoding !== 'binary') {
+          abort(`Invalid encoding type "${opts.encoding}"`);
+        }
+        var stream = FS.open(path, opts.flags);
+        var stat = FS.stat(path);
+        var length = stat.size;
+        var buf = new Uint8Array(length);
+        FS.read(stream, buf, 0, length, 0);
+        if (opts.encoding === 'utf8') {
+          buf = UTF8ArrayToString(buf);
+        }
+        FS.close(stream);
+        return buf;
+      },
+  writeFile(path, data, opts = {}) {
+        opts.flags = opts.flags ?? 577;
+        var stream = FS.open(path, opts.flags, opts.mode);
+        data = FS_fileDataToTypedArray(data);
+        FS.write(stream, data, 0, data.byteLength, undefined, opts.canOwn);
+        FS.close(stream);
+      },
+  cwd:() => FS.currentPath,
+  chdir(path) {
+        var lookup = FS.lookupPath(path, { follow: true });
+        if (lookup.node === null) {
+          throw new FS.ErrnoError(44);
+        }
+        if (!FS.isDir(lookup.node.mode)) {
+          throw new FS.ErrnoError(54);
+        }
+        var errCode = FS.nodePermissions(lookup.node, 'x');
+        if (errCode) {
+          throw new FS.ErrnoError(errCode);
+        }
+        FS.currentPath = lookup.path;
+      },
+  createDefaultDirectories() {
+        FS.mkdir('/tmp');
+        FS.mkdir('/home');
+        FS.mkdir('/home/web_user');
+      },
+  createDefaultDevices() {
+        // create /dev
+        FS.mkdir('/dev');
+        // setup /dev/null
+        FS.registerDevice(FS.makedev(1, 3), {
+          read: () => 0,
+          write: (stream, buffer, offset, length, pos) => length,
+          llseek: () => 0,
+        });
+        FS.mkdev('/dev/null', FS.makedev(1, 3));
+        // setup /dev/tty and /dev/tty1
+        // stderr needs to print output using err() rather than out()
+        // so we register a second tty just for it.
+        TTY.register(FS.makedev(5, 0), TTY.default_tty_ops);
+        TTY.register(FS.makedev(6, 0), TTY.default_tty1_ops);
+        FS.mkdev('/dev/tty', FS.makedev(5, 0));
+        FS.mkdev('/dev/tty1', FS.makedev(6, 0));
+        // setup /dev/[u]random
+        // use a buffer to avoid overhead of individual crypto calls per byte
+        var randomBuffer = new Uint8Array(1024), randomLeft = 0;
+        var randomByte = () => {
+          if (randomLeft === 0) {
+            randomFill(randomBuffer);
+            randomLeft = randomBuffer.byteLength;
+          }
+          return randomBuffer[--randomLeft];
+        };
+        FS.createDevice('/dev', 'random', randomByte);
+        FS.createDevice('/dev', 'urandom', randomByte);
+        // we're not going to emulate the actual shm device,
+        // just create the tmp dirs that reside in it commonly
+        FS.mkdir('/dev/shm');
+        FS.mkdir('/dev/shm/tmp');
+      },
+  createSpecialDirectories() {
+        // create /proc/self/fd which allows /proc/self/fd/6 => readlink gives the
+        // name of the stream for fd 6 (see test_unistd_ttyname)
+        FS.mkdir('/proc');
+        var proc_self = FS.mkdir('/proc/self');
+        FS.mkdir('/proc/self/fd');
+        FS.mount({
+          mount() {
+            var node = FS.createNode(proc_self, 'fd', 16895, 73);
+            node.stream_ops = {
+              llseek: MEMFS.stream_ops.llseek,
+            };
+            node.node_ops = {
+              lookup(parent, name) {
+                var fd = +name;
+                var stream = FS.getStreamChecked(fd);
+                var ret = {
+                  parent: null,
+                  mount: { mountpoint: 'fake' },
+                  node_ops: { readlink: () => stream.path },
+                  id: fd + 1,
+                };
+                ret.parent = ret; // make it look like a simple root node
+                return ret;
+              },
+              readdir() {
+                return Array.from(FS.streams.entries())
+                  .filter(([k, v]) => v)
+                  .map(([k, v]) => k.toString());
+              }
+            };
+            return node;
+          }
+        }, {}, '/proc/self/fd');
+      },
+  createStandardStreams(input, output, error) {
+        // TODO deprecate the old functionality of a single
+        // input / output callback and that utilizes FS.createDevice
+        // and instead require a unique set of stream ops
+  
+        // by default, we symlink the standard streams to the
+        // default tty devices. however, if the standard streams
+        // have been overwritten we create a unique device for
+        // them instead.
+        if (input) {
+          FS.createDevice('/dev', 'stdin', input);
+        } else {
+          FS.symlink('/dev/tty', '/dev/stdin');
+        }
+        if (output) {
+          FS.createDevice('/dev', 'stdout', null, output);
+        } else {
+          FS.symlink('/dev/tty', '/dev/stdout');
+        }
+        if (error) {
+          FS.createDevice('/dev', 'stderr', null, error);
+        } else {
+          FS.symlink('/dev/tty1', '/dev/stderr');
+        }
+  
+        // open default streams for the stdin, stdout and stderr devices
+        var stdin = FS.open('/dev/stdin', 0);
+        var stdout = FS.open('/dev/stdout', 1);
+        var stderr = FS.open('/dev/stderr', 1);
+      },
+  staticInit() {
+        FS.nameTable = new Array(4096);
+  
+        FS.mount(MEMFS, {}, '/');
+  
+        FS.createDefaultDirectories();
+        FS.createDefaultDevices();
+        FS.createSpecialDirectories();
+  
+        FS.filesystems = {
+          'MEMFS': MEMFS,
+        };
+      },
+  init(input, output, error) {
+        FS.initialized = true;
+  
+        // Allow Module.stdin etc. to provide defaults, if none explicitly passed to us here
+        input ??= Module['stdin'];
+        output ??= Module['stdout'];
+        error ??= Module['stderr'];
+  
+        FS.createStandardStreams(input, output, error);
+      },
+  quit() {
+        FS.initialized = false;
+        // force-flush all streams, so we get musl std streams printed out
+        _fflush(0);
+        // close all of our streams
+        for (var stream of FS.streams) {
+          if (stream) {
+            FS.close(stream);
+          }
+        }
+      },
+  findObject(path, dontResolveLastLink) {
+        var ret = FS.analyzePath(path, dontResolveLastLink);
+        if (!ret.exists) {
+          return null;
+        }
+        return ret.object;
+      },
+  analyzePath(path, dontResolveLastLink) {
+        // operate from within the context of the symlink's target
+        try {
+          var lookup = FS.lookupPath(path, { follow: !dontResolveLastLink });
+          path = lookup.path;
+        } catch (e) {
+        }
+        var ret = {
+          isRoot: false, exists: false, error: 0, name: null, path: null, object: null,
+          parentExists: false, parentPath: null, parentObject: null
+        };
+        try {
+          var lookup = FS.lookupPath(path, { parent: true });
+          ret.parentExists = true;
+          ret.parentPath = lookup.path;
+          ret.parentObject = lookup.node;
+          ret.name = PATH.basename(path);
+          lookup = FS.lookupPath(path, { follow: !dontResolveLastLink });
+          ret.exists = true;
+          ret.path = lookup.path;
+          ret.object = lookup.node;
+          ret.name = lookup.node.name;
+          ret.isRoot = lookup.path === '/';
+        } catch (e) {
+          ret.error = e.errno;
+        };
+        return ret;
+      },
+  createPath(parent, path, canRead, canWrite) {
+        parent = typeof parent == 'string' ? parent : FS.getPath(parent);
+        var parts = path.split('/').reverse();
+        while (parts.length) {
+          var part = parts.pop();
+          if (!part) continue;
+          var current = PATH.join2(parent, part);
+          try {
+            FS.mkdir(current);
+          } catch (e) {
+            if (e.errno != 20) throw e;
+          }
+          parent = current;
+        }
+        return current;
+      },
+  createFile(parent, name, properties, canRead, canWrite) {
+        var path = PATH.join2(typeof parent == 'string' ? parent : FS.getPath(parent), name);
+        var mode = FS_getMode(canRead, canWrite);
+        return FS.create(path, mode);
+      },
+  createDataFile(parent, name, data, canRead, canWrite, canOwn) {
+        var path = name;
+        if (parent) {
+          parent = typeof parent == 'string' ? parent : FS.getPath(parent);
+          path = name ? PATH.join2(parent, name) : parent;
+        }
+        var mode = FS_getMode(canRead, canWrite);
+        var node = FS.create(path, mode);
+        if (data) {
+          data = FS_fileDataToTypedArray(data);
+          // make sure we can write to the file
+          FS.chmod(node, mode | 146);
+          var stream = FS.open(node, 577);
+          FS.write(stream, data, 0, data.length, 0, canOwn);
+          FS.close(stream);
+          FS.chmod(node, mode);
+        }
+      },
+  createDevice(parent, name, input, output) {
+        var path = PATH.join2(typeof parent == 'string' ? parent : FS.getPath(parent), name);
+        var mode = FS_getMode(!!input, !!output);
+        FS.createDevice.major ??= 64;
+        var dev = FS.makedev(FS.createDevice.major++, 0);
+        // Create a fake device that a set of stream ops to emulate
+        // the old behavior.
+        FS.registerDevice(dev, {
+          open(stream) {
+            stream.seekable = false;
+          },
+          close(stream) {
+            // flush any pending line data
+            if (output?.buffer?.length) {
+              output(10);
+            }
+          },
+          read(stream, buffer, offset, length, pos /* ignored */) {
+            var bytesRead = 0;
+            for (var i = 0; i < length; i++) {
+              var result;
+              try {
+                result = input();
+              } catch (e) {
+                throw new FS.ErrnoError(29);
+              }
+              if (result === undefined && bytesRead === 0) {
+                throw new FS.ErrnoError(6);
+              }
+              if (result === null || result === undefined) break;
+              bytesRead++;
+              buffer[offset+i] = result;
+            }
+            if (bytesRead) {
+              stream.node.atime = Date.now();
+            }
+            return bytesRead;
+          },
+          write(stream, buffer, offset, length, pos) {
+            for (var i = 0; i < length; i++) {
+              try {
+                output(buffer[offset+i]);
+              } catch (e) {
+                throw new FS.ErrnoError(29);
+              }
+            }
+            if (length) {
+              stream.node.mtime = stream.node.ctime = Date.now();
+            }
+            return i;
+          }
+        });
+        return FS.mkdev(path, mode, dev);
+      },
+  forceLoadFile(obj) {
+        if (obj.isDevice || obj.isFolder || obj.link || obj.contents) return true;
+        if (globalThis.XMLHttpRequest) {
+          abort("Lazy loading should have been performed (contents set) in createLazyFile, but it was not. Lazy loading only works in web workers. Use --embed-file or --preload-file in emcc on the main thread.");
+        } else { // Command-line.
+          try {
+            obj.contents = readBinary(obj.url);
+          } catch (e) {
+            throw new FS.ErrnoError(29);
+          }
+        }
+      },
+  createLazyFile(parent, name, url, canRead, canWrite) {
+        // Lazy chunked Uint8Array (implements get and length from Uint8Array).
+        // Actual getting is abstracted away for eventual reuse.
+        class LazyUint8Array {
+          lengthKnown = false;
+          chunks = []; // Loaded chunks. Index is the chunk number
+          get(idx) {
+            if (idx > this.length-1 || idx < 0) {
+              return undefined;
+            }
+            var chunkOffset = idx % this.chunkSize;
+            var chunkNum = (idx / this.chunkSize)|0;
+            return this.getter(chunkNum)[chunkOffset];
+          }
+          setDataGetter(getter) {
+            this.getter = getter;
+          }
+          cacheLength() {
+            // Find length
+            var xhr = new XMLHttpRequest();
+            xhr.open('HEAD', url, false);
+            xhr.send(null);
+            if (!(xhr.status >= 200 && xhr.status < 300 || xhr.status === 304)) abort("Couldn't load " + url + ". Status: " + xhr.status);
+            var datalength = Number(xhr.getResponseHeader("Content-length"));
+            var header;
+            var hasByteServing = (header = xhr.getResponseHeader("Accept-Ranges")) && header === "bytes";
+            var usesGzip = (header = xhr.getResponseHeader("Content-Encoding")) && header === "gzip";
+  
+            var chunkSize = 1024*1024; // Chunk size in bytes
+  
+            if (!hasByteServing) chunkSize = datalength;
+  
+            // Function to get a range from the remote URL.
+            var doXHR = (from, to) => {
+              if (from > to) abort(`invalid range (${from}, ${to}) or no bytes requested!`);
+              if (to > datalength-1) abort(`only ${datalength} bytes available! programmer error!`);
+  
+              // TODO: Use mozResponseArrayBuffer, responseStream, etc. if available.
+              var xhr = new XMLHttpRequest();
+              xhr.open('GET', url, false);
+              if (datalength !== chunkSize) xhr.setRequestHeader("Range", "bytes=" + from + "-" + to);
+  
+              // Some hints to the browser that we want binary data.
+              xhr.responseType = 'arraybuffer';
+              if (xhr.overrideMimeType) {
+                xhr.overrideMimeType('text/plain; charset=x-user-defined');
+              }
+  
+              xhr.send(null);
+              if (!(xhr.status >= 200 && xhr.status < 300 || xhr.status === 304)) abort("Couldn't load " + url + ". Status: " + xhr.status);
+              if (xhr.response !== undefined) {
+                return new Uint8Array(/** @type{Array<number>} */(xhr.response || []));
+              }
+              return intArrayFromString(xhr.responseText ?? '', true);
+            };
+            var lazyArray = this;
+            lazyArray.setDataGetter((chunkNum) => {
+              var start = chunkNum * chunkSize;
+              var end = (chunkNum+1) * chunkSize - 1; // including this byte
+              end = Math.min(end, datalength-1); // if datalength-1 is selected, this is the last block
+              if (typeof lazyArray.chunks[chunkNum] == 'undefined') {
+                lazyArray.chunks[chunkNum] = doXHR(start, end);
+              }
+              if (typeof lazyArray.chunks[chunkNum] == 'undefined') abort('doXHR failed!');
+              return lazyArray.chunks[chunkNum];
+            });
+  
+            if (usesGzip || !datalength) {
+              // if the server uses gzip or doesn't supply the length, we have to download the whole file to get the (uncompressed) length
+              chunkSize = datalength = 1; // this will force getter(0)/doXHR do download the whole file
+              datalength = this.getter(0).length;
+              chunkSize = datalength;
+              out("LazyFiles on gzip forces download of the whole file when length is accessed");
+            }
+  
+            this._length = datalength;
+            this._chunkSize = chunkSize;
+            this.lengthKnown = true;
+          }
+          get length() {
+            if (!this.lengthKnown) {
+              this.cacheLength();
+            }
+            return this._length;
+          }
+          get chunkSize() {
+            if (!this.lengthKnown) {
+              this.cacheLength();
+            }
+            return this._chunkSize;
+          }
+        }
+  
+        if (globalThis.XMLHttpRequest) {
+          if (!ENVIRONMENT_IS_WORKER) abort('Cannot do synchronous binary XHRs outside webworkers in modern browsers. Use --embed-file or --preload-file in emcc');
+          var lazyArray = new LazyUint8Array();
+          var properties = { isDevice: false, contents: lazyArray };
+        } else {
+          var properties = { isDevice: false, url: url };
+        }
+  
+        var node = FS.createFile(parent, name, properties, canRead, canWrite);
+        // This is a total hack, but I want to get this lazy file code out of the
+        // core of MEMFS. If we want to keep this lazy file concept I feel it should
+        // be its own thin LAZYFS proxying calls to MEMFS.
+        if (properties.contents) {
+          node.contents = properties.contents;
+        } else if (properties.url) {
+          node.contents = null;
+          node.url = properties.url;
+        }
+        // Add a function that defers querying the file size until it is asked the first time.
+        Object.defineProperties(node, {
+          usedBytes: {
+            get: function() { return this.contents.length; }
+          }
+        });
+        // override each stream op with one that tries to force load the lazy file first
+        var stream_ops = {};
+        for (const [key, fn] of Object.entries(node.stream_ops)) {
+          stream_ops[key] = (...args) => {
+            FS.forceLoadFile(node);
+            return fn(...args);
+          };
+        }
+        function writeChunks(stream, buffer, offset, length, position) {
+          var contents = stream.node.contents;
+          if (position >= contents.length)
+            return 0;
+          var size = Math.min(contents.length - position, length);
+          if (contents.slice) { // normal array
+            for (var i = 0; i < size; i++) {
+              buffer[offset + i] = contents[position + i];
+            }
+          } else {
+            for (var i = 0; i < size; i++) { // LazyUint8Array from sync binary XHR
+              buffer[offset + i] = contents.get(position + i);
+            }
+          }
+          return size;
+        }
+        // use a custom read function
+        stream_ops.read = (stream, buffer, offset, length, position) => {
+          FS.forceLoadFile(node);
+          return writeChunks(stream, buffer, offset, length, position)
+        };
+        // use a custom mmap function
+        stream_ops.mmap = (stream, length, position, prot, flags) => {
+          FS.forceLoadFile(node);
+          var ptr = mmapAlloc(length);
+          if (!ptr) {
+            throw new FS.ErrnoError(48);
+          }
+          writeChunks(stream, HEAP8, ptr, length, position);
+          return { ptr, allocated: true };
+        };
+        node.stream_ops = stream_ops;
+        return node;
+      },
+  };
+  
+  var SYSCALLS = {
+  currentUmask:18,
+  calculateAt(dirfd, path, allowEmpty) {
+        if (PATH.isAbs(path)) {
+          return path;
+        }
+        // relative path
+        var dir;
+        if (dirfd === -100) {
+          dir = FS.cwd();
+        } else {
+          var dirstream = SYSCALLS.getStreamFromFD(dirfd);
+          dir = dirstream.path;
+        }
+        if (path.length == 0) {
+          if (!allowEmpty) {
+            throw new FS.ErrnoError(44);;
+          }
+          return dir;
+        }
+        return dir + '/' + path;
+      },
+  writeStat(buf, stat) {
+        HEAPU32[((buf)>>2)] = stat.dev;
+        HEAPU32[(((buf)+(4))>>2)] = stat.mode;
+        HEAPU32[(((buf)+(8))>>2)] = stat.nlink;
+        HEAPU32[(((buf)+(12))>>2)] = stat.uid;
+        HEAPU32[(((buf)+(16))>>2)] = stat.gid;
+        HEAPU32[(((buf)+(20))>>2)] = stat.rdev;
+        HEAP64[(((buf)+(24))>>3)] = BigInt(stat.size);
+        HEAP32[(((buf)+(32))>>2)] = 4096;
+        HEAP32[(((buf)+(36))>>2)] = stat.blocks;
+        var atime = stat.atime.getTime();
+        var mtime = stat.mtime.getTime();
+        var ctime = stat.ctime.getTime();
+        HEAP64[(((buf)+(40))>>3)] = BigInt(Math.floor(atime / 1000));
+        HEAPU32[(((buf)+(48))>>2)] = (atime % 1000) * 1000 * 1000;
+        HEAP64[(((buf)+(56))>>3)] = BigInt(Math.floor(mtime / 1000));
+        HEAPU32[(((buf)+(64))>>2)] = (mtime % 1000) * 1000 * 1000;
+        HEAP64[(((buf)+(72))>>3)] = BigInt(Math.floor(ctime / 1000));
+        HEAPU32[(((buf)+(80))>>2)] = (ctime % 1000) * 1000 * 1000;
+        HEAP64[(((buf)+(88))>>3)] = BigInt(stat.ino);
+        return 0;
+      },
+  writeStatFs(buf, stats) {
+        HEAPU32[(((buf)+(4))>>2)] = stats.bsize;
+        HEAPU32[(((buf)+(60))>>2)] = stats.bsize;
+        HEAP64[(((buf)+(8))>>3)] = BigInt(stats.blocks);
+        HEAP64[(((buf)+(16))>>3)] = BigInt(stats.bfree);
+        HEAP64[(((buf)+(24))>>3)] = BigInt(stats.bavail);
+        HEAP64[(((buf)+(32))>>3)] = BigInt(stats.files);
+        HEAP64[(((buf)+(40))>>3)] = BigInt(stats.ffree);
+        HEAPU32[(((buf)+(48))>>2)] = stats.fsid;
+        HEAPU32[(((buf)+(64))>>2)] = stats.flags;  // ST_NOSUID
+        HEAPU32[(((buf)+(56))>>2)] = stats.namelen;
+      },
+  doMsync(addr, stream, len, flags, offset) {
+        if (!FS.isFile(stream.node.mode)) {
+          throw new FS.ErrnoError(43);
+        }
+        if (flags & 2) {
+          // MAP_PRIVATE calls need not to be synced back to underlying fs
+          return 0;
+        }
+        var buffer = HEAPU8.subarray(addr, addr + len);
+        FS.msync(stream, buffer, offset, len, flags);
+      },
+  getStreamFromFD(fd) {
+        var stream = FS.getStreamChecked(fd);
+        return stream;
+      },
+  varargs:undefined,
+  getStr(ptr) {
+        var ret = UTF8ToString(ptr);
+        return ret;
+      },
+  };
+  function ___syscall_chmod(path, mode) {
+  try {
+  
+      path = SYSCALLS.getStr(path);
+      FS.chmod(path, mode);
+      return 0;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  }
+  
+
+  function ___syscall_faccessat(dirfd, path, amode, flags) {
+  try {
+  
+      path = SYSCALLS.getStr(path);
+      path = SYSCALLS.calculateAt(dirfd, path);
+      if (amode & ~7) {
+        // need a valid mode
+        return -28;
+      }
+      var lookup = FS.lookupPath(path, { follow: true });
+      var node = lookup.node;
+      if (!node) {
+        return -44;
+      }
+      var perms = '';
+      if (amode & 4) perms += 'r';
+      if (amode & 2) perms += 'w';
+      if (amode & 1) perms += 'x';
+      if (perms /* otherwise, they've just passed F_OK */ && FS.nodePermissions(node, perms)) {
+        return -2;
+      }
+      return 0;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  }
+  
+
+  function ___syscall_fchmod(fd, mode) {
+  try {
+  
+      FS.fchmod(fd, mode);
+      return 0;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  }
+  
+
+  function ___syscall_fchown32(fd, owner, group) {
+  try {
+  
+      FS.fchown(fd, owner, group);
+      return 0;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  }
+  
+
+  var syscallGetVarargI = () => {
+      // the `+` prepended here is necessary to convince the JSCompiler that varargs is indeed a number.
+      var ret = HEAP32[((+SYSCALLS.varargs)>>2)];
+      SYSCALLS.varargs += 4;
+      return ret;
+    };
+  var syscallGetVarargP = syscallGetVarargI;
+  
+  
+  function ___syscall_fcntl64(fd, cmd, varargs) {
+  SYSCALLS.varargs = varargs;
+  try {
+  
+      var stream = SYSCALLS.getStreamFromFD(fd);
+      switch (cmd) {
+        case 0: {
+          var arg = syscallGetVarargI();
+          if (arg < 0) {
+            return -28;
+          }
+          while (FS.streams[arg]) {
+            arg++;
+          }
+          var newStream;
+          newStream = FS.dupStream(stream, arg);
+          return newStream.fd;
+        }
+        case 1:
+        case 2:
+          return 0;  // FD_CLOEXEC makes no sense for a single process.
+        case 3:
+          return stream.flags;
+        case 4: {
+          var arg = syscallGetVarargI();
+          var mask = 289792;
+          stream.flags = (stream.flags & ~mask) | (arg & mask);
+          return 0;
+        }
+        case 12: {
+          var arg = syscallGetVarargP();
+          var offset = 0;
+          // We're always unlocked.
+          HEAP16[(((arg)+(offset))>>1)] = 2;
+          return 0;
+        }
+        case 13:
+        case 14:
+          // Pretend that the locking is successful. These are process-level locks,
+          // and Emscripten programs are a single process. If we supported linking a
+          // filesystem between programs, we'd need to do more here.
+          // See https://github.com/emscripten-core/emscripten/issues/23697
+          return 0;
+      }
+      return -28;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  }
+  
+
+  function ___syscall_fstat64(fd, buf) {
+  try {
+  
+      return SYSCALLS.writeStat(buf, FS.fstat(fd));
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  }
+  
+
+  var INT53_MAX = 9007199254740992;
+  
+  var INT53_MIN = -9007199254740992;
+  var bigintToI53Checked = (num) => (num < INT53_MIN || num > INT53_MAX) ? NaN : Number(num);
+  function ___syscall_ftruncate64(fd, length) {
+    length = bigintToI53Checked(length);
+  
+  
+  try {
+  
+      if (isNaN(length)) return -22;
+      FS.ftruncate(fd, length);
+      return 0;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  ;
+  }
+
+  
+  var stringToUTF8 = (str, outPtr, maxBytesToWrite) => {
+      return stringToUTF8Array(str, HEAPU8, outPtr, maxBytesToWrite);
+    };
+  function ___syscall_getcwd(buf, size) {
+  try {
+  
+      if (size === 0) return -28;
+      var cwd = FS.cwd();
+      var cwdLengthInBytes = lengthBytesUTF8(cwd) + 1;
+      if (size < cwdLengthInBytes) return -68;
+      stringToUTF8(cwd, buf, size);
+      return cwdLengthInBytes;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  }
+  
+
+  
+  function ___syscall_ioctl(fd, op, varargs) {
+  SYSCALLS.varargs = varargs;
+  try {
+  
+      var stream = SYSCALLS.getStreamFromFD(fd);
+      switch (op) {
+        case 21509: {
+          if (!stream.tty) return -59;
+          return 0;
+        }
+        case 21505: {
+          if (!stream.tty) return -59;
+          if (stream.tty.ops.ioctl_tcgets) {
+            var termios = stream.tty.ops.ioctl_tcgets(stream);
+            var argp = syscallGetVarargP();
+            HEAP32[((argp)>>2)] = termios.c_iflag || 0;
+            HEAP32[(((argp)+(4))>>2)] = termios.c_oflag || 0;
+            HEAP32[(((argp)+(8))>>2)] = termios.c_cflag || 0;
+            HEAP32[(((argp)+(12))>>2)] = termios.c_lflag || 0;
+            for (var i = 0; i < 32; i++) {
+              HEAP8[(argp + i)+(17)] = termios.c_cc[i] || 0;
+            }
+            return 0;
+          }
+          return 0;
+        }
+        case 21510:
+        case 21511:
+        case 21512: {
+          if (!stream.tty) return -59;
+          return 0; // no-op, not actually adjusting terminal settings
+        }
+        case 21506:
+        case 21507:
+        case 21508: {
+          if (!stream.tty) return -59;
+          if (stream.tty.ops.ioctl_tcsets) {
+            var argp = syscallGetVarargP();
+            var c_iflag = HEAP32[((argp)>>2)];
+            var c_oflag = HEAP32[(((argp)+(4))>>2)];
+            var c_cflag = HEAP32[(((argp)+(8))>>2)];
+            var c_lflag = HEAP32[(((argp)+(12))>>2)];
+            var c_cc = []
+            for (var i = 0; i < 32; i++) {
+              c_cc.push(HEAP8[(argp + i)+(17)]);
+            }
+            return stream.tty.ops.ioctl_tcsets(stream.tty, op, { c_iflag, c_oflag, c_cflag, c_lflag, c_cc });
+          }
+          return 0; // no-op, not actually adjusting terminal settings
+        }
+        case 21519: {
+          if (!stream.tty) return -59;
+          var argp = syscallGetVarargP();
+          HEAP32[((argp)>>2)] = 0;
+          return 0;
+        }
+        case 21520: {
+          if (!stream.tty) return -59;
+          return -28; // not supported
+        }
+        case 21537:
+        case 21531: {
+          var argp = syscallGetVarargP();
+          return FS.ioctl(stream, op, argp);
+        }
+        case 21523: {
+          // TODO: in theory we should write to the winsize struct that gets
+          // passed in, but for now musl doesn't read anything on it
+          if (!stream.tty) return -59;
+          if (stream.tty.ops.ioctl_tiocgwinsz) {
+            var winsize = stream.tty.ops.ioctl_tiocgwinsz(stream.tty);
+            var argp = syscallGetVarargP();
+            HEAP16[((argp)>>1)] = winsize[0];
+            HEAP16[(((argp)+(2))>>1)] = winsize[1];
+          }
+          return 0;
+        }
+        case 21524: {
+          // TODO: technically, this ioctl call should change the window size.
+          // but, since emscripten doesn't have any concept of a terminal window
+          // yet, we'll just silently throw it away as we do TIOCGWINSZ
+          if (!stream.tty) return -59;
+          return 0;
+        }
+        case 21515: {
+          if (!stream.tty) return -59;
+          return 0;
+        }
+        default: return -28; // not supported
+      }
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  }
+  
+
+  function ___syscall_lstat64(path, buf) {
+  try {
+  
+      path = SYSCALLS.getStr(path);
+      return SYSCALLS.writeStat(buf, FS.lstat(path));
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  }
+  
+
+  function ___syscall_mkdirat(dirfd, path, mode) {
+  try {
+  
+      path = SYSCALLS.getStr(path);
+      path = SYSCALLS.calculateAt(dirfd, path);
+      mode &= ~SYSCALLS.currentUmask;
+      FS.mkdir(path, mode, 0);
+      return 0;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  }
+  
+
+  function ___syscall_newfstatat(dirfd, path, buf, flags) {
+  try {
+  
+      path = SYSCALLS.getStr(path);
+      var nofollow = flags & 256;
+      var allowEmpty = flags & 4096;
+      flags = flags & (~6400);
+      path = SYSCALLS.calculateAt(dirfd, path, allowEmpty);
+      return SYSCALLS.writeStat(buf, nofollow ? FS.lstat(path) : FS.stat(path));
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  }
+  
+
+  
+  function ___syscall_openat(dirfd, path, flags, varargs) {
+  SYSCALLS.varargs = varargs;
+  try {
+  
+      path = SYSCALLS.getStr(path);
+      path = SYSCALLS.calculateAt(dirfd, path);
+      var mode = varargs ? syscallGetVarargI() : 0;
+      if (flags & 64) {
+        mode &= ~SYSCALLS.currentUmask;
+      }
+      return FS.open(path, flags, mode).fd;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  }
+  
+
+  
+  
+  function ___syscall_readlinkat(dirfd, path, buf, bufsize) {
+  try {
+  
+      path = SYSCALLS.getStr(path);
+      path = SYSCALLS.calculateAt(dirfd, path);
+      if (bufsize <= 0) return -28;
+      var ret = FS.readlink(path);
+  
+      var len = Math.min(bufsize, lengthBytesUTF8(ret));
+      var endChar = HEAP8[buf+len];
+      stringToUTF8(ret, buf, bufsize+1);
+      // readlink is one of the rare functions that write out a C string, but does never append a null to the output buffer(!)
+      // stringToUTF8() always appends a null byte, so restore the character under the null byte after the write.
+      HEAP8[buf+len] = endChar;
+      return len;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  }
+  
+
+  function ___syscall_rmdir(path) {
+  try {
+  
+      path = SYSCALLS.getStr(path);
+      FS.rmdir(path);
+      return 0;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  }
+  
+
+  function ___syscall_stat64(path, buf) {
+  try {
+  
+      path = SYSCALLS.getStr(path);
+      return SYSCALLS.writeStat(buf, FS.stat(path));
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  }
+  
+
+  function ___syscall_unlinkat(dirfd, path, flags) {
+  try {
+  
+      path = SYSCALLS.getStr(path);
+      path = SYSCALLS.calculateAt(dirfd, path);
+      if (!flags) {
+        FS.unlink(path);
+      } else if (flags === 512) {
+        FS.rmdir(path);
+      } else {
+        return -28;
+      }
+      return 0;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  }
+  
+
+  var readI53FromI64 = (ptr) => {
+      return HEAPU32[((ptr)>>2)] + HEAP32[(((ptr)+(4))>>2)] * 4294967296;
+    };
+  
+  function ___syscall_utimensat(dirfd, path, times, flags) {
+  try {
+  
+      var nofollow = flags & 256;
+      path = SYSCALLS.getStr(path);
+      path = SYSCALLS.calculateAt(dirfd, path, true);
+      var now = Date.now(), atime, mtime;
+      if (!times) {
+        atime = now;
+        mtime = now;
+      } else {
+        var seconds = readI53FromI64(times);
+        var nanoseconds = HEAP32[(((times)+(8))>>2)];
+        if (nanoseconds == 1073741823) {
+          atime = now;
+        } else if (nanoseconds == 1073741822) {
+          atime = null;
+        } else {
+          atime = (seconds*1000) + (nanoseconds/(1000*1000));
+        }
+        times += 16;
+        seconds = readI53FromI64(times);
+        nanoseconds = HEAP32[(((times)+(8))>>2)];
+        if (nanoseconds == 1073741823) {
+          mtime = now;
+        } else if (nanoseconds == 1073741822) {
+          mtime = null;
+        } else {
+          mtime = (seconds*1000) + (nanoseconds/(1000*1000));
+        }
+      }
+      // null here means UTIME_OMIT was passed. If both were set to UTIME_OMIT then
+      // we can skip the call completely.
+      if ((mtime ?? atime) !== null) {
+        FS.utime(path, atime, mtime, nofollow);
+      }
+      return 0;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  }
+  
+
+  var __abort_js = () =>
+      abort('');
+
+  var runtimeKeepaliveCounter = 0;
+  var __emscripten_runtime_keepalive_clear = () => {
+      noExitRuntime = false;
+      runtimeKeepaliveCounter = 0;
+    };
+
+  function __gmtime_js(time, tmPtr) {
+    time = bigintToI53Checked(time);
+  
+  
+      var date = new Date(time * 1000);
+      if (isNaN(date.getTime())) {
+        return 1;
+      }
+      HEAP32[((tmPtr)>>2)] = date.getUTCSeconds();
+      HEAP32[(((tmPtr)+(4))>>2)] = date.getUTCMinutes();
+      HEAP32[(((tmPtr)+(8))>>2)] = date.getUTCHours();
+      HEAP32[(((tmPtr)+(12))>>2)] = date.getUTCDate();
+      HEAP32[(((tmPtr)+(16))>>2)] = date.getUTCMonth();
+      HEAP32[(((tmPtr)+(20))>>2)] = date.getUTCFullYear()-1900;
+      HEAP32[(((tmPtr)+(24))>>2)] = date.getUTCDay();
+      var start = Date.UTC(date.getUTCFullYear(), 0, 1, 0, 0, 0, 0);
+      var yday = ((date.getTime() - start) / (1000 * 60 * 60 * 24))|0;
+      HEAP32[(((tmPtr)+(28))>>2)] = yday;
+      return 0;
+    ;
+  }
+
+  var isLeapYear = (year) => year%4 === 0 && (year%100 !== 0 || year%400 === 0);
+  
+  var MONTH_DAYS_LEAP_CUMULATIVE = [0,31,60,91,121,152,182,213,244,274,305,335];
+  
+  var MONTH_DAYS_REGULAR_CUMULATIVE = [0,31,59,90,120,151,181,212,243,273,304,334];
+  var ydayFromDate = (date) => {
+      var leap = isLeapYear(date.getFullYear());
+      var monthDaysCumulative = (leap ? MONTH_DAYS_LEAP_CUMULATIVE : MONTH_DAYS_REGULAR_CUMULATIVE);
+      var yday = monthDaysCumulative[date.getMonth()] + date.getDate() - 1; // -1 since it's days since Jan 1
+  
+      return yday;
+    };
+  
+  function __localtime_js(time, tmPtr) {
+    time = bigintToI53Checked(time);
+  
+  
+      var date = new Date(time*1000);
+      if (isNaN(date.getTime())) {
+        return 1;
+      }
+      HEAP32[((tmPtr)>>2)] = date.getSeconds();
+      HEAP32[(((tmPtr)+(4))>>2)] = date.getMinutes();
+      HEAP32[(((tmPtr)+(8))>>2)] = date.getHours();
+      HEAP32[(((tmPtr)+(12))>>2)] = date.getDate();
+      HEAP32[(((tmPtr)+(16))>>2)] = date.getMonth();
+      HEAP32[(((tmPtr)+(20))>>2)] = date.getFullYear()-1900;
+      HEAP32[(((tmPtr)+(24))>>2)] = date.getDay();
+  
+      var yday = ydayFromDate(date)|0;
+      HEAP32[(((tmPtr)+(28))>>2)] = yday;
+      HEAP32[(((tmPtr)+(36))>>2)] = -(date.getTimezoneOffset() * 60);
+  
+      // Attention: DST is in December in South, and some regions don't have DST at all.
+      var start = new Date(date.getFullYear(), 0, 1);
+      var summerOffset = new Date(date.getFullYear(), 6, 1).getTimezoneOffset();
+      var winterOffset = start.getTimezoneOffset();
+      var dst = (summerOffset != winterOffset && date.getTimezoneOffset() == Math.min(winterOffset, summerOffset))|0;
+      HEAP32[(((tmPtr)+(32))>>2)] = dst;
+      return 0;
+    ;
+  }
+
+  
+  var __mktime_js = function(tmPtr) {
+  
+  var ret = (() => { 
+      var date = new Date(HEAP32[(((tmPtr)+(20))>>2)] + 1900,
+                          HEAP32[(((tmPtr)+(16))>>2)],
+                          HEAP32[(((tmPtr)+(12))>>2)],
+                          HEAP32[(((tmPtr)+(8))>>2)],
+                          HEAP32[(((tmPtr)+(4))>>2)],
+                          HEAP32[((tmPtr)>>2)],
+                          0);
+      if (isNaN(date.getTime())) {
+        return -1;
+      }
+  
+      // There's an ambiguous hour when the time goes back; the tm_isdst field is
+      // used to disambiguate it.  Date() basically guesses, so we fix it up if it
+      // guessed wrong, or fill in tm_isdst with the guess if it's -1.
+      var dst = HEAP32[(((tmPtr)+(32))>>2)];
+      var guessedOffset = date.getTimezoneOffset();
+      var start = new Date(date.getFullYear(), 0, 1);
+      var summerOffset = new Date(date.getFullYear(), 6, 1).getTimezoneOffset();
+      var winterOffset = start.getTimezoneOffset();
+      var dstOffset = Math.min(winterOffset, summerOffset); // DST is in December in South
+      if (dst < 0) {
+        // Attention: some regions don't have DST at all.
+        dst = Number(summerOffset != winterOffset && dstOffset == guessedOffset);
+      } else if ((dst > 0) != (dstOffset == guessedOffset)) {
+        var nonDstOffset = Math.max(winterOffset, summerOffset);
+        var trueOffset = dst > 0 ? dstOffset : nonDstOffset;
+        // Don't try setMinutes(date.getMinutes() + ...) -- it's messed up.
+        date.setTime(date.getTime() + (trueOffset - guessedOffset)*60000);
+        if (isNaN(date.getTime())) {
+          return -1;
+        }
+      }
+  
+      HEAP32[(((tmPtr)+(32))>>2)] = dst;
+      HEAP32[(((tmPtr)+(24))>>2)] = date.getDay();
+      var yday = ydayFromDate(date)|0;
+      HEAP32[(((tmPtr)+(28))>>2)] = yday;
+      // To match expected behavior, update fields from date
+      HEAP32[((tmPtr)>>2)] = date.getSeconds();
+      HEAP32[(((tmPtr)+(4))>>2)] = date.getMinutes();
+      HEAP32[(((tmPtr)+(8))>>2)] = date.getHours();
+      HEAP32[(((tmPtr)+(12))>>2)] = date.getDate();
+      HEAP32[(((tmPtr)+(16))>>2)] = date.getMonth();
+      HEAP32[(((tmPtr)+(20))>>2)] = date.getYear();
+  
+      // Return time in seconds
+      return date.getTime() / 1000;
+     })();
+  return BigInt(ret);
+  };
+
+  
+  
+  
+  
+  
+  function __mmap_js(len, prot, flags, fd, offset, allocated, addr) {
+    offset = bigintToI53Checked(offset);
+  
+  
+  try {
+  
+      var stream = SYSCALLS.getStreamFromFD(fd);
+      var res = FS.mmap(stream, len, offset, prot, flags);
+      var ptr = res.ptr;
+      HEAP32[((allocated)>>2)] = res.allocated;
+      HEAPU32[((addr)>>2)] = ptr;
+      return 0;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  ;
+  }
+
+  
+  function __msync_js(addr, len, prot, flags, fd, offset) {
+    offset = bigintToI53Checked(offset);
+  
+  
+  try {
+  
+      if (isNaN(offset)) return -22;
+      SYSCALLS.doMsync(addr, SYSCALLS.getStreamFromFD(fd), len, flags, offset);
+      return 0;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  ;
+  }
+
+  
+  function __munmap_js(addr, len, prot, flags, fd, offset) {
+    offset = bigintToI53Checked(offset);
+  
+  
+  try {
+  
+      var stream = SYSCALLS.getStreamFromFD(fd);
+      if (prot & 2) {
+        SYSCALLS.doMsync(addr, stream, len, flags, offset);
+      }
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return -e.errno;
+  }
+  ;
+  }
+
+  var __timegm_js = function(tmPtr) {
+  
+  var ret = (() => { 
+      var time = Date.UTC(HEAP32[(((tmPtr)+(20))>>2)] + 1900,
+                          HEAP32[(((tmPtr)+(16))>>2)],
+                          HEAP32[(((tmPtr)+(12))>>2)],
+                          HEAP32[(((tmPtr)+(8))>>2)],
+                          HEAP32[(((tmPtr)+(4))>>2)],
+                          HEAP32[((tmPtr)>>2)],
+                          0);
+      var date = new Date(time);
+      if (isNaN(date.getTime())) {
+        return -1;
+      }
+  
+      HEAP32[(((tmPtr)+(24))>>2)] = date.getUTCDay();
+      var start = Date.UTC(date.getUTCFullYear(), 0, 1, 0, 0, 0, 0);
+      var yday = ((date.getTime() - start) / (1000 * 60 * 60 * 24))|0;
+      HEAP32[(((tmPtr)+(28))>>2)] = yday;
+  
+      return date.getTime() / 1000;
+     })();
+  return BigInt(ret);
+  };
+
+  var __tzset_js = (timezone, daylight, std_name, dst_name) => {
+      // TODO: Use (malleable) environment variables instead of system settings.
+      var currentYear = new Date().getFullYear();
+      var winter = new Date(currentYear, 0, 1);
+      var summer = new Date(currentYear, 6, 1);
+      var winterOffset = winter.getTimezoneOffset();
+      var summerOffset = summer.getTimezoneOffset();
+  
+      // Local standard timezone offset. Local standard time is not adjusted for
+      // daylight savings.  This code uses the fact that getTimezoneOffset returns
+      // a greater value during Standard Time versus Daylight Saving Time (DST).
+      // Thus it determines the expected output during Standard Time, and it
+      // compares whether the output of the given date the same (Standard) or less
+      // (DST).
+      var stdTimezoneOffset = Math.max(winterOffset, summerOffset);
+  
+      // timezone is specified as seconds west of UTC ("The external variable
+      // `timezone` shall be set to the difference, in seconds, between
+      // Coordinated Universal Time (UTC) and local standard time."), the same
+      // as returned by stdTimezoneOffset.
+      // See http://pubs.opengroup.org/onlinepubs/009695399/functions/tzset.html
+      HEAPU32[((timezone)>>2)] = stdTimezoneOffset * 60;
+  
+      HEAP32[((daylight)>>2)] = Number(winterOffset != summerOffset);
+  
+      var extractZone = (timezoneOffset) => {
+        // Why inverse sign?
+        // Read here https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/getTimezoneOffset
+        var sign = timezoneOffset >= 0 ? "-" : "+";
+  
+        var absOffset = Math.abs(timezoneOffset)
+        var hours = String(Math.floor(absOffset / 60)).padStart(2, "0");
+        var minutes = String(absOffset % 60).padStart(2, "0");
+  
+        return `UTC${sign}${hours}${minutes}`;
+      }
+  
+      var winterName = extractZone(winterOffset);
+      var summerName = extractZone(summerOffset);
+      if (summerOffset < winterOffset) {
+        // Northern hemisphere
+        stringToUTF8(winterName, std_name, 17);
+        stringToUTF8(summerName, dst_name, 17);
+      } else {
+        stringToUTF8(winterName, dst_name, 17);
+        stringToUTF8(summerName, std_name, 17);
+      }
+    };
+
+  var _emscripten_get_now = () => performance.now();
+  
+  var _emscripten_date_now = () => Date.now();
+  
+  var nowIsMonotonic = 1;
+  
+  var checkWasiClock = (clock_id) => clock_id >= 0 && clock_id <= 3;
+  
+  function _clock_time_get(clk_id, ignored_precision, ptime) {
+    ignored_precision = bigintToI53Checked(ignored_precision);
+  
+  
+      if (!checkWasiClock(clk_id)) {
+        return 28;
+      }
+      var now;
+      // all wasi clocks but realtime are monotonic
+      if (clk_id === 0) {
+        now = _emscripten_date_now();
+      } else if (nowIsMonotonic) {
+        now = _emscripten_get_now();
+      } else {
+        return 52;
+      }
+      // "now" is in ms, and wasi times are in ns.
+      var nsec = Math.round(now * 1000 * 1000);
+      HEAP64[((ptime)>>3)] = BigInt(nsec);
+      return 0;
+    ;
+  }
+
+
+  var getHeapMax = () =>
+      // Stay one Wasm page short of 4GB: while e.g. Chrome is able to allocate
+      // full 4GB Wasm memories, the size will wrap back to 0 bytes in Wasm side
+      // for any code that deals with heap sizes, which would require special
+      // casing all heap size related code to treat 0 specially.
+      2147483648;
+  var _emscripten_get_heap_max = () => getHeapMax();
+
+
+  
+  
+  var growMemory = (size) => {
+      var oldHeapSize = wasmMemory.buffer.byteLength;
+      var pages = ((size - oldHeapSize + 65535) / 65536) | 0;
+      try {
+        // round size grow request up to wasm page size (fixed 64KB per spec)
+        wasmMemory.grow(pages); // .grow() takes a delta compared to the previous size
+        updateMemoryViews();
+        return 1 /*success*/;
+      } catch(e) {
+      }
+      // implicit 0 return to save code size (caller will cast "undefined" into 0
+      // anyhow)
+    };
+  var _emscripten_resize_heap = (requestedSize) => {
+      var oldSize = HEAPU8.length;
+      // With CAN_ADDRESS_2GB or MEMORY64, pointers are already unsigned.
+      requestedSize >>>= 0;
+      // With multithreaded builds, races can happen (another thread might increase the size
+      // in between), so return a failure, and let the caller retry.
+  
+      // Memory resize rules:
+      // 1.  Always increase heap size to at least the requested size, rounded up
+      //     to next page multiple.
+      // 2a. If MEMORY_GROWTH_LINEAR_STEP == -1, excessively resize the heap
+      //     geometrically: increase the heap size according to
+      //     MEMORY_GROWTH_GEOMETRIC_STEP factor (default +20%), At most
+      //     overreserve by MEMORY_GROWTH_GEOMETRIC_CAP bytes (default 96MB).
+      // 2b. If MEMORY_GROWTH_LINEAR_STEP != -1, excessively resize the heap
+      //     linearly: increase the heap size by at least
+      //     MEMORY_GROWTH_LINEAR_STEP bytes.
+      // 3.  Max size for the heap is capped at 2048MB-WASM_PAGE_SIZE, or by
+      //     MAXIMUM_MEMORY, or by ASAN limit, depending on which is smallest
+      // 4.  If we were unable to allocate as much memory, it may be due to
+      //     over-eager decision to excessively reserve due to (3) above.
+      //     Hence if an allocation fails, cut down on the amount of excess
+      //     growth, in an attempt to succeed to perform a smaller allocation.
+  
+      // A limit is set for how much we can grow. We should not exceed that
+      // (the wasm binary specifies it, so if we tried, we'd fail anyhow).
+      var maxHeapSize = getHeapMax();
+      if (requestedSize > maxHeapSize) {
+        return false;
+      }
+  
+      // Loop through potential heap size increases. If we attempt a too eager
+      // reservation that fails, cut down on the attempted size and reserve a
+      // smaller bump instead. (max 3 times, chosen somewhat arbitrarily)
+      for (var cutDown = 1; cutDown <= 4; cutDown *= 2) {
+        var overGrownHeapSize = oldSize * (1 + 0.2 / cutDown); // ensure geometric growth
+        // but limit overreserving (default to capping at +96MB overgrowth at most)
+        overGrownHeapSize = Math.min(overGrownHeapSize, requestedSize + 100663296 );
+  
+        var newSize = Math.min(maxHeapSize, alignMemory(Math.max(requestedSize, overGrownHeapSize), 65536));
+  
+        var replacement = growMemory(newSize);
+        if (replacement) {
+  
+          return true;
+        }
+      }
+      return false;
+    };
+
+  var ENV = {
+  };
+  
+  var getExecutableName = () => thisProgram;
+  var getEnvStrings = () => {
+      if (!getEnvStrings.strings) {
+        // Default values.
+        var lang = (globalThis.navigator?.language ?? 'C').replace('-', '_') + '.UTF-8';
+        var env = {
+          'USER': 'web_user',
+          'LOGNAME': 'web_user',
+          'PATH': '/',
+          'PWD': '/',
+          'HOME': '/home/web_user',
+          'LANG': lang,
+          '_': getExecutableName()
+        };
+        // Apply the user-provided values, if any.
+        for (var x in ENV) {
+          // x is a key in ENV; if ENV[x] is undefined, that means it was
+          // explicitly set to be so. We allow user code to do that to
+          // force variables with default values to remain unset.
+          if (ENV[x] === undefined) delete env[x];
+          else env[x] = ENV[x];
+        }
+        var strings = [];
+        for (var x in env) {
+          strings.push(`${x}=${env[x]}`);
+        }
+        getEnvStrings.strings = strings;
+      }
+      return getEnvStrings.strings;
+    };
+  
+  var _environ_get = (__environ, environ_buf) => {
+      var bufSize = 0;
+      var envp = 0;
+      for (var string of getEnvStrings()) {
+        var ptr = environ_buf + bufSize;
+        HEAPU32[(((__environ)+(envp))>>2)] = ptr;
+        bufSize += stringToUTF8(string, ptr, Infinity) + 1;
+        envp += 4;
+      }
+      return 0;
+    };
+
+  
+  var _environ_sizes_get = (penviron_count, penviron_buf_size) => {
+      var strings = getEnvStrings();
+      HEAPU32[((penviron_count)>>2)] = strings.length;
+      var bufSize = 0;
+      for (var string of strings) {
+        bufSize += lengthBytesUTF8(string) + 1;
+      }
+      HEAPU32[((penviron_buf_size)>>2)] = bufSize;
+      return 0;
+    };
+
+  
+  var keepRuntimeAlive = () => noExitRuntime || runtimeKeepaliveCounter > 0;
+  var _proc_exit = (code) => {
+      EXITSTATUS = code;
+      if (!keepRuntimeAlive()) {
+        Module['onExit']?.(code);
+        ABORT = true;
+      }
+      quit_(code, new ExitStatus(code));
+    };
+  /** @param {boolean|number=} implicit */
+  var exitJS = (status, implicit) => {
+      EXITSTATUS = status;
+  
+      _proc_exit(status);
+    };
+  var _exit = exitJS;
+
+  function _fd_close(fd) {
+  try {
+  
+      var stream = SYSCALLS.getStreamFromFD(fd);
+      FS.close(stream);
+      return 0;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return e.errno;
+  }
+  }
+  
+
+  function _fd_fdstat_get(fd, pbuf) {
+  try {
+  
+      var rightsBase = 0;
+      var rightsInheriting = 0;
+      var flags = 0;
+      {
+        var stream = SYSCALLS.getStreamFromFD(fd);
+        // All character devices are terminals (other things a Linux system would
+        // assume is a character device, like the mouse, we have special APIs for).
+        var type = stream.tty ? 2 :
+                   FS.isDir(stream.mode) ? 3 :
+                   FS.isLink(stream.mode) ? 7 :
+                   4;
+      }
+      HEAP8[pbuf] = type;
+      HEAP16[(((pbuf)+(2))>>1)] = flags;
+      HEAP64[(((pbuf)+(8))>>3)] = BigInt(rightsBase);
+      HEAP64[(((pbuf)+(16))>>3)] = BigInt(rightsInheriting);
+      return 0;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return e.errno;
+  }
+  }
+  
+
+  /** @param {number=} offset */
+  var doReadv = (stream, iov, iovcnt, offset) => {
+      var ret = 0;
+      for (var i = 0; i < iovcnt; i++) {
+        var ptr = HEAPU32[((iov)>>2)];
+        var len = HEAPU32[(((iov)+(4))>>2)];
+        iov += 8;
+        try {
+          var curr = FS.read(stream, HEAP8, ptr, len, offset);
+        } catch (e) {
+          // On a non-blocking stream a subsequent read may would-block after we
+          // already gathered data. POSIX readv is a single gather-read: return
+          // what we have rather than failing the whole call.
+          if (ret > 0 && e instanceof FS.ErrnoError &&
+              (e.errno == 6 || e.errno == 6)) {
+            break;
+          }
+          throw e;
+        }
+        if (curr < 0) return -1;
+        ret += curr;
+        if (curr < len) break; // nothing more to read
+        if (typeof offset != 'undefined') {
+          offset += curr;
+        }
+      }
+      return ret;
+    };
+  
+  function _fd_read(fd, iov, iovcnt, pnum) {
+  try {
+  
+      var stream = SYSCALLS.getStreamFromFD(fd);
+      var num = doReadv(stream, iov, iovcnt);
+      HEAPU32[((pnum)>>2)] = num;
+      return 0;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return e.errno;
+  }
+  }
+  
+
+  
+  function _fd_seek(fd, offset, whence, newOffset) {
+    offset = bigintToI53Checked(offset);
+  
+  
+  try {
+  
+      if (isNaN(offset)) return 22;
+      var stream = SYSCALLS.getStreamFromFD(fd);
+      FS.llseek(stream, offset, whence);
+      HEAP64[((newOffset)>>3)] = BigInt(stream.position);
+      if (stream.getdents && offset === 0 && whence === 0) stream.getdents = null; // reset readdir state
+      return 0;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return e.errno;
+  }
+  ;
+  }
+
+  function _fd_sync(fd) {
+  try {
+  
+      var stream = SYSCALLS.getStreamFromFD(fd);
+      var rtn = stream.stream_ops?.fsync?.(stream);
+      return rtn;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return e.errno;
+  }
+  }
+  
+
+  /** @param {number=} offset */
+  var doWritev = (stream, iov, iovcnt, offset) => {
+      // Gather all iovecs into one contiguous buffer and issue a single
+      // FS.write, matching POSIX writev's single gather-write semantics (as
+      // __syscall_sendmsg already does). Per-iovec writes fragment a stream
+      // socket send into multiple segments, breaking stream byte semantics.
+      if (iovcnt == 1) {
+        // Single iovec: write directly from HEAP8, no gather buffer needed.
+        return FS.write(stream, HEAP8, HEAPU32[((iov)>>2)], HEAPU32[(((iov)+(4))>>2)], offset);
+      }
+      var total = 0;
+      for (var i = 0, p = iov; i < iovcnt; i++, p += 8) {
+        total += HEAPU32[(((p)+(4))>>2)];
+      }
+      var view = new Uint8Array(total);
+      var voff = 0;
+      for (var i = 0; i < iovcnt; i++, iov += 8) {
+        var ptr = HEAPU32[((iov)>>2)];
+        var len = HEAPU32[(((iov)+(4))>>2)];
+        view.set(HEAPU8.subarray(ptr, ptr + len), voff);
+        voff += len;
+      }
+      return FS.write(stream, view, 0, total, offset);
+    };
+  
+  function _fd_write(fd, iov, iovcnt, pnum) {
+  try {
+  
+      var stream = SYSCALLS.getStreamFromFD(fd);
+      var num = doWritev(stream, iov, iovcnt);
+      HEAPU32[((pnum)>>2)] = num;
+      return 0;
+    } catch (e) {
+    if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
+    return e.errno;
+  }
+  }
+  
+
+
+  var _random_get = (buffer, size) => randomFill(HEAPU8.subarray(buffer, buffer + size));
+
+  var getCFunc = (ident) => {
+      var func = Module['_' + ident]; // closure exported function
+      return func;
+    };
+  
+  var writeArrayToMemory = (array, buffer) => {
+      HEAP8.set(array, buffer);
+    };
+  
+  
+  
+  var stackAlloc = (sz) => __emscripten_stack_alloc(sz);
+  var stringToUTF8OnStack = (str) => {
+      var size = lengthBytesUTF8(str) + 1;
+      var ret = stackAlloc(size);
+      stringToUTF8(str, ret, size);
+      return ret;
+    };
+  
+  
+  
+  
+  
+    /**
+   * @param {string|null=} returnType
+   * @param {Array=} argTypes
+   * @param {Array=} args
+   * @param {Object=} opts
+   */
+  var ccall = (ident, returnType, argTypes, args, opts) => {
+      // For fast lookup of conversion functions
+      var toC = {
+        'string': (str) => {
+          var ret = 0;
+          if (str !== null && str !== undefined && str !== 0) { // null string
+            ret = stringToUTF8OnStack(str);
+          }
+          return ret;
+        },
+        'array': (arr) => {
+          var ret = stackAlloc(arr.length);
+          writeArrayToMemory(arr, ret);
+          return ret;
+        }
+      };
+  
+      function convertReturnValue(ret) {
+        if (returnType === 'string') {
+          return UTF8ToString(ret);
+        }
+        if (returnType === 'boolean') return Boolean(ret);
+        return ret;
+      }
+  
+      var func = getCFunc(ident);
+      var cArgs = [];
+      var stack = 0;
+      if (args) {
+        for (var i = 0; i < args.length; i++) {
+          var converter = toC[argTypes[i]];
+          if (converter) {
+            if (stack === 0) stack = stackSave();
+            cArgs[i] = converter(args[i]);
+          } else {
+            cArgs[i] = args[i];
+          }
+        }
+      }
+      var ret = func(...cArgs);
+      function onDone(ret) {
+        if (stack !== 0) stackRestore(stack);
+        return convertReturnValue(ret);
+      }
+  
+      ret = onDone(ret);
+      return ret;
+    };
+
+  
+  
+    /**
+   * @param {string=} returnType
+   * @param {Array=} argTypes
+   * @param {Object=} opts
+   */
+  var cwrap = (ident, returnType, argTypes, opts) => {
+      // When the function takes numbers and returns a number, we can just return
+      // the original function
+      var numericArgs = !argTypes || argTypes.every((type) => type === 'number' || type === 'boolean');
+      var numericRet = returnType !== 'string';
+      if (numericRet && numericArgs && !opts) {
+        return getCFunc(ident);
+      }
+      return (...args) => ccall(ident, returnType, argTypes, args, opts);
+    };
+
+
+
+
+
+
+  FS.createPreloadedFile = FS_createPreloadedFile;
+  FS.preloadFile = FS_preloadFile;
+  FS.staticInit();;
+// End JS library code
+
+// include: postlibrary.js
+// This file is included after the automatically-generated JS library code
+// but before the wasm module is created.
+
+{
+
+  // Begin ATMODULES hooks
+  if (Module['noExitRuntime']) noExitRuntime = Module['noExitRuntime'];
+
+if (Module['print']) out = Module['print'];
+if (Module['printErr']) err = Module['printErr'];
+  // End ATMODULES hooks
+
+  if (Module['arguments']) programArgs = Module['arguments'];
+  if (Module['thisProgram']) thisProgram = Module['thisProgram'];
+
+  var preInit = Module['preInit'];
+  if (preInit) {
+    if (typeof preInit == 'function') Module['preInit'] = preInit = [preInit];
+    // Written as a loop so that preInit functions that themselves add more
+    // preInit functions.  Is this actually needed?
+    while (preInit.length > 0) {
+      preInit.shift()();
+    }
+  }
+}
+
+// Begin runtime exports
+  Module['ccall'] = ccall;
+  Module['cwrap'] = cwrap;
+  Module['setValue'] = setValue;
+  Module['getValue'] = getValue;
+  Module['UTF8ToString'] = UTF8ToString;
+  Module['stringToUTF8'] = stringToUTF8;
+  Module['lengthBytesUTF8'] = lengthBytesUTF8;
+  // End runtime exports
+  // Begin JS library exports
+  Module['ExitStatus'] = ExitStatus;
+  Module['HEAP16'] = HEAP16;
+  Module['HEAP32'] = HEAP32;
+  Module['HEAP64'] = HEAP64;
+  Module['HEAP8'] = HEAP8;
+  Module['HEAPF32'] = HEAPF32;
+  Module['HEAPF64'] = HEAPF64;
+  Module['HEAPU16'] = HEAPU16;
+  Module['HEAPU32'] = HEAPU32;
+  Module['HEAPU64'] = HEAPU64;
+  Module['HEAPU8'] = HEAPU8;
+  Module['addOnPostRun'] = addOnPostRun;
+  Module['onPostRuns'] = onPostRuns;
+  Module['callRuntimeCallbacks'] = callRuntimeCallbacks;
+  Module['addOnPreRun'] = addOnPreRun;
+  Module['onPreRuns'] = onPreRuns;
+  Module['getValue'] = getValue;
+  Module['noExitRuntime'] = noExitRuntime;
+  Module['setValue'] = setValue;
+  Module['stackRestore'] = stackRestore;
+  Module['stackSave'] = stackSave;
+  Module['___assert_fail'] = ___assert_fail;
+  Module['UTF8ToString'] = UTF8ToString;
+  Module['UTF8ArrayToString'] = UTF8ArrayToString;
+  Module['UTF8Decoder'] = UTF8Decoder;
+  Module['findStringEnd'] = findStringEnd;
+  Module['___call_sighandler'] = ___call_sighandler;
+  Module['getWasmTableEntry'] = getWasmTableEntry;
+  Module['wasmTableMirror'] = wasmTableMirror;
+  Module['___syscall_chmod'] = ___syscall_chmod;
+  Module['SYSCALLS'] = SYSCALLS;
+  Module['PATH'] = PATH;
+  Module['FS'] = FS;
+  Module['randomFill'] = randomFill;
+  Module['initRandomFill'] = initRandomFill;
+  Module['PATH_FS'] = PATH_FS;
+  Module['TTY'] = TTY;
+  Module['FS_stdin_getChar'] = FS_stdin_getChar;
+  Module['FS_stdin_getChar_buffer'] = FS_stdin_getChar_buffer;
+  Module['intArrayFromString'] = intArrayFromString;
+  Module['lengthBytesUTF8'] = lengthBytesUTF8;
+  Module['stringToUTF8Array'] = stringToUTF8Array;
+  Module['MEMFS'] = MEMFS;
+  Module['mmapAlloc'] = mmapAlloc;
+  Module['zeroMemory'] = zeroMemory;
+  Module['alignMemory'] = alignMemory;
+  Module['FS_modeStringToFlags'] = FS_modeStringToFlags;
+  Module['FS_fileDataToTypedArray'] = FS_fileDataToTypedArray;
+  Module['FS_getMode'] = FS_getMode;
+  Module['FS_createPreloadedFile'] = FS_createPreloadedFile;
+  Module['FS_preloadFile'] = FS_preloadFile;
+  Module['asyncLoad'] = asyncLoad;
+  Module['FS_createDataFile'] = FS_createDataFile;
+  Module['getUniqueRunDependency'] = getUniqueRunDependency;
+  Module['addRunDependency'] = addRunDependency;
+  Module['runDependencies'] = runDependencies;
+  Module['resolveRunDependencies'] = resolveRunDependencies;
+  Module['dependenciesPromise'] = dependenciesPromise;
+  Module['removeRunDependency'] = removeRunDependency;
+  Module['dependenciesPromiseResolve'] = dependenciesPromiseResolve;
+  Module['FS_handledByPreloadPlugin'] = FS_handledByPreloadPlugin;
+  Module['preloadPlugins'] = preloadPlugins;
+  Module['___syscall_faccessat'] = ___syscall_faccessat;
+  Module['___syscall_fchmod'] = ___syscall_fchmod;
+  Module['___syscall_fchown32'] = ___syscall_fchown32;
+  Module['___syscall_fcntl64'] = ___syscall_fcntl64;
+  Module['syscallGetVarargP'] = syscallGetVarargP;
+  Module['syscallGetVarargI'] = syscallGetVarargI;
+  Module['___syscall_fstat64'] = ___syscall_fstat64;
+  Module['___syscall_ftruncate64'] = ___syscall_ftruncate64;
+  Module['bigintToI53Checked'] = bigintToI53Checked;
+  Module['INT53_MAX'] = INT53_MAX;
+  Module['INT53_MIN'] = INT53_MIN;
+  Module['___syscall_getcwd'] = ___syscall_getcwd;
+  Module['stringToUTF8'] = stringToUTF8;
+  Module['___syscall_ioctl'] = ___syscall_ioctl;
+  Module['___syscall_lstat64'] = ___syscall_lstat64;
+  Module['___syscall_mkdirat'] = ___syscall_mkdirat;
+  Module['___syscall_newfstatat'] = ___syscall_newfstatat;
+  Module['___syscall_openat'] = ___syscall_openat;
+  Module['___syscall_readlinkat'] = ___syscall_readlinkat;
+  Module['___syscall_rmdir'] = ___syscall_rmdir;
+  Module['___syscall_stat64'] = ___syscall_stat64;
+  Module['___syscall_unlinkat'] = ___syscall_unlinkat;
+  Module['___syscall_utimensat'] = ___syscall_utimensat;
+  Module['readI53FromI64'] = readI53FromI64;
+  Module['__abort_js'] = __abort_js;
+  Module['__emscripten_runtime_keepalive_clear'] = __emscripten_runtime_keepalive_clear;
+  Module['runtimeKeepaliveCounter'] = runtimeKeepaliveCounter;
+  Module['__gmtime_js'] = __gmtime_js;
+  Module['__localtime_js'] = __localtime_js;
+  Module['ydayFromDate'] = ydayFromDate;
+  Module['isLeapYear'] = isLeapYear;
+  Module['MONTH_DAYS_LEAP_CUMULATIVE'] = MONTH_DAYS_LEAP_CUMULATIVE;
+  Module['MONTH_DAYS_REGULAR_CUMULATIVE'] = MONTH_DAYS_REGULAR_CUMULATIVE;
+  Module['__mktime_js'] = __mktime_js;
+  Module['__mmap_js'] = __mmap_js;
+  Module['__msync_js'] = __msync_js;
+  Module['__munmap_js'] = __munmap_js;
+  Module['__timegm_js'] = __timegm_js;
+  Module['__tzset_js'] = __tzset_js;
+  Module['_clock_time_get'] = _clock_time_get;
+  Module['_emscripten_get_now'] = _emscripten_get_now;
+  Module['_emscripten_date_now'] = _emscripten_date_now;
+  Module['nowIsMonotonic'] = nowIsMonotonic;
+  Module['checkWasiClock'] = checkWasiClock;
+  Module['_emscripten_get_heap_max'] = _emscripten_get_heap_max;
+  Module['getHeapMax'] = getHeapMax;
+  Module['_emscripten_resize_heap'] = _emscripten_resize_heap;
+  Module['growMemory'] = growMemory;
+  Module['_environ_get'] = _environ_get;
+  Module['getEnvStrings'] = getEnvStrings;
+  Module['ENV'] = ENV;
+  Module['getExecutableName'] = getExecutableName;
+  Module['_environ_sizes_get'] = _environ_sizes_get;
+  Module['_exit'] = _exit;
+  Module['exitJS'] = exitJS;
+  Module['_proc_exit'] = _proc_exit;
+  Module['keepRuntimeAlive'] = keepRuntimeAlive;
+  Module['_fd_close'] = _fd_close;
+  Module['_fd_fdstat_get'] = _fd_fdstat_get;
+  Module['_fd_read'] = _fd_read;
+  Module['doReadv'] = doReadv;
+  Module['_fd_seek'] = _fd_seek;
+  Module['_fd_sync'] = _fd_sync;
+  Module['_fd_write'] = _fd_write;
+  Module['doWritev'] = doWritev;
+  Module['_random_get'] = _random_get;
+  Module['ccall'] = ccall;
+  Module['getCFunc'] = getCFunc;
+  Module['writeArrayToMemory'] = writeArrayToMemory;
+  Module['stringToUTF8OnStack'] = stringToUTF8OnStack;
+  Module['stackAlloc'] = stackAlloc;
+  Module['cwrap'] = cwrap;
+  // End JS library exports
+
+// end include: postlibrary.js
+
+
+// Imports from the Wasm binary.
+var _sqlite3_status64,
+  _sqlite3_log,
+  _sqlite3_mutex_enter,
+  _sqlite3_mutex_leave,
+  _sqlite3_status,
+  _sqlite3_db_status64,
+  _sqlite3_msize,
+  _sqlite3_db_status,
+  _sqlite3_vfs_find,
+  _sqlite3_initialize,
+  _strcmp,
+  _sqlite3_config,
+  _sqlcipher_init_memmethods,
+  _strlen,
+  _getenv,
+  _sqlcipher_extra_init,
+  _sqlite3_vfs_register,
+  _sqlite3_vfs_unregister,
+  _sqlite3_mutex_alloc,
+  _sqlite3_mutex_free,
+  _sqlite3_mutex_try,
+  _sqlite3_release_memory,
+  _sqlite3_memory_alarm,
+  _sqlite3_soft_heap_limit64,
+  _sqlite3_memory_used,
+  _sqlite3_soft_heap_limit,
+  _sqlite3_hard_heap_limit64,
+  _sqlite3_memory_highwater,
+  _sqlite3_malloc,
+  _sqlite3_malloc64,
+  _sqlite3_free,
+  _sqlite3_realloc,
+  _sqlite3_realloc64,
+  _sqlite3_str_vappendf,
+  _strchr,
+  _sqlite3_str_appendf,
+  ___multi3,
+  _sqlite3_str_append,
+  _sqlite3_str_appendchar,
+  _sqlite3_str_appendall,
+  _sqlite3_str_finish,
+  _sqlite3_str_errcode,
+  _sqlite3_str_length,
+  _sqlite3_str_truncate,
+  _sqlite3_str_value,
+  _sqlite3_str_reset,
+  _sqlite3_str_free,
+  _sqlite3_str_new,
+  _sqlite3_vmprintf,
+  _sqlite3_mprintf,
+  _sqlite3_vsnprintf,
+  _sqlite3_snprintf,
+  _sqlite3_randomness,
+  _sqlite3_stricmp,
+  _sqlite3_strnicmp,
+  _sqlite3_os_init,
+  _getpid,
+  _sqlite3_uri_parameter,
+  ___errno_location,
+  _fsync,
+  _dlopen,
+  _dlerror,
+  _dlsym,
+  _dlclose,
+  _time,
+  _nanosleep,
+  _gettimeofday,
+  _sqlite3_os_end,
+  _sqlite3_serialize,
+  _sqlite3_file_control,
+  _sqlite3_step,
+  _sqlite3_column_int64,
+  _sqlite3_reset,
+  _sqlite3_exec,
+  _sqlite3_column_int,
+  _sqlite3_finalize,
+  _sqlite3_prepare_v2,
+  _sqlite3_column_text,
+  _sqlite3_column_type,
+  _sqlite3_errmsg,
+  _sqlite3_deserialize,
+  _sqlite3_database_file_object,
+  _sqlcipherPagerSetCodec,
+  _sqlcipherPagerGetCodec,
+  _sqlcipherPagerCodec,
+  _sqlite3pager_is_sj_pgno,
+  _sqlite3pager_error,
+  _sqlite3pager_reset,
+  _sqlite3_enable_shared_cache,
+  _sqlite3_backup_init,
+  _sqlcipherCodecGetKey,
+  _sqlcipher_free,
+  _sqlcipher_log,
+  _sqlcipher_malloc,
+  _sqlcipher_find_db_index,
+  _xoshiro_next,
+  _sqlite3_backup_step,
+  _sqlite3_backup_finish,
+  _sqlite3_backup_remaining,
+  _sqlite3_backup_pagecount,
+  _sqlite3_expired,
+  _sqlite3_clear_bindings,
+  _sqlite3_value_blob,
+  _sqlite3_value_text,
+  _sqlite3_value_bytes,
+  _sqlite3_value_bytes16,
+  _sqlite3_value_double,
+  _sqlite3_value_int,
+  _sqlite3_value_int64,
+  _sqlite3_value_subtype,
+  _sqlite3_value_pointer,
+  _sqlite3_value_text16,
+  _sqlite3_value_text16be,
+  _sqlite3_value_text16le,
+  _sqlite3_value_type,
+  _sqlite3_value_encoding,
+  _sqlite3_value_nochange,
+  _sqlite3_value_frombind,
+  _sqlite3_value_dup,
+  _sqlite3_value_free,
+  _sqlite3_result_blob,
+  _sqlite3_result_error_nomem,
+  _sqlite3_result_blob64,
+  _sqlite3_result_double,
+  _sqlite3_result_error,
+  _sqlite3_result_error16,
+  _sqlite3_result_int,
+  _sqlite3_result_int64,
+  _sqlite3_result_null,
+  _sqlite3_result_pointer,
+  _sqlite3_result_subtype,
+  _sqlite3_result_text,
+  _sqlite3_result_text64,
+  _sqlite3_result_text16,
+  _sqlite3_result_text16be,
+  _sqlite3_result_text16le,
+  _sqlite3_result_value,
+  _sqlite3_result_error_toobig,
+  _sqlite3_result_zeroblob,
+  _sqlite3_result_zeroblob64,
+  _sqlite3_result_error_code,
+  _sqlite3_user_data,
+  _sqlite3_context_db_handle,
+  _sqlite3_vtab_nochange,
+  _sqlite3_vtab_in_first,
+  _sqlite3_vtab_in_next,
+  _sqlite3_aggregate_context,
+  _sqlite3_get_auxdata,
+  _sqlite3_set_auxdata,
+  _sqlite3_aggregate_count,
+  _sqlite3_column_count,
+  _sqlite3_data_count,
+  _sqlite3_column_blob,
+  _sqlite3_column_bytes,
+  _sqlite3_column_bytes16,
+  _sqlite3_column_double,
+  _sqlite3_column_value,
+  _sqlite3_column_text16,
+  _sqlite3_column_name,
+  _sqlite3_column_name16,
+  _sqlite3_column_decltype,
+  _sqlite3_column_decltype16,
+  _sqlite3_bind_blob,
+  _sqlite3_bind_blob64,
+  _sqlite3_bind_double,
+  _sqlite3_bind_int,
+  _sqlite3_bind_int64,
+  _sqlite3_bind_null,
+  _sqlite3_bind_pointer,
+  _sqlite3_bind_text,
+  _sqlite3_bind_text64,
+  _sqlite3_bind_text16,
+  _sqlite3_bind_value,
+  _sqlite3_bind_zeroblob,
+  _sqlite3_bind_zeroblob64,
+  _sqlite3_bind_parameter_count,
+  _sqlite3_bind_parameter_name,
+  _sqlite3_bind_parameter_index,
+  _strncmp,
+  _sqlite3_transfer_bindings,
+  _sqlite3_db_handle,
+  _sqlite3_stmt_readonly,
+  _sqlite3_stmt_isexplain,
+  _sqlite3_stmt_explain,
+  _sqlite3_stmt_busy,
+  _sqlite3_next_stmt,
+  _sqlite3_stmt_status,
+  _sqlite3_sql,
+  _sqlite3_expanded_sql,
+  _sqlite3_value_numeric_type,
+  _sqlite3_blob_open,
+  _sqlite3_blob_close,
+  _sqlite3_blob_read,
+  _sqlite3_blob_write,
+  _sqlite3_blob_bytes,
+  _sqlite3_blob_reopen,
+  _sqlcipher_mutex,
+  _sqlcipher_extra_shutdown,
+  _atexit,
+  _sqlcipher_leancrypto_setup,
+  _sqlcipher_register_provider,
+  _sqlite3_auto_extension,
+  _localtime_r,
+  _strftime,
+  _fiprintf,
+  _sqlcipher_get_provider,
+  _sqlcipher_memset,
+  _sqlcipher_ismemset,
+  _sqlcipher_memcmp,
+  _sqlcipher_version,
+  _sqlcipher_codec_pragma,
+  _fopen,
+  _atoi,
+  _fclose,
+  _sqlcipherCodecAttach,
+  _sqlite3_activate_see,
+  _sqlite3_key,
+  _sqlite3_key_v2,
+  _sqlite3_rekey,
+  _sqlite3_rekey_v2,
+  _sqlite3_set_authorizer,
+  _sqlite3_strglob,
+  _strcspn,
+  _sqlite3_strlike,
+  _sqlite3_load_extension,
+  _sqlite3_enable_load_extension,
+  _sqlite3_cancel_auto_extension,
+  _sqlite3_reset_auto_extension,
+  _sqlite3_prepare,
+  _sqlite3_prepare_v3,
+  _sqlite3_prepare16,
+  _sqlite3_prepare16_v2,
+  _sqlite3_prepare16_v3,
+  _sqlite3_get_table,
+  _sqlite3_free_table,
+  _sqlite3_create_module,
+  _sqlite3_create_module_v2,
+  _sqlite3_drop_modules,
+  _sqlite3_declare_vtab,
+  _sqlite3_vtab_on_conflict,
+  _sqlite3_vtab_config,
+  _sqlite3_vtab_collation,
+  _sqlite3_vtab_in,
+  _sqlite3_vtab_rhs_value,
+  _sqlite3_vtab_distinct,
+  _sqlite3_keyword_name,
+  _sqlite3_keyword_count,
+  _sqlite3_keyword_check,
+  _sqlite3_complete,
+  _sqlite3_complete16,
+  _sqlite3_libversion,
+  _sqlite3_libversion_number,
+  _sqlite3_threadsafe,
+  _sqlite3_shutdown,
+  _sqlite3_db_mutex,
+  _sqlite3_db_release_memory,
+  _sqlite3_db_cacheflush,
+  _sqlite3_db_config,
+  _sqlite3_last_insert_rowid,
+  _sqlite3_set_last_insert_rowid,
+  _sqlite3_changes64,
+  _sqlite3_changes,
+  _sqlite3_total_changes64,
+  _sqlite3_total_changes,
+  _sqlite3_txn_state,
+  _sqlite3_close,
+  _sqlite3_close_v2,
+  _sqlite3_busy_handler,
+  _sqlite3_progress_handler,
+  _sqlite3_busy_timeout,
+  _sqlite3_setlk_timeout,
+  _sqlite3_interrupt,
+  _sqlite3_is_interrupted,
+  _sqlite3_create_function,
+  _sqlite3_create_function_v2,
+  _sqlite3_create_window_function,
+  _sqlite3_create_function16,
+  _sqlite3_overload_function,
+  _sqlite3_trace,
+  _sqlite3_trace_v2,
+  _sqlite3_profile,
+  _sqlite3_commit_hook,
+  _sqlite3_update_hook,
+  _sqlite3_rollback_hook,
+  _sqlite3_autovacuum_pages,
+  _sqlite3_wal_autocheckpoint,
+  _sqlite3_wal_hook,
+  _sqlite3_wal_checkpoint_v2,
+  _sqlite3_wal_checkpoint,
+  _sqlite3_set_errmsg,
+  _sqlite3_error_offset,
+  _sqlite3_errmsg16,
+  _sqlite3_errcode,
+  _sqlite3_extended_errcode,
+  _sqlite3_system_errno,
+  _sqlite3_errstr,
+  _sqlite3_limit,
+  _sqlite3_open,
+  _sqlite3_open_v2,
+  _sqlite3_open16,
+  _sqlite3_create_collation,
+  _sqlite3_create_collation_v2,
+  _sqlite3_create_collation16,
+  _sqlite3_collation_needed,
+  _sqlite3_collation_needed16,
+  _sqlite3_get_clientdata,
+  _sqlite3_set_clientdata,
+  _sqlite3_global_recover,
+  _sqlite3_get_autocommit,
+  _sqlite3_thread_cleanup,
+  _sqlite3_table_column_metadata,
+  _sqlite3_sleep,
+  _sqlite3_extended_result_codes,
+  _sqlite3_test_control,
+  _sqlite3_create_filename,
+  _sqlite3_free_filename,
+  _sqlite3_uri_key,
+  _sqlite3_uri_boolean,
+  _sqlite3_uri_int64,
+  _strspn,
+  _sqlite3_filename_database,
+  _sqlite3_filename_journal,
+  _sqlite3_filename_wal,
+  _sqlite3_db_name,
+  _sqlite3_db_filename,
+  _sqlite3_db_readonly,
+  _sqlite3_compileoption_used,
+  _sqlite3_compileoption_get,
+  _sqlite3_sourceid,
+  _pthread_mutexattr_init,
+  _pthread_mutexattr_settype,
+  _pthread_mutex_init,
+  _pthread_mutexattr_destroy,
+  _pthread_mutex_destroy,
+  _pthread_mutex_lock,
+  _pthread_mutex_trylock,
+  _pthread_mutex_unlock,
+  _lseek,
+  _open,
+  _sysconf,
+  _utimes,
+  _pthread_join,
+  _memcmp,
+  _pthread_create,
+  _mlock,
+  _munlock,
+  ___small_fprintf,
+  _memchr,
+  _strrchr,
+  _localtime,
+  _malloc,
+  _free,
+  _realloc,
+  _log,
+  ___cxa_atexit,
+  _close,
+  _access,
+  _getcwd,
+  _stat,
+  _fstat,
+  _ftruncate,
+  _fcntl,
+  _read,
+  _write,
+  _fchmod,
+  _unlink,
+  _mkdir,
+  _rmdir,
+  _fchown,
+  _geteuid,
+  _mmap,
+  _munmap,
+  _readlink,
+  _lstat,
+  _getentropy,
+  _lc_hkdf_alloc,
+  _lc_hkdf_extract,
+  _lc_hkdf_zero_free,
+  _lc_hkdf_expand,
+  _lc_ak_alloc_taglen,
+  _lc_aead_setkey,
+  _lc_aead_zero_free,
+  _lc_aead_encrypt,
+  _lc_aead_decrypt,
+  _get_full_entropy,
+  _seeded_rng_noise_fini,
+  _seeded_rng_noise_init,
+  _seeded_rng_status,
+  _lc_memcpy_secure,
+  _lc_wasm_aead_encrypt,
+  _lc_wasm_aead_decrypt,
+  _lc_wasm_hkdf_sha3_512,
+  _lc_wasm_key_size,
+  _lc_wasm_nonce_size,
+  _lc_wasm_tag_size,
+  _lc_bike_5_bike_decode,
+  _lc_bike_5_bit_slice_full_subtract_port,
+  _lc_bike_5_bit_sliced_adder_port,
+  _lc_bike_5_dup_port,
+  _lc_bike_5_rotate_right_port,
+  _lc_bike_5_gf2x_mod_mul,
+  _iprintf,
+  ___stack_chk_fail,
+  _lc_bike_5_gf2x_mod_inv,
+  _lc_bike_5_gf2x_red_port,
+  _lc_bike_5_k_sqr_port,
+  _lc_bike_5_karatzuba_add3_port,
+  _lc_bike_5_karatzuba_add2_port,
+  _lc_bike_5_karatzuba_add1_port,
+  _lc_bike_5_gf2x_sqr_port,
+  _lc_bike_5_gf2x_mul_base_port,
+  _lc_bike_5_gf2x_mod_mul_with_ctx,
+  _lc_bike_5_keypair,
+  _lc_rng_check,
+  _lc_rng_generate,
+  _lc_bike_5_generate_secret_key,
+  _lc_bike_5_keypair_from_seed,
+  _lc_bike_5_enc_internal,
+  _lc_bike_5_generate_error_vector,
+  _lc_hash_init,
+  _lc_hash_update,
+  _lc_hash_final,
+  _lc_hash_zero,
+  _lc_bike_5_enc,
+  _lc_bike_5_enc_kdf,
+  _lc_kmac,
+  _lc_bike_5_dec,
+  _lc_memcmp_secure,
+  _lc_bike_5_dec_kdf,
+  _lc_hash_set_digestsize,
+  _lc_bike_5_secure_set_bits_port,
+  _lc_bike_3_bike_decode,
+  _lc_bike_3_bit_slice_full_subtract_port,
+  _lc_bike_3_bit_sliced_adder_port,
+  _lc_bike_3_dup_port,
+  _lc_bike_3_rotate_right_port,
+  _lc_bike_3_gf2x_mod_mul,
+  _lc_bike_3_gf2x_mod_inv,
+  _lc_bike_3_gf2x_red_port,
+  _lc_bike_3_k_sqr_port,
+  _lc_bike_3_karatzuba_add3_port,
+  _lc_bike_3_karatzuba_add2_port,
+  _lc_bike_3_karatzuba_add1_port,
+  _lc_bike_3_gf2x_sqr_port,
+  _lc_bike_3_gf2x_mul_base_port,
+  _lc_bike_3_gf2x_mod_mul_with_ctx,
+  _lc_bike_3_keypair,
+  _lc_bike_3_generate_secret_key,
+  _lc_bike_3_keypair_from_seed,
+  _lc_bike_3_enc_internal,
+  _lc_bike_3_generate_error_vector,
+  _lc_bike_3_enc,
+  _lc_bike_3_enc_kdf,
+  _lc_bike_3_dec,
+  _lc_bike_3_dec_kdf,
+  _lc_bike_3_secure_set_bits_port,
+  _lc_bike_1_bike_decode,
+  _lc_bike_1_bit_slice_full_subtract_port,
+  _lc_bike_1_bit_sliced_adder_port,
+  _lc_bike_1_dup_port,
+  _lc_bike_1_rotate_right_port,
+  _lc_bike_1_gf2x_mod_mul,
+  _lc_bike_1_gf2x_mod_inv,
+  _lc_bike_1_gf2x_red_port,
+  _lc_bike_1_k_sqr_port,
+  _lc_bike_1_karatzuba_add3_port,
+  _lc_bike_1_karatzuba_add2_port,
+  _lc_bike_1_karatzuba_add1_port,
+  _lc_bike_1_gf2x_sqr_port,
+  _lc_bike_1_gf2x_mul_base_port,
+  _lc_bike_1_gf2x_mod_mul_with_ctx,
+  _lc_bike_1_keypair,
+  _lc_bike_1_generate_secret_key,
+  _lc_bike_1_keypair_from_seed,
+  _lc_bike_1_enc_internal,
+  _lc_bike_1_generate_error_vector,
+  _lc_bike_1_enc,
+  _lc_bike_1_enc_kdf,
+  _lc_bike_1_dec,
+  _lc_bike_1_dec_kdf,
+  _lc_bike_1_secure_set_bits_port,
+  _lc_hqc_256_code_encode,
+  _lc_hqc_256_reed_solomon_encode,
+  _lc_hqc_256_reed_muller_encode,
+  _lc_hqc_256_code_decode,
+  _lc_hqc_256_reed_muller_decode,
+  _lc_hqc_256_reed_solomon_decode,
+  _lc_hqc_256_fft,
+  _lc_hqc_256_gf_square,
+  _lc_hqc_256_gf_mul,
+  _lc_hqc_256_gf_inverse,
+  _lc_hqc_256_fft_retrieve_error_poly,
+  _lc_hqc_256_vect_mul,
+  _lc_hqc_256_hqc_pke_keygen,
+  _seedexpander_init,
+  _lc_hqc_256_vect_set_random_fixed_weight,
+  _lc_hqc_256_vect_set_random,
+  _lc_hqc_256_vect_add,
+  _lc_hqc_256_hqc_public_key_to_string,
+  _lc_hqc_256_hqc_secret_key_to_string,
+  _lc_hqc_256_hqc_pke_encrypt,
+  _lc_hqc_256_hqc_public_key_from_string,
+  _lc_hqc_256_vect_resize,
+  _lc_hqc_256_hqc_pke_decrypt,
+  _lc_hqc_256_hqc_secret_key_from_string,
+  _lc_hqc_256_keypair_c,
+  _fips140_mode_enabled,
+  _lc_hqc_256_enc,
+  _lc_hqc_256_dec,
+  _alg_status_set_result,
+  _lc_hqc_256_keypair_from_seed_c,
+  _lc_hqc_256_enc_internal_c,
+  _lc_hqc_256_store8_arr,
+  _lc_hqc_256_hqc_ciphertext_to_string,
+  _lc_hqc_256_enc_c,
+  _lc_hqc_256_enc_kdf_c,
+  _lc_hqc_256_dec_c,
+  _lc_hqc_256_hqc_ciphertext_from_string,
+  _lc_hqc_256_vect_compare,
+  _lc_hqc_256_dec_kdf_c,
+  _lc_hqc_256_hqc_kem_keygen_selftest,
+  _alg_status_get_result,
+  _lc_rng_zero,
+  _lc_rng_seed,
+  _lc_compare_selftest,
+  _lc_hqc_256_hqc_kem_enc_selftest,
+  _lc_hqc_256_hqc_kem_dec_selftest,
+  _lc_hqc_256_load8_arr,
+  _seedexpander,
+  _lc_hqc_256_keypair,
+  _lc_hqc_256_keypair_from_seed,
+  _lc_hqc_256_enc_internal,
+  _lc_hqc_256_enc_kdf,
+  _lc_hqc_256_dec_kdf,
+  _lc_hqc_192_code_encode,
+  _lc_hqc_192_reed_solomon_encode,
+  _lc_hqc_192_reed_muller_encode,
+  _lc_hqc_192_code_decode,
+  _lc_hqc_192_reed_muller_decode,
+  _lc_hqc_192_reed_solomon_decode,
+  _lc_hqc_192_fft,
+  _lc_hqc_192_gf_square,
+  _lc_hqc_192_gf_mul,
+  _lc_hqc_192_gf_inverse,
+  _lc_hqc_192_fft_retrieve_error_poly,
+  _lc_hqc_192_vect_mul,
+  _lc_hqc_192_hqc_pke_keygen,
+  _lc_hqc_192_vect_set_random_fixed_weight,
+  _lc_hqc_192_vect_set_random,
+  _lc_hqc_192_vect_add,
+  _lc_hqc_192_hqc_public_key_to_string,
+  _lc_hqc_192_hqc_secret_key_to_string,
+  _lc_hqc_192_hqc_pke_encrypt,
+  _lc_hqc_192_hqc_public_key_from_string,
+  _lc_hqc_192_vect_resize,
+  _lc_hqc_192_hqc_pke_decrypt,
+  _lc_hqc_192_hqc_secret_key_from_string,
+  _lc_hqc_192_keypair_c,
+  _lc_hqc_192_enc,
+  _lc_hqc_192_dec,
+  _lc_hqc_192_keypair_from_seed_c,
+  _lc_hqc_192_enc_internal_c,
+  _lc_hqc_192_store8_arr,
+  _lc_hqc_192_hqc_ciphertext_to_string,
+  _lc_hqc_192_enc_c,
+  _lc_hqc_192_enc_kdf_c,
+  _lc_hqc_192_dec_c,
+  _lc_hqc_192_hqc_ciphertext_from_string,
+  _lc_hqc_192_vect_compare,
+  _lc_hqc_192_dec_kdf_c,
+  _lc_hqc_192_hqc_kem_keygen_selftest,
+  _lc_hqc_192_hqc_kem_enc_selftest,
+  _lc_hqc_192_hqc_kem_dec_selftest,
+  _lc_hqc_192_load8_arr,
+  _lc_hqc_192_keypair,
+  _lc_hqc_192_keypair_from_seed,
+  _lc_hqc_192_enc_internal,
+  _lc_hqc_192_enc_kdf,
+  _lc_hqc_192_dec_kdf,
+  _lc_hqc_128_code_encode,
+  _lc_hqc_128_reed_solomon_encode,
+  _lc_hqc_128_reed_muller_encode,
+  _lc_hqc_128_code_decode,
+  _lc_hqc_128_reed_muller_decode,
+  _lc_hqc_128_reed_solomon_decode,
+  _lc_hqc_128_fft,
+  _lc_hqc_128_gf_square,
+  _lc_hqc_128_gf_mul,
+  _lc_hqc_128_gf_inverse,
+  _lc_hqc_128_fft_retrieve_error_poly,
+  _lc_hqc_128_vect_mul,
+  _lc_hqc_128_hqc_pke_keygen,
+  _lc_hqc_128_vect_set_random_fixed_weight,
+  _lc_hqc_128_vect_set_random,
+  _lc_hqc_128_vect_add,
+  _lc_hqc_128_hqc_public_key_to_string,
+  _lc_hqc_128_hqc_secret_key_to_string,
+  _lc_hqc_128_hqc_pke_encrypt,
+  _lc_hqc_128_hqc_public_key_from_string,
+  _lc_hqc_128_vect_resize,
+  _lc_hqc_128_hqc_pke_decrypt,
+  _lc_hqc_128_hqc_secret_key_from_string,
+  _lc_hqc_128_keypair_c,
+  _lc_hqc_128_enc,
+  _lc_hqc_128_dec,
+  _lc_hqc_128_keypair_from_seed_c,
+  _lc_hqc_128_enc_internal_c,
+  _lc_hqc_128_store8_arr,
+  _lc_hqc_128_hqc_ciphertext_to_string,
+  _lc_hqc_128_enc_c,
+  _lc_hqc_128_enc_kdf_c,
+  _lc_hqc_128_dec_c,
+  _lc_hqc_128_hqc_ciphertext_from_string,
+  _lc_hqc_128_vect_compare,
+  _lc_hqc_128_dec_kdf_c,
+  _lc_hqc_128_hqc_kem_keygen_selftest,
+  _lc_hqc_128_hqc_kem_enc_selftest,
+  _lc_hqc_128_hqc_kem_dec_selftest,
+  _lc_hqc_128_load8_arr,
+  _lc_hqc_128_keypair,
+  _lc_hqc_128_keypair_from_seed,
+  _lc_hqc_128_enc_internal,
+  _lc_hqc_128_enc_kdf,
+  _lc_hqc_128_dec_kdf,
+  _lc_kyber_1024__keypair_from_seed,
+  _lc_hash,
+  _lc_kyber_1024_enc,
+  _lc_kyber_1024_dec,
+  _lc_kyber_1024__keypair,
+  _lc_kyber_1024__pk_from_sk,
+  _lc_kyber_1024__enc,
+  _lc_kyber_1024__enc_kdf,
+  _lc_kyber_1024_iv_sk,
+  _lc_kyber_1024__dec,
+  _lc_kyber_1024__dec_kdf,
+  _lc_kyber_1024_keypair_from_seed_c,
+  _lc_kyber_1024_indcpa_keypair,
+  _lc_kyber_1024_keypair_c,
+  _lc_kyber_1024_pk_from_sk_c,
+  _lc_kyber_1024_enc_c,
+  _lc_kyber_1024_indcpa_enc,
+  _lc_kyber_1024_enc_kdf_c,
+  _lc_kyber_1024_dec_c,
+  _lc_kyber_1024_indcpa_dec,
+  _lc_kyber_1024_dec_kdf_c,
+  _lc_kex_1024_uake_initiator_init_internal,
+  _lc_kyber_1024_keypair,
+  _lc_kyber_1024_enc_internal,
+  _lc_kex_1024_uake_initiator_init,
+  _lc_kex_1024_uake_responder_ss_internal,
+  _lc_kmac_zero,
+  _lc_kmac_init,
+  _lc_kmac_update,
+  _lc_kmac_final,
+  _lc_kex_1024_uake_responder_ss,
+  _lc_kex_1024_uake_initiator_ss,
+  _lc_kex_1024_ake_initiator_init_internal,
+  _lc_kex_1024_ake_initiator_init,
+  _lc_kex_1024_ake_responder_ss_internal,
+  _lc_kex_1024_ake_responder_ss,
+  _lc_kex_1024_ake_initiator_ss,
+  _lc_kyber_1024_poly_getnoise_eta1,
+  _kyber_ntt,
+  _lc_kyber_1024_basemul,
+  _lc_kyber_1024_poly_getnoise_eta2,
+  _kyber_invntt,
+  _lc_kyber_1024_polyvec_compress,
+  _lc_kyber_1024_poly_compress,
+  _lc_kyber_1024_polyvec_decompress,
+  _lc_kyber_1024_poly_decompress,
+  _cbd2,
+  _lc_kyber_1024_kem_keygen_selftest,
+  _lc_kyber_1024_kem_enc_selftest,
+  _lc_kyber_1024_kem_dec_selftest,
+  _lc_kyber_1024_kem_enc_kdf_selftest,
+  _lc_kyber_1024_kem_dec_kdf_selftest,
+  _lc_kyber_1024_ies_enc_internal,
+  _lc_kyber_1024_enc_kdf_internal,
+  _lc_kyber_1024_ies_enc,
+  _lc_kyber_1024_ies_enc_init_internal,
+  _lc_aead_dec_init,
+  _lc_kyber_1024_ies_enc_init,
+  _lc_kyber_1024_ies_dec,
+  _lc_kyber_1024_dec_kdf,
+  _lc_kyber_1024_ies_dec_init,
+  _lc_kyber_1024_x25519_keypair,
+  _lc_x25519_keypair_internal,
+  _lc_kyber_1024_x25519_pk_from_sk,
+  _lc_kyber_1024_pk_from_sk,
+  _lc_x25519_pk_from_sk,
+  _lc_kyber_1024_x25519_enc_internal,
+  _lc_x25519_ss_internal,
+  _lc_kyber_1024_x25519_enc,
+  _lc_kyber_1024_x25519_enc_kdf_internal,
+  _lc_kyber_1024_x25519_enc_kdf,
+  _lc_kyber_1024_x25519_dec_internal,
+  _lc_kyber_1024_x25519_dec,
+  _lc_kyber_1024_x25519_dec_kdf,
+  _lc_kex_1024_x25519_uake_initiator_init_internal,
+  _lc_kex_1024_x25519_uake_initiator_init,
+  _lc_kex_1024_x25519_uake_responder_ss_internal,
+  _lc_kex_1024_x25519_uake_responder_ss,
+  _lc_kex_1024_x25519_uake_initiator_ss,
+  _lc_kex_1024_x25519_ake_initiator_init_internal,
+  _lc_kex_1024_x25519_ake_initiator_init,
+  _lc_kex_1024_x25519_ake_responder_ss_internal,
+  _lc_kex_1024_x25519_ake_responder_ss,
+  _lc_kex_1024_x25519_ake_initiator_ss,
+  _lc_kyber_1024_x25519_ies_enc_internal,
+  _lc_kyber_1024_x25519_ies_enc,
+  _lc_kyber_1024_x25519_ies_enc_init_internal,
+  _lc_kyber_1024_x25519_ies_enc_init,
+  _lc_kyber_1024_x25519_ies_dec,
+  _lc_kyber_1024_x25519_ies_dec_init,
+  _lc_kyber_1024_x448_keypair,
+  _lc_x448_keypair_internal,
+  _lc_kyber_1024_x448_pk_from_sk,
+  _lc_x448_pk_from_sk,
+  _lc_kyber_1024_x448_enc_internal,
+  _lc_x448_ss_internal,
+  _lc_kyber_1024_x448_enc,
+  _lc_kyber_1024_x448_enc_kdf_internal,
+  _lc_kyber_1024_x448_enc_kdf,
+  _lc_kyber_1024_x448_dec_internal,
+  _lc_kyber_1024_x448_dec,
+  _lc_kyber_1024_x448_dec_kdf,
+  _lc_kex_1024_x448_uake_initiator_init_internal,
+  _lc_kex_1024_x448_uake_initiator_init,
+  _lc_kex_1024_x448_uake_responder_ss_internal,
+  _lc_kex_1024_x448_uake_responder_ss,
+  _lc_kex_1024_x448_uake_initiator_ss,
+  _lc_kex_1024_x448_ake_initiator_init_internal,
+  _lc_kex_1024_x448_ake_initiator_init,
+  _lc_kex_1024_x448_ake_responder_ss_internal,
+  _lc_kex_1024_x448_ake_responder_ss,
+  _lc_kex_1024_x448_ake_initiator_ss,
+  _lc_kyber_1024_x448_ies_enc_internal,
+  _lc_kyber_1024_x448_ies_enc,
+  _lc_kyber_1024_x448_ies_enc_init_internal,
+  _lc_kyber_1024_x448_ies_enc_init,
+  _lc_kyber_1024_x448_ies_dec,
+  _lc_kyber_1024_x448_ies_dec_init,
+  _lc_kyber_1024_keypair_from_seed,
+  _lc_kyber_1024_enc_kdf,
+  _lc_kyber_768__keypair_from_seed,
+  _lc_kyber_768_enc,
+  _lc_kyber_768_dec,
+  _lc_kyber_768__keypair,
+  _lc_kyber_768__pk_from_sk,
+  _lc_kyber_768__enc,
+  _lc_kyber_768__enc_kdf,
+  _lc_kyber_768_iv_sk,
+  _lc_kyber_768__dec,
+  _lc_kyber_768__dec_kdf,
+  _lc_kyber_768_keypair_from_seed_c,
+  _lc_kyber_768_indcpa_keypair,
+  _lc_kyber_768_keypair_c,
+  _lc_kyber_768_pk_from_sk_c,
+  _lc_kyber_768_enc_c,
+  _lc_kyber_768_indcpa_enc,
+  _lc_kyber_768_enc_kdf_c,
+  _lc_kyber_768_dec_c,
+  _lc_kyber_768_indcpa_dec,
+  _lc_kyber_768_dec_kdf_c,
+  _lc_kex_768_uake_initiator_init_internal,
+  _lc_kyber_768_keypair,
+  _lc_kyber_768_enc_internal,
+  _lc_kex_768_uake_initiator_init,
+  _lc_kex_768_uake_responder_ss_internal,
+  _lc_kex_768_uake_responder_ss,
+  _lc_kex_768_uake_initiator_ss,
+  _lc_kex_768_ake_initiator_init_internal,
+  _lc_kex_768_ake_initiator_init,
+  _lc_kex_768_ake_responder_ss_internal,
+  _lc_kex_768_ake_responder_ss,
+  _lc_kex_768_ake_initiator_ss,
+  _lc_kyber_768_poly_getnoise_eta1,
+  _lc_kyber_768_basemul,
+  _lc_kyber_768_poly_getnoise_eta2,
+  _lc_kyber_768_polyvec_compress,
+  _lc_kyber_768_poly_compress,
+  _lc_kyber_768_polyvec_decompress,
+  _lc_kyber_768_poly_decompress,
+  _lc_kyber_768_kem_keygen_selftest,
+  _lc_kyber_768_kem_enc_selftest,
+  _lc_kyber_768_kem_dec_selftest,
+  _lc_kyber_768_kem_enc_kdf_selftest,
+  _lc_kyber_768_kem_dec_kdf_selftest,
+  _lc_kyber_768_ies_enc_internal,
+  _lc_kyber_768_enc_kdf_internal,
+  _lc_kyber_768_ies_enc,
+  _lc_kyber_768_ies_enc_init_internal,
+  _lc_kyber_768_ies_enc_init,
+  _lc_kyber_768_ies_dec,
+  _lc_kyber_768_dec_kdf,
+  _lc_kyber_768_ies_dec_init,
+  _lc_kyber_768_x25519_keypair,
+  _lc_kyber_768_x25519_pk_from_sk,
+  _lc_kyber_768_pk_from_sk,
+  _lc_kyber_768_x25519_enc_internal,
+  _lc_kyber_768_x25519_enc,
+  _lc_kyber_768_x25519_enc_kdf_internal,
+  _lc_kyber_768_x25519_enc_kdf,
+  _lc_kyber_768_x25519_dec_internal,
+  _lc_kyber_768_x25519_dec,
+  _lc_kyber_768_x25519_dec_kdf,
+  _lc_kex_768_x25519_uake_initiator_init_internal,
+  _lc_kex_768_x25519_uake_initiator_init,
+  _lc_kex_768_x25519_uake_responder_ss_internal,
+  _lc_kex_768_x25519_uake_responder_ss,
+  _lc_kex_768_x25519_uake_initiator_ss,
+  _lc_kex_768_x25519_ake_initiator_init_internal,
+  _lc_kex_768_x25519_ake_initiator_init,
+  _lc_kex_768_x25519_ake_responder_ss_internal,
+  _lc_kex_768_x25519_ake_responder_ss,
+  _lc_kex_768_x25519_ake_initiator_ss,
+  _lc_kyber_768_x25519_ies_enc_internal,
+  _lc_kyber_768_x25519_ies_enc,
+  _lc_kyber_768_x25519_ies_enc_init_internal,
+  _lc_kyber_768_x25519_ies_enc_init,
+  _lc_kyber_768_x25519_ies_dec,
+  _lc_kyber_768_x25519_ies_dec_init,
+  _lc_kyber_768_x448_keypair,
+  _lc_kyber_768_x448_pk_from_sk,
+  _lc_kyber_768_x448_enc_internal,
+  _lc_kyber_768_x448_enc,
+  _lc_kyber_768_x448_enc_kdf_internal,
+  _lc_kyber_768_x448_enc_kdf,
+  _lc_kyber_768_x448_dec_internal,
+  _lc_kyber_768_x448_dec,
+  _lc_kyber_768_x448_dec_kdf,
+  _lc_kex_768_x448_uake_initiator_init_internal,
+  _lc_kex_768_x448_uake_initiator_init,
+  _lc_kex_768_x448_uake_responder_ss_internal,
+  _lc_kex_768_x448_uake_responder_ss,
+  _lc_kex_768_x448_uake_initiator_ss,
+  _lc_kex_768_x448_ake_initiator_init_internal,
+  _lc_kex_768_x448_ake_initiator_init,
+  _lc_kex_768_x448_ake_responder_ss_internal,
+  _lc_kex_768_x448_ake_responder_ss,
+  _lc_kex_768_x448_ake_initiator_ss,
+  _lc_kyber_768_x448_ies_enc_internal,
+  _lc_kyber_768_x448_ies_enc,
+  _lc_kyber_768_x448_ies_enc_init_internal,
+  _lc_kyber_768_x448_ies_enc_init,
+  _lc_kyber_768_x448_ies_dec,
+  _lc_kyber_768_x448_ies_dec_init,
+  _lc_kyber_768_keypair_from_seed,
+  _lc_kyber_768_enc_kdf,
+  _lc_kyber_512__keypair_from_seed,
+  _lc_kyber_512_enc,
+  _lc_kyber_512_dec,
+  _lc_kyber_512__keypair,
+  _lc_kyber_512__pk_from_sk,
+  _lc_kyber_512__enc,
+  _lc_kyber_512__enc_kdf,
+  _lc_kyber_512_iv_sk,
+  _lc_kyber_512__dec,
+  _lc_kyber_512__dec_kdf,
+  _lc_kyber_512_keypair_from_seed_c,
+  _lc_kyber_512_indcpa_keypair,
+  _lc_kyber_512_keypair_c,
+  _lc_kyber_512_pk_from_sk_c,
+  _lc_kyber_512_enc_c,
+  _lc_kyber_512_indcpa_enc,
+  _lc_kyber_512_enc_kdf_c,
+  _lc_kyber_512_dec_c,
+  _lc_kyber_512_indcpa_dec,
+  _lc_kyber_512_dec_kdf_c,
+  _lc_kex_512_uake_initiator_init_internal,
+  _lc_kyber_512_keypair,
+  _lc_kyber_512_enc_internal,
+  _lc_kex_512_uake_initiator_init,
+  _lc_kex_512_uake_responder_ss_internal,
+  _lc_kex_512_uake_responder_ss,
+  _lc_kex_512_uake_initiator_ss,
+  _lc_kex_512_ake_initiator_init_internal,
+  _lc_kex_512_ake_initiator_init,
+  _lc_kex_512_ake_responder_ss_internal,
+  _lc_kex_512_ake_responder_ss,
+  _lc_kex_512_ake_initiator_ss,
+  _lc_kyber_512_poly_getnoise_eta1,
+  _lc_kyber_512_basemul,
+  _lc_kyber_512_poly_getnoise_eta2,
+  _lc_kyber_512_polyvec_compress,
+  _lc_kyber_512_poly_compress,
+  _lc_kyber_512_polyvec_decompress,
+  _lc_kyber_512_poly_decompress,
+  _cbd3,
+  _lc_kyber_512_kem_keygen_selftest,
+  _lc_kyber_512_kem_enc_selftest,
+  _lc_kyber_512_kem_dec_selftest,
+  _lc_kyber_512_kem_enc_kdf_selftest,
+  _lc_kyber_512_kem_dec_kdf_selftest,
+  _lc_kyber_512_ies_enc_internal,
+  _lc_kyber_512_enc_kdf_internal,
+  _lc_kyber_512_ies_enc,
+  _lc_kyber_512_ies_enc_init_internal,
+  _lc_kyber_512_ies_enc_init,
+  _lc_kyber_512_ies_dec,
+  _lc_kyber_512_dec_kdf,
+  _lc_kyber_512_ies_dec_init,
+  _lc_kyber_512_x25519_keypair,
+  _lc_kyber_512_x25519_pk_from_sk,
+  _lc_kyber_512_pk_from_sk,
+  _lc_kyber_512_x25519_enc_internal,
+  _lc_kyber_512_x25519_enc,
+  _lc_kyber_512_x25519_enc_kdf_internal,
+  _lc_kyber_512_x25519_enc_kdf,
+  _lc_kyber_512_x25519_dec_internal,
+  _lc_kyber_512_x25519_dec,
+  _lc_kyber_512_x25519_dec_kdf,
+  _lc_kex_512_x25519_uake_initiator_init_internal,
+  _lc_kex_512_x25519_uake_initiator_init,
+  _lc_kex_512_x25519_uake_responder_ss_internal,
+  _lc_kex_512_x25519_uake_responder_ss,
+  _lc_kex_512_x25519_uake_initiator_ss,
+  _lc_kex_512_x25519_ake_initiator_init_internal,
+  _lc_kex_512_x25519_ake_initiator_init,
+  _lc_kex_512_x25519_ake_responder_ss_internal,
+  _lc_kex_512_x25519_ake_responder_ss,
+  _lc_kex_512_x25519_ake_initiator_ss,
+  _lc_kyber_512_x25519_ies_enc_internal,
+  _lc_kyber_512_x25519_ies_enc,
+  _lc_kyber_512_x25519_ies_enc_init_internal,
+  _lc_kyber_512_x25519_ies_enc_init,
+  _lc_kyber_512_x25519_ies_dec,
+  _lc_kyber_512_x25519_ies_dec_init,
+  _lc_kyber_512_x448_keypair,
+  _lc_kyber_512_x448_pk_from_sk,
+  _lc_kyber_512_x448_enc_internal,
+  _lc_kyber_512_x448_enc,
+  _lc_kyber_512_x448_enc_kdf_internal,
+  _lc_kyber_512_x448_enc_kdf,
+  _lc_kyber_512_x448_dec_internal,
+  _lc_kyber_512_x448_dec,
+  _lc_kyber_512_x448_dec_kdf,
+  _lc_kex_512_x448_uake_initiator_init_internal,
+  _lc_kex_512_x448_uake_initiator_init,
+  _lc_kex_512_x448_uake_responder_ss_internal,
+  _lc_kex_512_x448_uake_responder_ss,
+  _lc_kex_512_x448_uake_initiator_ss,
+  _lc_kex_512_x448_ake_initiator_init_internal,
+  _lc_kex_512_x448_ake_initiator_init,
+  _lc_kex_512_x448_ake_responder_ss_internal,
+  _lc_kex_512_x448_ake_responder_ss,
+  _lc_kex_512_x448_ake_initiator_ss,
+  _lc_kyber_512_x448_ies_enc_internal,
+  _lc_kyber_512_x448_ies_enc,
+  _lc_kyber_512_x448_ies_enc_init_internal,
+  _lc_kyber_512_x448_ies_enc_init,
+  _lc_kyber_512_x448_ies_dec,
+  _lc_kyber_512_x448_ies_dec_init,
+  _lc_kyber_512_keypair_from_seed,
+  _lc_kyber_512_enc_kdf,
+  _lc_dilithium_87_poly_uniform_eta,
+  _lc_dilithium_87_polyeta_pack,
+  _lc_dilithium_87_polyeta_unpack,
+  _lc_dilithium_87_polyz_pack,
+  _lc_dilithium_87_polyz_unpack,
+  _lc_dilithium_87_polyw1_pack,
+  _lc_dilithium_87_poly_challenge,
+  _lc_dilithium_87_poly_uniform_gamma1,
+  _lc_dilithium_87_decompose,
+  _lc_dilithium_87_make_hint,
+  _lc_dilithium_87_use_hint,
+  _lc_dilithium_87_keypair_tester,
+  _lc_dilithium_87_siggen_tester,
+  _lc_dilithium_87_sigver_tester,
+  _lc_dilithium_87_ctx_alloc,
+  _lc_alloc_aligned,
+  _lc_dilithium_87_ctx_alloc_ahat,
+  _lc_dilithium_87_ctx_zero_free,
+  _lc_free,
+  _lc_dilithium_87_keypair_from_seed_c,
+  _lc_dilithium_87_pk_from_sk_c,
+  _lc_dilithium_87_keypair_c,
+  _lc_xof,
+  _ntt,
+  _poly_uniform,
+  _invntt_tomont,
+  _power2round,
+  _polyt1_pack,
+  _polyt0_pack,
+  _lc_dilithium_87_sign,
+  _lc_dilithium_87_verify,
+  _lc_dilithium_87_sign_c,
+  _lc_dilithium_87_sign_ctx_c,
+  _signature_domain_separation,
+  _lc_dilithium_87_sign_init_c,
+  _lc_dilithium_87_sign_update_c,
+  _lc_dilithium_87_sign_final_c,
+  _polyt0_unpack,
+  _poly_chknorm,
+  _lc_dilithium_87_verify_c,
+  _lc_dilithium_87_verify_ctx_c,
+  _lc_dilithium_87_verify_init_c,
+  _lc_dilithium_87_verify_update_c,
+  _lc_dilithium_87_verify_final_c,
+  _lc_dilithium_87_ed25519_common_init,
+  _lc_dilithium_87_ed25519_common_update,
+  _lc_dilithium_87_ed25519_ctx_alloc,
+  _lc_dilithium_87_ed25519_ctx_zero_free,
+  _lc_dilithium_87_ed25519_keypair,
+  _lc_dilithium_87_keypair,
+  _lc_ed25519_keypair_internal,
+  _lc_dilithium_87_ed25519_pk_from_sk,
+  _lc_dilithium_87_pk_from_sk,
+  _lc_ed25519_pk_from_sk,
+  _lc_dilithium_87_ed25519_sign_ctx,
+  _lc_dilithium_87_ed25519_sign_final,
+  _lc_dilithium_87_ed25519_sign_init,
+  _lc_dilithium_87_ed25519_sign_update,
+  _lc_dilithium_87_sign_ctx,
+  _lc_ed25519_sign_ctx,
+  _lc_dilithium_87_ed25519_sign,
+  _lc_dilithium_87_ed25519_verify_ctx,
+  _lc_dilithium_87_ed25519_verify_final,
+  _lc_dilithium_87_ed25519_verify_init,
+  _lc_dilithium_87_ed25519_verify_update,
+  _lc_dilithium_87_verify_ctx,
+  _lc_ed25519_verify_ctx,
+  _lc_dilithium_87_ed25519_verify,
+  _lc_dilithium_87_ed448_common_init,
+  _lc_dilithium_87_ed448_common_update,
+  _lc_dilithium_87_ed448_ctx_alloc,
+  _lc_dilithium_87_ed448_ctx_zero_free,
+  _lc_dilithium_87_ed448_keypair,
+  _lc_ed448_keypair_internal,
+  _lc_dilithium_87_ed448_pk_from_sk,
+  _lc_ed448_pk_from_sk,
+  _lc_dilithium_87_ed448_sign_ctx,
+  _lc_dilithium_87_ed448_sign_final,
+  _lc_dilithium_87_ed448_sign_init,
+  _lc_dilithium_87_ed448_sign_update,
+  _lc_ed448_sign_ctx,
+  _lc_dilithium_87_ed448_sign,
+  _lc_dilithium_87_ed448_verify_ctx,
+  _lc_dilithium_87_ed448_verify_final,
+  _lc_dilithium_87_ed448_verify_init,
+  _lc_dilithium_87_ed448_verify_update,
+  _lc_ed448_verify_ctx,
+  _lc_dilithium_87_ed448_verify,
+  _lc_dilithium_87_keypair_from_seed,
+  _lc_dilithium_87_sign_init,
+  _lc_dilithium_87_sign_update,
+  _lc_dilithium_87_sign_final,
+  _lc_dilithium_87_verify_init,
+  _lc_dilithium_87_verify_update,
+  _lc_dilithium_87_verify_final,
+  _lc_dilithium_65_poly_uniform_eta,
+  _lc_dilithium_65_polyeta_pack,
+  _lc_dilithium_65_polyeta_unpack,
+  _lc_dilithium_65_polyz_pack,
+  _lc_dilithium_65_polyz_unpack,
+  _lc_dilithium_65_polyw1_pack,
+  _lc_dilithium_65_poly_challenge,
+  _lc_dilithium_65_poly_uniform_gamma1,
+  _lc_dilithium_65_decompose,
+  _lc_dilithium_65_make_hint,
+  _lc_dilithium_65_use_hint,
+  _lc_dilithium_65_keypair_tester,
+  _lc_dilithium_65_siggen_tester,
+  _lc_dilithium_65_sigver_tester,
+  _lc_dilithium_65_ctx_alloc,
+  _lc_dilithium_65_ctx_alloc_ahat,
+  _lc_dilithium_65_ctx_zero_free,
+  _lc_dilithium_65_keypair_from_seed_c,
+  _lc_dilithium_65_pk_from_sk_c,
+  _lc_dilithium_65_keypair_c,
+  _lc_dilithium_65_sign,
+  _lc_dilithium_65_verify,
+  _lc_dilithium_65_sign_c,
+  _lc_dilithium_65_sign_ctx_c,
+  _lc_dilithium_65_sign_init_c,
+  _lc_dilithium_65_sign_update_c,
+  _lc_dilithium_65_sign_final_c,
+  _lc_dilithium_65_verify_c,
+  _lc_dilithium_65_verify_ctx_c,
+  _lc_dilithium_65_verify_init_c,
+  _lc_dilithium_65_verify_update_c,
+  _lc_dilithium_65_verify_final_c,
+  _lc_dilithium_65_ed25519_common_init,
+  _lc_dilithium_65_ed25519_common_update,
+  _lc_dilithium_65_ed25519_ctx_alloc,
+  _lc_dilithium_65_ed25519_ctx_zero_free,
+  _lc_dilithium_65_ed25519_keypair,
+  _lc_dilithium_65_keypair,
+  _lc_dilithium_65_ed25519_pk_from_sk,
+  _lc_dilithium_65_pk_from_sk,
+  _lc_dilithium_65_ed25519_sign_ctx,
+  _lc_dilithium_65_ed25519_sign_final,
+  _lc_dilithium_65_ed25519_sign_init,
+  _lc_dilithium_65_ed25519_sign_update,
+  _lc_dilithium_65_sign_ctx,
+  _lc_dilithium_65_ed25519_sign,
+  _lc_dilithium_65_ed25519_verify_ctx,
+  _lc_dilithium_65_ed25519_verify_final,
+  _lc_dilithium_65_ed25519_verify_init,
+  _lc_dilithium_65_ed25519_verify_update,
+  _lc_dilithium_65_verify_ctx,
+  _lc_dilithium_65_ed25519_verify,
+  _lc_dilithium_65_ed448_common_init,
+  _lc_dilithium_65_ed448_common_update,
+  _lc_dilithium_65_ed448_ctx_alloc,
+  _lc_dilithium_65_ed448_ctx_zero_free,
+  _lc_dilithium_65_ed448_keypair,
+  _lc_dilithium_65_ed448_pk_from_sk,
+  _lc_dilithium_65_ed448_sign_ctx,
+  _lc_dilithium_65_ed448_sign_final,
+  _lc_dilithium_65_ed448_sign_init,
+  _lc_dilithium_65_ed448_sign_update,
+  _lc_dilithium_65_ed448_sign,
+  _lc_dilithium_65_ed448_verify_ctx,
+  _lc_dilithium_65_ed448_verify_final,
+  _lc_dilithium_65_ed448_verify_init,
+  _lc_dilithium_65_ed448_verify_update,
+  _lc_dilithium_65_ed448_verify,
+  _lc_dilithium_65_keypair_from_seed,
+  _lc_dilithium_65_sign_init,
+  _lc_dilithium_65_sign_update,
+  _lc_dilithium_65_sign_final,
+  _lc_dilithium_65_verify_init,
+  _lc_dilithium_65_verify_update,
+  _lc_dilithium_65_verify_final,
+  _lc_dilithium_44_poly_uniform_eta,
+  _lc_dilithium_44_polyeta_pack,
+  _lc_dilithium_44_polyeta_unpack,
+  _lc_dilithium_44_polyz_pack,
+  _lc_dilithium_44_polyz_unpack,
+  _lc_dilithium_44_polyw1_pack,
+  _lc_dilithium_44_poly_challenge,
+  _lc_dilithium_44_poly_uniform_gamma1,
+  _lc_dilithium_44_decompose,
+  _lc_dilithium_44_make_hint,
+  _lc_dilithium_44_use_hint,
+  _lc_dilithium_44_keypair_tester,
+  _lc_dilithium_44_siggen_tester,
+  _lc_dilithium_44_sigver_tester,
+  _lc_dilithium_44_ctx_alloc,
+  _lc_dilithium_44_ctx_alloc_ahat,
+  _lc_dilithium_44_ctx_zero_free,
+  _lc_dilithium_44_keypair_from_seed_c,
+  _lc_dilithium_44_pk_from_sk_c,
+  _lc_dilithium_44_keypair_c,
+  _lc_dilithium_44_sign,
+  _lc_dilithium_44_verify,
+  _lc_dilithium_44_sign_c,
+  _lc_dilithium_44_sign_ctx_c,
+  _lc_dilithium_44_sign_init_c,
+  _lc_dilithium_44_sign_update_c,
+  _lc_dilithium_44_sign_final_c,
+  _lc_dilithium_44_verify_c,
+  _lc_dilithium_44_verify_ctx_c,
+  _lc_dilithium_44_verify_init_c,
+  _lc_dilithium_44_verify_update_c,
+  _lc_dilithium_44_verify_final_c,
+  _lc_dilithium_44_ed25519_common_init,
+  _lc_dilithium_44_ed25519_common_update,
+  _lc_dilithium_44_ed25519_ctx_alloc,
+  _lc_dilithium_44_ed25519_ctx_zero_free,
+  _lc_dilithium_44_ed25519_keypair,
+  _lc_dilithium_44_keypair,
+  _lc_dilithium_44_ed25519_pk_from_sk,
+  _lc_dilithium_44_pk_from_sk,
+  _lc_dilithium_44_ed25519_sign_ctx,
+  _lc_dilithium_44_ed25519_sign_final,
+  _lc_dilithium_44_ed25519_sign_init,
+  _lc_dilithium_44_ed25519_sign_update,
+  _lc_dilithium_44_sign_ctx,
+  _lc_dilithium_44_ed25519_sign,
+  _lc_dilithium_44_ed25519_verify_ctx,
+  _lc_dilithium_44_ed25519_verify_final,
+  _lc_dilithium_44_ed25519_verify_init,
+  _lc_dilithium_44_ed25519_verify_update,
+  _lc_dilithium_44_verify_ctx,
+  _lc_dilithium_44_ed25519_verify,
+  _lc_dilithium_44_ed448_common_init,
+  _lc_dilithium_44_ed448_common_update,
+  _lc_dilithium_44_ed448_ctx_alloc,
+  _lc_dilithium_44_ed448_ctx_zero_free,
+  _lc_dilithium_44_ed448_keypair,
+  _lc_dilithium_44_ed448_pk_from_sk,
+  _lc_dilithium_44_ed448_sign_ctx,
+  _lc_dilithium_44_ed448_sign_final,
+  _lc_dilithium_44_ed448_sign_init,
+  _lc_dilithium_44_ed448_sign_update,
+  _lc_dilithium_44_ed448_sign,
+  _lc_dilithium_44_ed448_verify_ctx,
+  _lc_dilithium_44_ed448_verify_final,
+  _lc_dilithium_44_ed448_verify_init,
+  _lc_dilithium_44_ed448_verify_update,
+  _lc_dilithium_44_ed448_verify,
+  _lc_dilithium_44_keypair_from_seed,
+  _lc_dilithium_44_sign_init,
+  _lc_dilithium_44_sign_update,
+  _lc_dilithium_44_sign_final,
+  _lc_dilithium_44_verify_init,
+  _lc_dilithium_44_verify_update,
+  _lc_dilithium_44_verify_final,
+  _lc_sphincs_shake_256s_fors_sign_c,
+  _lc_sphincs_shake_256s_treehashx1,
+  _lc_sphincs_shake_256s_thash,
+  _lc_sphincs_shake_256s_fors_pk_from_sig_c,
+  _lc_sphincs_shake_256s_compute_root,
+  _lc_sphincs_shake_256s_gen_message_random,
+  _lc_sphincs_shake_256s_hash_message,
+  _lc_sphincs_shake_256s_bytes_to_ull,
+  _lc_sphincs_shake_256s_sphincs_merkle_sign_c,
+  _lc_sphincs_shake_256s_chain_lengths_c,
+  _lc_sphincs_shake_256s_wots_gen_leafx1,
+  _lc_sphincs_shake_256s_sphincs_merkle_gen_root_c,
+  _lc_sphincs_shake_256s_selftest_keygen,
+  _lc_sphincs_shake_256s_keypair_nocheck,
+  _lc_sphincs_shake_256s_selftest_siggen,
+  _lc_sphincs_shake_256s_sign_ctx_nocheck,
+  _lc_sphincs_shake_256s_selftest_sigver,
+  _lc_sphincs_shake_256s_verify_ctx_nocheck,
+  _lc_sphincs_shake_256s_ctx_alloc,
+  _lc_sphincs_shake_256s_ctx_zero_free,
+  _lc_sphincs_shake_256s_thash_ascon,
+  _lc_sphincs_shake_256s_ull_to_bytes,
+  _lc_sphincs_shake_256s_wots_pk_from_sig_c,
+  _lc_sphincs_shake_256s_keypair_from_seed,
+  _lc_sphincs_shake_256s_pk_from_sk,
+  _lc_cpu_feature_available,
+  _lc_sphincs_shake_256s_sign,
+  _lc_sphincs_shake_256s_verify,
+  _lc_sphincs_shake_256s_keypair,
+  _lc_sphincs_shake_256s_sign_ctx,
+  _lc_sphincs_shake_256s_sign_init,
+  _lc_sphincs_shake_256s_sign_update,
+  _lc_sphincs_shake_256s_sign_final,
+  _lc_hash_digestsize,
+  _lc_sphincs_shake_256s_verify_ctx,
+  _lc_sphincs_shake_256s_verify_init,
+  _lc_sphincs_shake_256s_verify_update,
+  _lc_sphincs_shake_256s_verify_final,
+  _lc_sphincs_shake_256f_fors_sign_c,
+  _lc_sphincs_shake_256f_treehashx1,
+  _lc_sphincs_shake_256f_thash,
+  _lc_sphincs_shake_256f_fors_pk_from_sig_c,
+  _lc_sphincs_shake_256f_compute_root,
+  _lc_sphincs_shake_256f_gen_message_random,
+  _lc_sphincs_shake_256f_hash_message,
+  _lc_sphincs_shake_256f_bytes_to_ull,
+  _lc_sphincs_shake_256f_sphincs_merkle_sign_c,
+  _lc_sphincs_shake_256f_chain_lengths_c,
+  _lc_sphincs_shake_256f_wots_gen_leafx1,
+  _lc_sphincs_shake_256f_sphincs_merkle_gen_root_c,
+  _lc_sphincs_shake_256f_selftest_keygen,
+  _lc_sphincs_shake_256f_keypair_nocheck,
+  _lc_sphincs_shake_256f_selftest_siggen,
+  _lc_sphincs_shake_256f_sign_ctx_nocheck,
+  _lc_sphincs_shake_256f_selftest_sigver,
+  _lc_sphincs_shake_256f_verify_ctx_nocheck,
+  _lc_sphincs_shake_256f_ctx_alloc,
+  _lc_sphincs_shake_256f_ctx_zero_free,
+  _lc_sphincs_shake_256f_thash_ascon,
+  _lc_sphincs_shake_256f_ull_to_bytes,
+  _lc_sphincs_shake_256f_wots_pk_from_sig_c,
+  _lc_sphincs_shake_256f_keypair_from_seed,
+  _lc_sphincs_shake_256f_pk_from_sk,
+  _lc_sphincs_shake_256f_sign,
+  _lc_sphincs_shake_256f_verify,
+  _lc_sphincs_shake_256f_keypair,
+  _lc_sphincs_shake_256f_sign_ctx,
+  _lc_sphincs_shake_256f_sign_init,
+  _lc_sphincs_shake_256f_sign_update,
+  _lc_sphincs_shake_256f_sign_final,
+  _lc_sphincs_shake_256f_verify_ctx,
+  _lc_sphincs_shake_256f_verify_init,
+  _lc_sphincs_shake_256f_verify_update,
+  _lc_sphincs_shake_256f_verify_final,
+  _lc_sphincs_shake_192s_fors_sign_c,
+  _lc_sphincs_shake_192s_treehashx1,
+  _lc_sphincs_shake_192s_thash,
+  _lc_sphincs_shake_192s_fors_pk_from_sig_c,
+  _lc_sphincs_shake_192s_compute_root,
+  _lc_sphincs_shake_192s_gen_message_random,
+  _lc_sphincs_shake_192s_hash_message,
+  _lc_sphincs_shake_192s_bytes_to_ull,
+  _lc_sphincs_shake_192s_sphincs_merkle_sign_c,
+  _lc_sphincs_shake_192s_chain_lengths_c,
+  _lc_sphincs_shake_192s_wots_gen_leafx1,
+  _lc_sphincs_shake_192s_sphincs_merkle_gen_root_c,
+  _lc_sphincs_shake_192s_selftest_keygen,
+  _lc_sphincs_shake_192s_keypair_nocheck,
+  _lc_sphincs_shake_192s_selftest_siggen,
+  _lc_sphincs_shake_192s_sign_ctx_nocheck,
+  _lc_sphincs_shake_192s_selftest_sigver,
+  _lc_sphincs_shake_192s_verify_ctx_nocheck,
+  _lc_sphincs_shake_192s_ctx_alloc,
+  _lc_sphincs_shake_192s_ctx_zero_free,
+  _lc_sphincs_shake_192s_thash_ascon,
+  _lc_sphincs_shake_192s_ull_to_bytes,
+  _lc_sphincs_shake_192s_wots_pk_from_sig_c,
+  _lc_sphincs_shake_192s_keypair_from_seed,
+  _lc_sphincs_shake_192s_pk_from_sk,
+  _lc_sphincs_shake_192s_sign,
+  _lc_sphincs_shake_192s_verify,
+  _lc_sphincs_shake_192s_keypair,
+  _lc_sphincs_shake_192s_sign_ctx,
+  _lc_sphincs_shake_192s_sign_init,
+  _lc_sphincs_shake_192s_sign_update,
+  _lc_sphincs_shake_192s_sign_final,
+  _lc_sphincs_shake_192s_verify_ctx,
+  _lc_sphincs_shake_192s_verify_init,
+  _lc_sphincs_shake_192s_verify_update,
+  _lc_sphincs_shake_192s_verify_final,
+  _lc_sphincs_shake_192f_fors_sign_c,
+  _lc_sphincs_shake_192f_treehashx1,
+  _lc_sphincs_shake_192f_thash,
+  _lc_sphincs_shake_192f_fors_pk_from_sig_c,
+  _lc_sphincs_shake_192f_compute_root,
+  _lc_sphincs_shake_192f_gen_message_random,
+  _lc_sphincs_shake_192f_hash_message,
+  _lc_sphincs_shake_192f_bytes_to_ull,
+  _lc_sphincs_shake_192f_sphincs_merkle_sign_c,
+  _lc_sphincs_shake_192f_chain_lengths_c,
+  _lc_sphincs_shake_192f_wots_gen_leafx1,
+  _lc_sphincs_shake_192f_sphincs_merkle_gen_root_c,
+  _lc_sphincs_shake_192f_selftest_keygen,
+  _lc_sphincs_shake_192f_keypair_nocheck,
+  _lc_sphincs_shake_192f_selftest_siggen,
+  _lc_sphincs_shake_192f_sign_ctx_nocheck,
+  _lc_sphincs_shake_192f_selftest_sigver,
+  _lc_sphincs_shake_192f_verify_ctx_nocheck,
+  _lc_sphincs_shake_192f_ctx_alloc,
+  _lc_sphincs_shake_192f_ctx_zero_free,
+  _lc_sphincs_shake_192f_thash_ascon,
+  _lc_sphincs_shake_192f_ull_to_bytes,
+  _lc_sphincs_shake_192f_wots_pk_from_sig_c,
+  _lc_sphincs_shake_192f_keypair_from_seed,
+  _lc_sphincs_shake_192f_pk_from_sk,
+  _lc_sphincs_shake_192f_sign,
+  _lc_sphincs_shake_192f_verify,
+  _lc_sphincs_shake_192f_keypair,
+  _lc_sphincs_shake_192f_sign_ctx,
+  _lc_sphincs_shake_192f_sign_init,
+  _lc_sphincs_shake_192f_sign_update,
+  _lc_sphincs_shake_192f_sign_final,
+  _lc_sphincs_shake_192f_verify_ctx,
+  _lc_sphincs_shake_192f_verify_init,
+  _lc_sphincs_shake_192f_verify_update,
+  _lc_sphincs_shake_192f_verify_final,
+  _lc_sphincs_shake_128s_fors_sign_c,
+  _lc_sphincs_shake_128s_treehashx1,
+  _lc_sphincs_shake_128s_thash,
+  _lc_sphincs_shake_128s_fors_pk_from_sig_c,
+  _lc_sphincs_shake_128s_compute_root,
+  _lc_sphincs_shake_128s_gen_message_random,
+  _lc_sphincs_shake_128s_hash_message,
+  _lc_sphincs_shake_128s_bytes_to_ull,
+  _lc_sphincs_shake_128s_sphincs_merkle_sign_c,
+  _lc_sphincs_shake_128s_chain_lengths_c,
+  _lc_sphincs_shake_128s_wots_gen_leafx1,
+  _lc_sphincs_shake_128s_sphincs_merkle_gen_root_c,
+  _lc_sphincs_shake_128s_selftest_keygen,
+  _lc_sphincs_shake_128s_keypair_nocheck,
+  _lc_sphincs_shake_128s_selftest_siggen,
+  _lc_sphincs_shake_128s_sign_ctx_nocheck,
+  _lc_sphincs_shake_128s_selftest_sigver,
+  _lc_sphincs_shake_128s_verify_ctx_nocheck,
+  _lc_sphincs_shake_128s_ctx_alloc,
+  _lc_sphincs_shake_128s_ctx_zero_free,
+  _lc_sphincs_shake_128s_thash_ascon,
+  _lc_sphincs_shake_128s_ull_to_bytes,
+  _lc_sphincs_shake_128s_wots_pk_from_sig_c,
+  _lc_sphincs_shake_128s_keypair_from_seed,
+  _lc_sphincs_shake_128s_pk_from_sk,
+  _lc_sphincs_shake_128s_sign,
+  _lc_sphincs_shake_128s_verify,
+  _lc_sphincs_shake_128s_keypair,
+  _lc_sphincs_shake_128s_sign_ctx,
+  _lc_sphincs_shake_128s_sign_init,
+  _lc_sphincs_shake_128s_sign_update,
+  _lc_sphincs_shake_128s_sign_final,
+  _lc_sphincs_shake_128s_verify_ctx,
+  _lc_sphincs_shake_128s_verify_init,
+  _lc_sphincs_shake_128s_verify_update,
+  _lc_sphincs_shake_128s_verify_final,
+  _lc_sphincs_shake_128f_fors_sign_c,
+  _lc_sphincs_shake_128f_treehashx1,
+  _lc_sphincs_shake_128f_thash,
+  _lc_sphincs_shake_128f_fors_pk_from_sig_c,
+  _lc_sphincs_shake_128f_compute_root,
+  _lc_sphincs_shake_128f_gen_message_random,
+  _lc_sphincs_shake_128f_hash_message,
+  _lc_sphincs_shake_128f_bytes_to_ull,
+  _lc_sphincs_shake_128f_sphincs_merkle_sign_c,
+  _lc_sphincs_shake_128f_chain_lengths_c,
+  _lc_sphincs_shake_128f_wots_gen_leafx1,
+  _lc_sphincs_shake_128f_sphincs_merkle_gen_root_c,
+  _lc_sphincs_shake_128f_selftest_keygen,
+  _lc_sphincs_shake_128f_keypair_nocheck,
+  _lc_sphincs_shake_128f_selftest_siggen,
+  _lc_sphincs_shake_128f_sign_ctx_nocheck,
+  _lc_sphincs_shake_128f_selftest_sigver,
+  _lc_sphincs_shake_128f_verify_ctx_nocheck,
+  _lc_sphincs_shake_128f_ctx_alloc,
+  _lc_sphincs_shake_128f_ctx_zero_free,
+  _lc_sphincs_shake_128f_thash_ascon,
+  _lc_sphincs_shake_128f_ull_to_bytes,
+  _lc_sphincs_shake_128f_wots_pk_from_sig_c,
+  _lc_sphincs_shake_128f_keypair_from_seed,
+  _lc_sphincs_shake_128f_pk_from_sk,
+  _lc_sphincs_shake_128f_sign,
+  _lc_sphincs_shake_128f_verify,
+  _lc_sphincs_shake_128f_keypair,
+  _lc_sphincs_shake_128f_sign_ctx,
+  _lc_sphincs_shake_128f_sign_init,
+  _lc_sphincs_shake_128f_sign_update,
+  _lc_sphincs_shake_128f_sign_final,
+  _lc_sphincs_shake_128f_verify_ctx,
+  _lc_sphincs_shake_128f_verify_init,
+  _lc_sphincs_shake_128f_verify_update,
+  _lc_sphincs_shake_128f_verify_final,
+  _lc_hc_alloc,
+  _lc_aead_zero,
+  _lc_hmac_update,
+  _lc_hmac_macsize,
+  _lc_hmac_final,
+  _lc_hmac_zero,
+  _lc_hmac_init,
+  _lc_ascon_setkey_int,
+  _lc_sponge_add_bytes,
+  _lc_sponge,
+  _lc_ascon_encrypt,
+  _lc_sponge_extract_bytes,
+  _lc_ascon_decrypt,
+  _lc_sponge_newstate,
+  _lc_ascon_aad_interface,
+  _lc_ascon_enc_update_interface,
+  _lc_ascon_enc_final_interface,
+  _lc_ascon_dec_update_interface,
+  _lc_ascon_dec_final_interface,
+  _lc_ascon_zero_interface,
+  _lc_al_alloc,
+  _lc_ak_alloc,
+  _lc_cc_alloc,
+  _lc_cshake_ctx_update,
+  _lc_cshake_ctx_reinit,
+  _lc_cshake_init,
+  _lc_cshake_ctx_init,
+  _lc_kc_alloc,
+  _lc_kmac_final_xof,
+  _lc_kmac_reinit,
+  _lc_sh_alloc,
+  _lc_sym_encrypt,
+  _lc_sym_decrypt,
+  _lc_sym_zero,
+  _lc_hkdf,
+  _lc_sym_init,
+  _lc_sym_setkey,
+  _lc_sym_setiv,
+  _lc_kh_alloc,
+  _lc_kmac_xof,
+  _lc_chacha20_poly1305_alloc,
+  _lc_poly1305_update,
+  _lc_poly1305_final,
+  _cc20_block,
+  _lc_poly1305_init,
+  _lc_aes_gcm_alloc,
+  _lc_aes_gcm_generate_iv,
+  _lc_aead_setkey_from_ctx,
+  _lc_aead_enc_init,
+  _lc_aead_enc_update,
+  _lc_aead_enc_final,
+  _lc_aead_dec_update,
+  _lc_aead_dec_final,
+  _lc_aead_alg_status,
+  _lc_alg_status,
+  _lc_aead_ctx_alg_status,
+  _lc_bike_sk_type,
+  _lc_bike_pk_type,
+  _lc_bike_ct_type,
+  _lc_bike_ss_type,
+  _lc_bike_sk_size,
+  _lc_bike_pk_size,
+  _lc_bike_ct_size,
+  _lc_bike_ss_size,
+  _lc_bike_sk_load,
+  _lc_bike_pk_load,
+  _lc_bike_ct_load,
+  _lc_bike_ss_load,
+  _lc_bike_sk_ptr,
+  _lc_bike_pk_ptr,
+  _lc_bike_ct_ptr,
+  _lc_bike_ss_ptr,
+  _lc_bike_keypair,
+  _lc_bike_keypair_from_seed,
+  _lc_bike_enc,
+  _lc_bike_enc_kdf,
+  _lc_bike_dec,
+  _lc_bike_dec_kdf,
+  _lc_bike_alg_status,
+  _crypto_scalarmult_curve25519_base,
+  _lc_x25519_keypair,
+  _non_pqc_algs_enabled,
+  _crypto_scalarmult_curve25519,
+  _has_small_order,
+  _lc_x25519_ss,
+  _lc_x25519_alg_status,
+  _lc_x25519_sk_ptr,
+  _lc_x25519_pk_ptr,
+  _lc_x25519_ss_ptr,
+  _lc_x25519_sk_load,
+  _lc_x25519_pk_load,
+  _lc_x25519_ss_load,
+  _crypto_scalarmult_curve25519_c,
+  _fe25519_frombytes,
+  _fe25519_invert,
+  _fe25519_tobytes,
+  _ge25519_scalarmult_base,
+  _lc_ed25519_derive_pk,
+  _ge25519_p3_tobytes,
+  _lc_ed25519_sign_internal,
+  _lc_ed25519_verify_internal,
+  _lc_ed25519_keypair,
+  _composite_signature_domain_separation,
+  _sc25519_reduce,
+  _sc25519_muladd,
+  _lc_ed25519_sign,
+  _lc_ed25519ph_sign,
+  _sc25519_is_canonical,
+  _ge25519_is_canonical,
+  _ge25519_frombytes_negate_vartime,
+  _ge25519_has_small_order,
+  _ge25519_frombytes,
+  _ge25519_double_scalarmult_vartime,
+  _ge25519_p2_to_p3,
+  _ge25519_p3_sub,
+  _lc_ed25519_verify,
+  _lc_ed25519ph_verify,
+  _lc_ed25519_alg_status,
+  _lc_ed25519_sk_ptr,
+  _lc_ed25519_pk_ptr,
+  _lc_ed25519_sig_ptr,
+  _lc_ed25519_sk_load,
+  _lc_ed25519_pk_load,
+  _lc_ed25519_sig_load,
+  _lc_ed25519_sig_size,
+  _lc_ed25519_pk_size,
+  _lc_ed25519_sk_size,
+  _ge25519_p1p1_to_p2,
+  _ge25519_p1p1_to_p3,
+  _ge25519_tobytes,
+  _ge25519_scalarmult,
+  _ge25519_p3_add,
+  _ge25519_is_on_curve,
+  _ge25519_is_on_main_subgroup,
+  _sc25519_mul,
+  _sc25519_invert,
+  _ge25519_clear_cofactor,
+  _ge25519_from_uniform,
+  _ge25519_from_hash,
+  _ristretto255_frombytes,
+  _ristretto255_p3_tobytes,
+  _ristretto255_from_hash,
+  _lc_ed448_keypair,
+  _curve448_scalar_decode_long,
+  _curve448_scalar_halve,
+  _curve448_precomputed_scalarmul,
+  _curve448_point_mul_by_ratio_and_encode_like_eddsa,
+  _curve448_scalar_destroy,
+  _curve448_point_destroy,
+  _lc_ed448_sign,
+  _lc_ed448_verify,
+  _lc_ed448ph_sign,
+  _curve448_scalar_mul,
+  _curve448_scalar_add,
+  _curve448_scalar_encode,
+  _lc_ed448ph_verify,
+  _curve448_point_decode_like_eddsa_and_mul_by_ratio,
+  _curve448_scalar_sub,
+  _curve448_scalar_decode,
+  _curve448_base_double_scalarmul_non_secret,
+  _curve448_point_eq,
+  _lc_ed448_alg_status,
+  _lc_ed448_sk_ptr,
+  _lc_ed448_pk_ptr,
+  _lc_ed448_sig_ptr,
+  _lc_ed448_sk_load,
+  _lc_ed448_pk_load,
+  _lc_ed448_sig_load,
+  _lc_ed448_sig_size,
+  _lc_ed448_pk_size,
+  _lc_ed448_sk_size,
+  _x448_derive_public_key_c,
+  _curve448_point_mul_by_ratio_and_encode_like_x448,
+  _x448_scalarmult_c,
+  _gf_deserialize,
+  _gf_mul,
+  _gf_sqr,
+  _gf_mulw_unsigned,
+  _gf_invert,
+  _gf_serialize,
+  _gf_eq,
+  _x448_derive_public_key,
+  _lc_x448_keypair,
+  _x448_scalarmult,
+  _lc_x448_ss,
+  _lc_x448_alg_status,
+  _lc_x448_sk_ptr,
+  _lc_x448_pk_ptr,
+  _lc_x448_ss_ptr,
+  _lc_x448_sk_load,
+  _lc_x448_pk_load,
+  _lc_x448_ss_load,
+  _curve448_point_double,
+  _curve448_point_valid,
+  _gf_sub,
+  _gf_add,
+  _gf_lobit,
+  _gf_isr,
+  _gf_strong_reduce,
+  _gf_hibit,
+  _lc_cc20_drng_alloc,
+  _lc_alloc_aligned_secure,
+  _lc_kmac256_drng_alloc,
+  _lc_cshake256_drng_alloc,
+  _lc_xdrbg_drng_generate,
+  _lc_xdrbg_drng_seed_nocheck,
+  _lc_xdrbg_drng_zero,
+  _lc_xdrbg256_drng_alloc,
+  _lc_xdrbg512_drng_alloc,
+  _lc_xdrbg128_drng_alloc,
+  _lc_drbg_hash_alloc,
+  _lc_drbg_hash_healthcheck_sanity,
+  _lc_drbg_hmac_alloc,
+  _lc_drbg_hmac_healthcheck_sanity,
+  _lc_drbg_ctr_use_df_alloc,
+  _lc_drbg_ctr_no_df_alloc,
+  _lc_sym_getiv,
+  _lc_rng_zero_free,
+  _lc_rng_alg_status,
+  _lc_rng_ctx_alg_status,
+  _lc_rng_set_seeded,
+  _lc_seeded_rng_zero_state,
+  _lc_seeded_rng_status,
+  _clock_gettime,
+  _lc_sha256_init_nocheck,
+  _lc_sha256_init,
+  _lc_hash_nocheck,
+  _lc_sha256_update,
+  _lc_sha256_final,
+  _lc_sha256_get_digestsize,
+  _sha256_fastest_impl,
+  _lc_sha384_init_nocheck,
+  _lc_sha384_init,
+  _lc_sha512_init_nocheck,
+  _lc_sha512_init,
+  _lc_sha512_update,
+  _lc_sha512_final,
+  _lc_sha384_final,
+  _lc_sha512_extract_bytes,
+  _lc_sha384_get_digestsize,
+  _lc_sha512_get_digestsize,
+  _sha512_fastest_impl,
+  _lc_hash_blocksize,
+  _lc_left_encode,
+  _lc_cshake_init_nocheck,
+  _lc_hash_ctxsize,
+  _lc_cshake_ctx_final,
+  _lc_cshake_ctx_alloc,
+  _lc_cshake_ctx_zero_free,
+  _sha3_fastest_impl,
+  _sha3_224_init_common,
+  _sha3_224_digestsize,
+  _sha3_256_init_common,
+  _sha3_256_digestsize,
+  _sha3_384_init_common,
+  _sha3_384_digestsize,
+  _sha3_512_init_common,
+  _sha3_512_digestsize,
+  _shake_128_init_common,
+  _shake_256_init_common,
+  _shake_512_init_common,
+  _cshake_256_init_common,
+  _cshake_128_init_common,
+  _shake_set_digestsize,
+  _shake_get_digestsize,
+  _sha3_224_selftest_common,
+  _sha3_256_selftest_common,
+  _sha3_384_selftest_common,
+  _sha3_512_selftest_common,
+  _shake128_selftest_common,
+  _shake256_selftest_common,
+  _shake512_selftest_common,
+  _cshake256_selftest_common,
+  _cshake128_selftest_common,
+  _lc_xof_nocheck,
+  _ascon_256_init,
+  _ascon_256_init_nocheck,
+  _ascon_digestsize,
+  _ascon_128a_init,
+  _ascon_xof_init,
+  _ascon_xof_init_nocheck,
+  _ascon_xof_set_digestsize,
+  _ascon_xof_get_digestsize,
+  _ascon_256_selftest_common,
+  _ascon_xof_selftest_common,
+  _ascon_cxof_init_nocheck,
+  _ascon_cxof_init,
+  _ascon_cxof_selftest_common,
+  _ascon_fastest_impl,
+  _lc_poly1305_auth,
+  _lc_poly1305_verify,
+  _lc_hash_set_ctx,
+  _lc_hash_alloc,
+  _lc_hash_zero_free,
+  _lc_hash_is_fips_eligible,
+  _lc_hash_alg_status,
+  _lc_hash_ctx_alg_status,
+  _lc_hqc_sk_type,
+  _lc_hqc_pk_type,
+  _lc_hqc_ct_type,
+  _lc_hqc_ss_type,
+  _lc_hqc_sk_size,
+  _lc_hqc_pk_size,
+  _lc_hqc_ct_size,
+  _lc_hqc_ss_size,
+  _lc_hqc_sk_load,
+  _lc_hqc_pk_load,
+  _lc_hqc_ct_load,
+  _lc_hqc_ss_load,
+  _lc_hqc_sk_ptr,
+  _lc_hqc_pk_ptr,
+  _lc_hqc_ct_ptr,
+  _lc_hqc_ss_ptr,
+  _lc_hqc_keypair,
+  _lc_hqc_keypair_from_seed,
+  _lc_hqc_enc,
+  _lc_hqc_enc_kdf,
+  _lc_hqc_dec,
+  _lc_hqc_dec_kdf,
+  _lc_hqc_alg_status,
+  _lc_compare,
+  _putchar,
+  _lc_disable_selftest,
+  _fips140_mode_enable,
+  _fips140_min_keysize,
+  _lc_init,
+  _aes_fastest_impl,
+  _non_pqc_algs_enable,
+  _lc_status_get_result,
+  _chacha20_fastest_impl,
+  _lc_activate_library_internal,
+  _lc_rerun_one_selftest,
+  _lc_fips_integrity_checker,
+  _alg_status_unset_result,
+  _lc_rerun_selftests,
+  _alg_status_unset_result_all,
+  _alg_status,
+  _lc_lib_alg_status,
+  _lc_alg_disable_selftests,
+  _alg_status_set_all_passed_state,
+  _alg_status_print,
+  _lc_activate_library_selftest_init,
+  _lc_activate_library_selftest_fini,
+  _lc_uuid_bin2hex,
+  _lc_bin2hex,
+  _lc_uuid_hex2bin,
+  _lc_hex2bin,
+  _lc_uuid_random,
+  _lc_uuid_time,
+  _lc_status,
+  _snprintf,
+  _posix_memalign,
+  _lc_alloc_high_aligned,
+  _lc_free_high_aligned,
+  _signature_ph_oids,
+  _lc_cpu_feature_disable,
+  _lc_cpu_feature_enable,
+  _lc_cpu_feature_set,
+  _lc_hmac_reinit,
+  _lc_hkdf_extract_prk,
+  _lc_hkdf_expand_prk,
+  _lc_hkdf_zero,
+  _lc_hkdf_alg_status,
+  _lc_hkdf_rng_alloc,
+  _lc_kdf_ctr_generate,
+  _lc_kdf_ctr_init,
+  _lc_kdf_ctr,
+  _lc_kdf_ctr_alg_status,
+  _lc_kdf_ctr_rng_alloc,
+  _lc_kdf_fb_generate,
+  _lc_kdf_fb_init,
+  _lc_kdf_fb,
+  _lc_kdf_fb_alg_status,
+  _lc_kdf_dpi_generate,
+  _lc_kdf_dpi_init,
+  _lc_kdf_dpi,
+  _lc_kdf_dpi_alg_status,
+  _lc_pbkdf2,
+  _lc_pbkdf2_alg_status,
+  _lc_kyber_sk_type,
+  _lc_kyber_pk_type,
+  _lc_kyber_ct_type,
+  _lc_kyber_ss_type,
+  _lc_kyber_sk_size,
+  _lc_kyber_pk_size,
+  _lc_kyber_ct_size,
+  _lc_kyber_ss_size,
+  _lc_kyber_sk_load,
+  _lc_kyber_pk_load,
+  _lc_kyber_ct_load,
+  _lc_kyber_ss_load,
+  _lc_kyber_sk_ptr,
+  _lc_kyber_pk_ptr,
+  _lc_kyber_ct_ptr,
+  _lc_kyber_ss_ptr,
+  _lc_kyber_keypair,
+  _lc_kyber_keypair_from_seed,
+  _lc_kyber_pk_from_sk,
+  _lc_kyber_pct,
+  _lc_kyber_enc,
+  _lc_kyber_dec,
+  _lc_kyber_enc_kdf,
+  _lc_kyber_dec_kdf,
+  _lc_kyber_alg_status,
+  _lc_kex_uake_initiator_init,
+  _lc_kex_uake_responder_ss,
+  _lc_kex_uake_initiator_ss,
+  _lc_kex_ake_initiator_init,
+  _lc_kex_ake_responder_ss,
+  _lc_kex_ake_initiator_ss,
+  _lc_kyber_ies_enc,
+  _lc_kyber_ies_enc_init,
+  _lc_kyber_ies_enc_update,
+  _lc_kyber_ies_enc_final,
+  _lc_kyber_ies_dec,
+  _lc_kyber_ies_dec_init,
+  _lc_kyber_ies_dec_update,
+  _lc_kyber_ies_dec_final,
+  _lc_kyber_x25519_sk_type,
+  _lc_kyber_x25519_pk_type,
+  _lc_kyber_x25519_ct_type,
+  _lc_kyber_x25519_ss_type,
+  _lc_kyber_x25519_sk_size,
+  _lc_kyber_x25519_pk_size,
+  _lc_kyber_x25519_ct_size,
+  _lc_kyber_x25519_ss_size,
+  _lc_kyber_x25519_sk_load,
+  _lc_kyber_x25519_pk_load,
+  _lc_kyber_x25519_ct_load,
+  _lc_kyber_x25519_ss_load,
+  _lc_kyber_x25519_sk_ptr,
+  _lc_kyber_x25519_pk_ptr,
+  _lc_kyber_x25519_ct_ptr,
+  _lc_kyber_x25519_ss_ptr,
+  _lc_kyber_x25519_keypair,
+  _lc_kyber_x25519_pk_from_sk,
+  _lc_kyber_x25519_enc_kdf,
+  _lc_kyber_x25519_enc,
+  _lc_kyber_x25519_dec_kdf,
+  _lc_kyber_x25519_dec,
+  _lc_kex_x25519_uake_initiator_init,
+  _lc_kex_x25519_uake_responder_ss,
+  _lc_kex_x25519_uake_initiator_ss,
+  _lc_kex_x25519_ake_initiator_init,
+  _lc_kex_x25519_ake_responder_ss,
+  _lc_kex_x25519_ake_initiator_ss,
+  _lc_kyber_x25519_ies_enc,
+  _lc_kyber_x25519_ies_enc_init,
+  _lc_kyber_x25519_ies_enc_update,
+  _lc_kyber_x25519_ies_enc_final,
+  _lc_kyber_x25519_ies_dec,
+  _lc_kyber_x25519_ies_dec_init,
+  _lc_kyber_x25519_ies_dec_update,
+  _lc_kyber_x25519_ies_dec_final,
+  _lc_kyber_x448_sk_type,
+  _lc_kyber_x448_pk_type,
+  _lc_kyber_x448_ct_type,
+  _lc_kyber_x448_ss_type,
+  _lc_kyber_x448_sk_size,
+  _lc_kyber_x448_pk_size,
+  _lc_kyber_x448_ct_size,
+  _lc_kyber_x448_ss_size,
+  _lc_kyber_x448_sk_load,
+  _lc_kyber_x448_pk_load,
+  _lc_kyber_x448_ct_load,
+  _lc_kyber_x448_ss_load,
+  _lc_kyber_x448_sk_ptr,
+  _lc_kyber_x448_pk_ptr,
+  _lc_kyber_x448_ct_ptr,
+  _lc_kyber_x448_ss_ptr,
+  _lc_kyber_x448_keypair,
+  _lc_kyber_x448_pk_from_sk,
+  _lc_kyber_x448_enc_kdf,
+  _lc_kyber_x448_enc,
+  _lc_kyber_x448_dec_kdf,
+  _lc_kyber_x448_dec,
+  _lc_kex_x448_uake_initiator_init,
+  _lc_kex_x448_uake_responder_ss,
+  _lc_kex_x448_uake_initiator_ss,
+  _lc_kex_x448_ake_initiator_init,
+  _lc_kex_x448_ake_responder_ss,
+  _lc_kex_x448_ake_initiator_ss,
+  _lc_kyber_x448_ies_enc,
+  _lc_kyber_x448_ies_enc_init,
+  _lc_kyber_x448_ies_enc_update,
+  _lc_kyber_x448_ies_enc_final,
+  _lc_kyber_x448_ies_dec,
+  _lc_kyber_x448_ies_dec_init,
+  _lc_kyber_x448_ies_dec_update,
+  _lc_kyber_x448_ies_dec_final,
+  _lc_hotp,
+  _lc_totp,
+  _lc_dilithium_ctx_alloc,
+  _lc_dilithium_ctx_alloc_ahat,
+  _lc_dilithium_ctx_zero_free,
+  _lc_dilithium_ctx_zero,
+  _lc_dilithium_ctx_internal,
+  _lc_dilithium_ctx_hash,
+  _lc_dilithium_ctx_userctx,
+  _lc_dilithium_ctx_external_mu,
+  _lc_dilithium_ctx_drop_ahat,
+  _lc_dilithium_sk_type,
+  _lc_dilithium_pk_type,
+  _lc_dilithium_sig_type,
+  _lc_dilithium_sk_size,
+  _lc_dilithium_pk_size,
+  _lc_dilithium_sig_size,
+  _lc_dilithium_sk_load,
+  _lc_dilithium_pk_load,
+  _lc_dilithium_sig_load,
+  _lc_dilithium_sk_ptr,
+  _lc_dilithium_pk_ptr,
+  _lc_dilithium_sig_ptr,
+  _lc_dilithium_alg_status,
+  _lc_dilithium_ed25519_ctx_alloc,
+  _lc_dilithium_ed25519_ctx_zero_free,
+  _lc_dilithium_ed25519_ctx_zero,
+  _lc_dilithium_ed25519_ctx_hash,
+  _lc_dilithium_ed25519_ctx_internal,
+  _lc_dilithium_ed25519_ctx_userctx,
+  _lc_dilithium_ed25519_sk_type,
+  _lc_dilithium_ed25519_pk_type,
+  _lc_dilithium_ed25519_sig_type,
+  _lc_dilithium_ed25519_sk_size,
+  _lc_dilithium_ed25519_pk_size,
+  _lc_dilithium_ed25519_sig_size,
+  _lc_dilithium_ed25519_sk_load,
+  _lc_dilithium_ed25519_pk_load,
+  _lc_dilithium_ed25519_sig_load,
+  _lc_dilithium_ed25519_sk_ptr,
+  _lc_dilithium_ed25519_pk_ptr,
+  _lc_dilithium_ed25519_sig_ptr,
+  _lc_dilithium_ed448_ctx_alloc,
+  _lc_dilithium_ed448_ctx_zero_free,
+  _lc_dilithium_ed448_ctx_zero,
+  _lc_dilithium_ed448_ctx_hash,
+  _lc_dilithium_ed448_ctx_internal,
+  _lc_dilithium_ed448_ctx_userctx,
+  _lc_dilithium_ed448_sk_type,
+  _lc_dilithium_ed448_pk_type,
+  _lc_dilithium_ed448_sig_type,
+  _lc_dilithium_ed448_sk_size,
+  _lc_dilithium_ed448_pk_size,
+  _lc_dilithium_ed448_sig_size,
+  _lc_dilithium_ed448_sk_load,
+  _lc_dilithium_ed448_pk_load,
+  _lc_dilithium_ed448_sig_load,
+  _lc_dilithium_ed448_sk_ptr,
+  _lc_dilithium_ed448_pk_ptr,
+  _lc_dilithium_ed448_sig_ptr,
+  _lc_dilithium_keypair,
+  _lc_dilithium_keypair_from_seed,
+  _lc_dilithium_pk_from_sk,
+  _lc_dilithium_pct,
+  _lc_dilithium_sign,
+  _lc_dilithium_verify,
+  _lc_dilithium_ed25519_keypair,
+  _lc_dilithium_ed25519_pk_from_sk,
+  _lc_dilithium_ed448_keypair,
+  _lc_dilithium_ed448_pk_from_sk,
+  _lc_dilithium_sign_ctx,
+  _lc_dilithium_sign_init,
+  _lc_dilithium_sign_update,
+  _lc_dilithium_sign_final,
+  _lc_dilithium_ed25519_sign,
+  _lc_dilithium_ed25519_sign_ctx,
+  _lc_dilithium_ed25519_sign_init,
+  _lc_dilithium_ed25519_sign_update,
+  _lc_dilithium_ed25519_sign_final,
+  _lc_dilithium_ed448_sign,
+  _lc_dilithium_ed448_sign_ctx,
+  _lc_dilithium_ed448_sign_init,
+  _lc_dilithium_ed448_sign_update,
+  _lc_dilithium_ed448_sign_final,
+  _lc_dilithium_verify_ctx,
+  _lc_dilithium_verify_init,
+  _lc_dilithium_verify_update,
+  _lc_dilithium_verify_final,
+  _lc_dilithium_ed25519_verify,
+  _lc_dilithium_ed25519_verify_ctx,
+  _lc_dilithium_ed25519_verify_init,
+  _lc_dilithium_ed25519_verify_update,
+  _lc_dilithium_ed25519_verify_final,
+  _lc_dilithium_ed448_verify,
+  _lc_dilithium_ed448_verify_ctx,
+  _lc_dilithium_ed448_verify_init,
+  _lc_dilithium_ed448_verify_update,
+  _lc_dilithium_ed448_verify_final,
+  _lc_sphincs_ctx_alloc,
+  _lc_sphincs_ctx_zero_free,
+  _lc_sphincs_ctx_zero,
+  _lc_sphincs_ctx_internal,
+  _lc_sphincs_ctx_hash,
+  _lc_sphincs_ctx_userctx,
+  _lc_sphincs_sk_type,
+  _lc_sphincs_pk_type,
+  _lc_sphincs_sig_type,
+  _lc_sphincs_sk_size,
+  _lc_sphincs_pk_size,
+  _lc_sphincs_sig_size,
+  _lc_sphincs_sk_load,
+  _lc_sphincs_sk_set_keytype_fast,
+  _lc_sphincs_sk_set_keytype_small,
+  _lc_sphincs_pk_load,
+  _lc_sphincs_pk_set_keytype_fast,
+  _lc_sphincs_pk_set_keytype_small,
+  _lc_sphincs_sig_load,
+  _lc_sphincs_sk_ptr,
+  _lc_sphincs_pk_ptr,
+  _lc_sphincs_sig_ptr,
+  _lc_sphincs_alg_status,
+  _lc_sphincs_keypair,
+  _lc_sphincs_keypair_from_seed,
+  _lc_sphincs_pk_from_sk,
+  _lc_sphincs_pct,
+  _lc_sphincs_sign,
+  _lc_sphincs_verify,
+  _lc_sphincs_sign_ctx,
+  _lc_sphincs_sign_init,
+  _lc_sphincs_sign_update,
+  _lc_sphincs_sign_final,
+  _lc_sphincs_verify_ctx,
+  _lc_sphincs_verify_init,
+  _lc_sphincs_verify_update,
+  _lc_sphincs_verify_final,
+  _cc20_selftest,
+  _cc20_crypt_remaining,
+  _cc20_init,
+  _cc20_setkey,
+  _cc20_init_iv,
+  _cc20_check_overflow,
+  _cc20_setiv,
+  _cc20_getiv,
+  _mode_cbc_selftest,
+  _mode_ctr_selftest,
+  _mode_kw_selftest,
+  _lc_aes_kw_encrypt,
+  _lc_aes_kw_decrypt,
+  _mode_xts_selftest,
+  _aes_crypt_iv,
+  _aes_init_iv,
+  _aes_setiv,
+  _aes_getiv,
+  _aes_setkey_c,
+  _aes_encrypt_c,
+  _aes_decrypt_c,
+  _aes_setkey_ct,
+  _aes_encrypt_ct,
+  _aes_decrypt_ct,
+  _lc_sym_encrypt_iv,
+  _lc_sym_decrypt_iv,
+  _lc_sym_init_iv,
+  _lc_sym_alloc,
+  _lc_sym_zero_free,
+  _lc_sym_alg_status,
+  _lc_sym_ctx_alg_status,
+  _lc_pkcs8_note_OID_enc,
+  _lc_pkcs8_note_version_enc,
+  _lc_pkcs8_note_algo_enc,
+  _lc_pkcs8_note_key_enc,
+  _lc_hmac_setkey,
+  _hmac_sha256_selftest,
+  _hmac_sha512_selftest,
+  _hmac_sha3_selftest,
+  _lc_hmac_init_with_hmac_key,
+  _lc_hmac_alloc,
+  _lc_hmac_zero_free,
+  _lc_hmac,
+  _lc_hmac_nocheck,
+  _lc_hmac_alg_status,
+  _lc_hmac_ctx_alg_status,
+  _lc_kmac_alloc,
+  _lc_kmac_zero_free,
+  _lc_kmac_macsize,
+  _lc_kmac_alg_status,
+  _lc_kmac_ctx_alg_status,
+  _lc_kmac_rng_alloc,
+  _hex2bin_alloc,
+  _calloc,
+  _bin2hex_alloc,
+  _bin2print,
+  _bin2hex_html,
+  _bin2hex_html_from_url,
+  _bin2hex_html_alloc,
+  _lc_activate_library,
+  _waitid,
+  _times,
+  _getdate,
+  _stime,
+  _clock_getcpuclockid,
+  _getpwnam,
+  _getpwuid,
+  _getpwnam_r,
+  _getpwuid_r,
+  _setpwent,
+  _endpwent,
+  _getpwent,
+  _getgrnam,
+  _getgrgid,
+  _getgrnam_r,
+  _getgrgid_r,
+  _getgrent,
+  _endgrent,
+  _setgrent,
+  _flock,
+  _chroot,
+  _execve,
+  _fork,
+  _vfork,
+  _posix_spawn,
+  _popen,
+  _pclose,
+  _setgroups,
+  _sigaltstack,
+  ___dlsym,
+  ____errno_location,
+  ___dl_seterr,
+  _getloadavg,
+  ___syscall_uname,
+  ___syscall_setpgid,
+  ___syscall_sync,
+  ___syscall_getsid,
+  ___syscall_getpgid,
+  ___syscall_getpid,
+  ___syscall_getppid,
+  ___syscall_getgroups32,
+  ___syscall_setsid,
+  ___syscall_getrusage,
+  ___syscall_getpriority,
+  ___syscall_setpriority,
+  ___syscall_setdomainname,
+  ___syscall_getuid32,
+  ___syscall_getgid32,
+  ___syscall_geteuid32,
+  ___syscall_getegid32,
+  ___syscall_getresuid32,
+  ___syscall_getresgid32,
+  ___syscall_madvise,
+  ___syscall_mlock,
+  ___syscall_munlock,
+  ___syscall_mprotect,
+  ___syscall_mremap,
+  ___syscall_mlockall,
+  ___syscall_munlockall,
+  ___syscall_prlimit64,
+  ___syscall_wait4,
+  ___syscall_acct,
+  ___syscall_mincore,
+  ___syscall_recvmmsg,
+  ___syscall_sendmmsg,
+  ___syscall_socketpair,
+  ___cxa_finalize,
+  __Exit,
+  ___emscripten_environ_constructor,
+  ___fdopen,
+  _fdopen,
+  ___fmodeflags,
+  ___lockfile,
+  ___unlockfile,
+  ___math_divzero,
+  ___math_invalid,
+  ___month_to_secs,
+  ___overflow,
+  ___init_ssp,
+  _memcpy,
+  ___get_tp,
+  ___stack_chk_fail_local,
+  ___stdio_close,
+  ___aio_close,
+  ___stdio_exit,
+  ___stdio_exit_needed,
+  ___stdio_read,
+  ___stdio_seek,
+  ___stdio_write,
+  ___tm_to_secs,
+  ___towrite,
+  ___towrite_needs_stdio_exit,
+  ___tm_to_tzname,
+  _tzset,
+  ___year_to_secs,
+  _abort,
+  ___syscall_ret,
+  ___clock_gettime,
+  ___wasi_syscall_ret,
+  ___wasi_timestamp_to_timespec,
+  ___clock_nanosleep,
+  _clock_nanosleep,
+  ___dl_invalid_handle,
+  ___dl_thread_cleanup,
+  ___dl_vseterr,
+  ___libc_free,
+  _vsnprintf,
+  ___libc_malloc,
+  _emscripten_get_heap_size,
+  _emscripten_builtin_memcpy,
+  __emscripten_memcpy_bulkmem,
+  ___memset,
+  _emscripten_builtin_memset,
+  _memset,
+  ___syscall_munmap,
+  ___syscall_msync,
+  ___syscall_mmap2,
+  _dysize,
+  __emscripten_yield,
+  __emscripten_check_timers,
+  ___wasi_fd_is_valid,
+  ___procfdname,
+  _fflush,
+  ___unlist_locked_file,
+  ___ofl_lock,
+  ___ofl_unlock,
+  _fflush_unlocked,
+  ___lseek,
+  ___ofl_add,
+  _fprintf,
+  _vfprintf,
+  _vfiprintf,
+  ___small_vfprintf,
+  _frexp,
+  ___fstat,
+  ___fstatat,
+  _fstatat,
+  ___futimesat,
+  _futimesat,
+  ___fwritex,
+  _fwrite,
+  _fwrite_unlocked,
+  _strdup,
+  ___strchrnul,
+  _emscripten_builtin_malloc,
+  _emscripten_stack_get_end,
+  _emscripten_stack_get_base,
+  ___nl_langinfo_l,
+  ___nl_langinfo,
+  _nl_langinfo,
+  _nl_langinfo_l,
+  _emscripten_has_threading_support,
+  _emscripten_num_logical_cores,
+  _emscripten_futex_wait,
+  _emscripten_futex_wake,
+  _emscripten_is_main_runtime_thread,
+  ___wait,
+  ___lock,
+  ___unlock,
+  ___inhibit_ptc,
+  ___acquire_ptc,
+  ___release_ptc,
+  _emscripten_main_thread_process_queued_calls,
+  _emscripten_current_thread_process_queued_calls,
+  ___pthread_mutex_lock,
+  ___pthread_mutex_unlock,
+  ___pthread_mutex_trylock,
+  ___pthread_mutex_timedlock,
+  _pthread_mutex_consistent,
+  _pthread_barrier_init,
+  _pthread_barrier_destroy,
+  _pthread_barrier_wait,
+  ___pthread_create,
+  ___pthread_join,
+  ___pthread_key_create,
+  ___pthread_key_delete,
+  _pthread_getspecific,
+  _pthread_setspecific,
+  ___pthread_once,
+  _pthread_cond_wait,
+  _pthread_cond_signal,
+  ___private_cond_signal,
+  _pthread_cond_broadcast,
+  _pthread_cond_init,
+  _pthread_cond_destroy,
+  ___pthread_cond_timedwait,
+  _pthread_atfork,
+  _pthread_cancel,
+  ___pthread_testcancel,
+  ___pthread_exit,
+  ___pthread_detach,
+  _pthread_equal,
+  _pthread_kill,
+  _pthread_self,
+  _raise,
+  _pthread_setcancelstate,
+  _pthread_setcanceltype,
+  _pthread_rwlock_init,
+  _pthread_rwlock_destroy,
+  _pthread_rwlock_rdlock,
+  _pthread_rwlock_tryrdlock,
+  _pthread_rwlock_timedrdlock,
+  _pthread_rwlock_wrlock,
+  _pthread_rwlock_trywrlock,
+  _pthread_rwlock_timedwrlock,
+  _pthread_rwlock_unlock,
+  _sem_post,
+  _sem_wait,
+  _sem_trywait,
+  _emscripten_thread_sleep,
+  _pthread_mutex_timedlock,
+  _emscripten_builtin_pthread_create,
+  _emscripten_builtin_pthread_join,
+  _pthread_key_delete,
+  _pthread_key_create,
+  _pthread_once,
+  _pthread_cond_timedwait,
+  _pthread_testcancel,
+  _emscripten_builtin_pthread_exit,
+  _pthread_exit,
+  _emscripten_builtin_pthread_detach,
+  _pthread_detach,
+  _thrd_detach,
+  ___localtime_r,
+  ___memrchr,
+  _memrchr,
+  _timegm,
+  _mktime,
+  ___gmtime_r,
+  _gmtime_r,
+  ___mmap,
+  ___vm_wait,
+  _emscripten_builtin_free,
+  _emscripten_builtin_memalign,
+  _emscripten_builtin_mmap,
+  ___munmap,
+  _emscripten_builtin_munmap,
+  _printf,
+  ___small_printf,
+  _thrd_current,
+  _emscripten_main_runtime_thread_id,
+  ___sig_is_blocked,
+  _pthread_sigmask,
+  _sigpending,
+  _action_abort,
+  _action_terminate,
+  _sigismember,
+  _sigorset,
+  _sigandset,
+  _sigdelset,
+  _sigaddset,
+  _scalbn,
+  ___sigaction,
+  _sigaction,
+  _strchrnul,
+  ___strftime_fmt_1,
+  ___strftime_l,
+  _strtoul,
+  _strftime_l,
+  _strnlen,
+  _strtoull,
+  _strtoll,
+  _strtol,
+  _strtoimax,
+  _strtoumax,
+  ___strtol_internal,
+  ___strtoul_internal,
+  ___strtoll_internal,
+  ___strtoull_internal,
+  ___strtoimax_internal,
+  ___strtoumax_internal,
+  ___uselocale,
+  _uselocale,
+  _utimensat,
+  ___vfprintf_internal,
+  _wctomb,
+  ___trunctfdf2,
+  _vsniprintf,
+  ___small_vsnprintf,
+  _wcrtomb,
+  _sbrk,
+  _emscripten_builtin_calloc,
+  _emscripten_builtin_realloc,
+  ___libc_calloc,
+  ___libc_realloc,
+  _realloc_in_place,
+  _memalign,
+  _valloc,
+  _pvalloc,
+  _mallinfo,
+  _mallopt,
+  _malloc_trim,
+  _malloc_usable_size,
+  _malloc_footprint,
+  _malloc_max_footprint,
+  _malloc_footprint_limit,
+  _malloc_set_footprint_limit,
+  _independent_calloc,
+  _independent_comalloc,
+  _bulk_free,
+  _emscripten_get_sbrk_ptr,
+  __sbrk64,
+  _brk,
+  ___ashlti3,
+  ___lshrti3,
+  _emscripten_stack_init,
+  _emscripten_stack_set_limits,
+  _emscripten_stack_get_free,
+  __emscripten_stack_restore,
+  __emscripten_stack_alloc,
+  _emscripten_stack_get_current,
+  memory,
+  ___stack_pointer,
+  __indirect_function_table,
+  _stderr,
+  _stdout,
+  _sqlite3_version,
+  _sqlite3_data_directory,
+  _sqlite3_temp_directory,
+  ___dso_handle,
+  _lc_sha3_512,
+  ___stack_chk_guard,
+  ___memory_base,
+  _lc_static_drng,
+  _lc_sha3_384,
+  _lc_seeded_rng,
+  _lc_cshake256,
+  _lc_shake256,
+  _lc_selftest_shake256_drng,
+  _lc_sha3_256,
+  _optimization_blocker_uint64,
+  _lc_shake128,
+  _kyber_zetas,
+  _lc_selftest_drng,
+  _lc_sha512,
+  ___table_base,
+  _lc_hash_aead,
+  _lc_hash_drbg,
+  _lc_ascon_aead,
+  _lc_ascon_128a,
+  _lc_ascon_keccak_aead,
+  _lc_cshake_aead,
+  _lc_kmac_aead,
+  _lc_symhmac_aead,
+  _lc_aes_cbc,
+  _lc_symkmac_aead,
+  _lc_chacha20_poly1305_aead,
+  _lc_chacha20,
+  _null_buffer,
+  _lc_aes_gcm_aead,
+  _lc_aes,
+  _curve448_precomputed_base,
+  _curve448_wnaf_base,
+  _lc_cc20_drng,
+  _lc_kmac256_drng,
+  _lc_cshake256_drng,
+  _lc_xdrbg256_drng,
+  _lc_xdrbg512_drng,
+  _lc_shake512,
+  _lc_xdrbg128_drng,
+  _lc_ascon_xof,
+  _lc_hmac_drbg,
+  _lc_ctr_drbg,
+  _lc_aes_ctr,
+  _lc_seeded_rng_internal,
+  _lc_sha256,
+  _lc_sha256_c,
+  _lc_sha256_shani,
+  _lc_sha256_avx2,
+  _lc_sha256_arm_ce,
+  _lc_sha256_arm_neon,
+  _lc_sha256_riscv,
+  _lc_sha256_riscv_zbb,
+  _lc_sha512_c,
+  _lc_sha384_c,
+  _lc_sha384,
+  _lc_sha512_shani,
+  _lc_sha384_shani,
+  _lc_sha512_avx2,
+  _lc_sha384_avx2,
+  _lc_sha512_arm_ce,
+  _lc_sha384_arm_ce,
+  _lc_sha512_arm_neon,
+  _lc_sha384_arm_neon,
+  _lc_sha512_riscv,
+  _lc_sha384_riscv,
+  _lc_sha512_riscv_zbb,
+  _lc_sha384_riscv_zbb,
+  _lc_sha3_224_arm_asm,
+  _lc_sha3_224_c,
+  _lc_sha3_256_c,
+  _lc_sha3_256_arm_asm,
+  _lc_sha3_384_c,
+  _lc_sha3_384_arm_asm,
+  _lc_sha3_512_c,
+  _lc_sha3_512_arm_asm,
+  _lc_shake128_c,
+  _lc_shake128_arm_asm,
+  _lc_shake256_c,
+  _lc_shake256_arm_asm,
+  _lc_shake512_c,
+  _lc_shake512_arm_asm,
+  _lc_cshake128_c,
+  _lc_cshake128_arm_asm,
+  _lc_cshake256_c,
+  _lc_cshake256_arm_asm,
+  _lc_sha3_224_arm_ce,
+  _lc_sha3_256_arm_ce,
+  _lc_sha3_384_arm_ce,
+  _lc_sha3_512_arm_ce,
+  _lc_shake128_arm_ce,
+  _lc_shake256_arm_ce,
+  _lc_shake512_arm_ce,
+  _lc_cshake128_arm_ce,
+  _lc_cshake256_arm_ce,
+  _lc_sha3_224_arm_neon,
+  _lc_sha3_256_arm_neon,
+  _lc_sha3_384_arm_neon,
+  _lc_sha3_512_arm_neon,
+  _lc_shake128_arm_neon,
+  _lc_shake256_arm_neon,
+  _lc_shake512_arm_neon,
+  _lc_cshake128_arm_neon,
+  _lc_cshake256_arm_neon,
+  _lc_sha3_224_avx512,
+  _lc_sha3_256_avx512,
+  _lc_sha3_384_avx512,
+  _lc_sha3_512_avx512,
+  _lc_shake128_avx512,
+  _lc_shake256_avx512,
+  _lc_shake512_avx512,
+  _lc_cshake128_avx512,
+  _lc_cshake256_avx512,
+  _lc_sha3_224_avx2,
+  _lc_sha3_256_avx2,
+  _lc_sha3_384_avx2,
+  _lc_sha3_512_avx2,
+  _lc_shake128_avx2,
+  _lc_shake256_avx2,
+  _lc_shake512_avx2,
+  _lc_cshake128_avx2,
+  _lc_cshake256_avx2,
+  _lc_sha3_224_riscv_asm,
+  _lc_sha3_256_riscv_asm,
+  _lc_sha3_384_riscv_asm,
+  _lc_sha3_512_riscv_asm,
+  _lc_shake128_riscv_asm,
+  _lc_shake256_riscv_asm,
+  _lc_shake512_riscv_asm,
+  _lc_cshake128_riscv_asm,
+  _lc_cshake256_riscv_asm,
+  _lc_sha3_224_riscv_asm_zbb,
+  _lc_sha3_256_riscv_asm_zbb,
+  _lc_sha3_384_riscv_asm_zbb,
+  _lc_sha3_512_riscv_asm_zbb,
+  _lc_shake128_riscv_asm_zbb,
+  _lc_shake256_riscv_asm_zbb,
+  _lc_shake512_riscv_asm_zbb,
+  _lc_cshake128_riscv_asm_zbb,
+  _lc_cshake256_riscv_asm_zbb,
+  _lc_sha3_224,
+  _lc_cshake128,
+  _lc_ascon_256_c,
+  _lc_ascon_128a_c,
+  _lc_ascon_xof_c,
+  _lc_ascon_256,
+  _lc_ascon_256_avx512,
+  _lc_ascon_128a_avx512,
+  _lc_ascon_xof_avx512,
+  _lc_ascon_256_arm_neon,
+  _lc_ascon_128a_arm_neon,
+  _lc_ascon_xof_arm_neon,
+  _lc_aes_sbox,
+  _lc_aes_ct,
+  _lc_aes_c,
+  _lc_aes_aesni,
+  _lc_aes_armce,
+  _lc_aes_riscv64,
+  _lc_chacha20_neon,
+  _lc_chacha20_avx512,
+  _lc_chacha20_avx2,
+  _lc_chacha20_riscv64_v_zbb,
+  _lc_chacha20_c,
+  _lc_x509_composite_sig_prefix,
+  _lc_hkdf_rng,
+  _lc_kdf_ctr_rng,
+  _dilithium_zetas,
+  _lc_aes_cbc_c,
+  _lc_mode_cbc_c,
+  _lc_aes_cbc_aesni,
+  _lc_aes_cbc_armce,
+  _lc_aes_cbc_riscv64,
+  _lc_aes_ctr_c,
+  _lc_mode_ctr_c,
+  _lc_aes_ctr_aesni,
+  _lc_aes_ctr_armce,
+  _lc_aes_ctr_riscv64,
+  _lc_aes_kw_c,
+  _lc_mode_kw_c,
+  _lc_aes_kw,
+  _lc_aes_kw_aesni,
+  _lc_aes_kw_armce,
+  _lc_aes_kw_riscv64,
+  _lc_aes_xts_c,
+  _lc_mode_xts_c,
+  _lc_aes_xts,
+  _lc_aes_xts_aesni,
+  _lc_aes_xts_armce,
+  _lc_aes_xts_riscv64,
+  _lc_kmac_rng,
+  ___environ,
+  ____environ,
+  __environ,
+  _environ,
+  ___stdin_used,
+  ___stdout_used,
+  ___stderr_used,
+  ___tzname,
+  _timezone,
+  _daylight,
+  ___timezone,
+  ___daylight,
+  _tzname,
+  ___default_stacksize,
+  ___default_guardsize,
+  ___libc,
+  ___hwcap,
+  ___log_data,
+  ___stdio_ofl_lockptr,
+  ___stdout_FILE,
+  ___stack_high,
+  ___stack_low,
+  ___sig_pending,
+  ___sig_actions,
+  ___stderr_FILE,
+  ___tls_locale,
+  ___heap_base,
+  ___data_end,
+  ___rodata_start,
+  ___rodata_end,
+  ___global_base,
+  ___heap_end,
+  ___wasm_first_page_end,
+  ___tls_base,
+  wasmMemory,
+  wasmTable;
+
+
+function assignWasmExports(wasmExports) {
+  _sqlite3_status64 = Module['_sqlite3_status64'] = wasmExports['sqlite3_status64'];
+  _sqlite3_log = Module['_sqlite3_log'] = wasmExports['sqlite3_log'];
+  _sqlite3_mutex_enter = Module['_sqlite3_mutex_enter'] = wasmExports['sqlite3_mutex_enter'];
+  _sqlite3_mutex_leave = Module['_sqlite3_mutex_leave'] = wasmExports['sqlite3_mutex_leave'];
+  _sqlite3_status = Module['_sqlite3_status'] = wasmExports['sqlite3_status'];
+  _sqlite3_db_status64 = Module['_sqlite3_db_status64'] = wasmExports['sqlite3_db_status64'];
+  _sqlite3_msize = Module['_sqlite3_msize'] = wasmExports['sqlite3_msize'];
+  _sqlite3_db_status = Module['_sqlite3_db_status'] = wasmExports['sqlite3_db_status'];
+  _sqlite3_vfs_find = Module['_sqlite3_vfs_find'] = wasmExports['sqlite3_vfs_find'];
+  _sqlite3_initialize = Module['_sqlite3_initialize'] = wasmExports['sqlite3_initialize'];
+  _strcmp = Module['_strcmp'] = wasmExports['strcmp'];
+  _sqlite3_config = Module['_sqlite3_config'] = wasmExports['sqlite3_config'];
+  _sqlcipher_init_memmethods = Module['_sqlcipher_init_memmethods'] = wasmExports['sqlcipher_init_memmethods'];
+  _strlen = Module['_strlen'] = wasmExports['strlen'];
+  _getenv = Module['_getenv'] = wasmExports['getenv'];
+  _sqlcipher_extra_init = Module['_sqlcipher_extra_init'] = wasmExports['sqlcipher_extra_init'];
+  _sqlite3_vfs_register = Module['_sqlite3_vfs_register'] = wasmExports['sqlite3_vfs_register'];
+  _sqlite3_vfs_unregister = Module['_sqlite3_vfs_unregister'] = wasmExports['sqlite3_vfs_unregister'];
+  _sqlite3_mutex_alloc = Module['_sqlite3_mutex_alloc'] = wasmExports['sqlite3_mutex_alloc'];
+  _sqlite3_mutex_free = Module['_sqlite3_mutex_free'] = wasmExports['sqlite3_mutex_free'];
+  _sqlite3_mutex_try = Module['_sqlite3_mutex_try'] = wasmExports['sqlite3_mutex_try'];
+  _sqlite3_release_memory = Module['_sqlite3_release_memory'] = wasmExports['sqlite3_release_memory'];
+  _sqlite3_memory_alarm = Module['_sqlite3_memory_alarm'] = wasmExports['sqlite3_memory_alarm'];
+  _sqlite3_soft_heap_limit64 = Module['_sqlite3_soft_heap_limit64'] = wasmExports['sqlite3_soft_heap_limit64'];
+  _sqlite3_memory_used = Module['_sqlite3_memory_used'] = wasmExports['sqlite3_memory_used'];
+  _sqlite3_soft_heap_limit = Module['_sqlite3_soft_heap_limit'] = wasmExports['sqlite3_soft_heap_limit'];
+  _sqlite3_hard_heap_limit64 = Module['_sqlite3_hard_heap_limit64'] = wasmExports['sqlite3_hard_heap_limit64'];
+  _sqlite3_memory_highwater = Module['_sqlite3_memory_highwater'] = wasmExports['sqlite3_memory_highwater'];
+  _sqlite3_malloc = Module['_sqlite3_malloc'] = wasmExports['sqlite3_malloc'];
+  _sqlite3_malloc64 = Module['_sqlite3_malloc64'] = wasmExports['sqlite3_malloc64'];
+  _sqlite3_free = Module['_sqlite3_free'] = wasmExports['sqlite3_free'];
+  _sqlite3_realloc = Module['_sqlite3_realloc'] = wasmExports['sqlite3_realloc'];
+  _sqlite3_realloc64 = Module['_sqlite3_realloc64'] = wasmExports['sqlite3_realloc64'];
+  _sqlite3_str_vappendf = Module['_sqlite3_str_vappendf'] = wasmExports['sqlite3_str_vappendf'];
+  _strchr = Module['_strchr'] = wasmExports['strchr'];
+  _sqlite3_str_appendf = Module['_sqlite3_str_appendf'] = wasmExports['sqlite3_str_appendf'];
+  ___multi3 = Module['___multi3'] = wasmExports['__multi3'];
+  _sqlite3_str_append = Module['_sqlite3_str_append'] = wasmExports['sqlite3_str_append'];
+  _sqlite3_str_appendchar = Module['_sqlite3_str_appendchar'] = wasmExports['sqlite3_str_appendchar'];
+  _sqlite3_str_appendall = Module['_sqlite3_str_appendall'] = wasmExports['sqlite3_str_appendall'];
+  _sqlite3_str_finish = Module['_sqlite3_str_finish'] = wasmExports['sqlite3_str_finish'];
+  _sqlite3_str_errcode = Module['_sqlite3_str_errcode'] = wasmExports['sqlite3_str_errcode'];
+  _sqlite3_str_length = Module['_sqlite3_str_length'] = wasmExports['sqlite3_str_length'];
+  _sqlite3_str_truncate = Module['_sqlite3_str_truncate'] = wasmExports['sqlite3_str_truncate'];
+  _sqlite3_str_value = Module['_sqlite3_str_value'] = wasmExports['sqlite3_str_value'];
+  _sqlite3_str_reset = Module['_sqlite3_str_reset'] = wasmExports['sqlite3_str_reset'];
+  _sqlite3_str_free = Module['_sqlite3_str_free'] = wasmExports['sqlite3_str_free'];
+  _sqlite3_str_new = Module['_sqlite3_str_new'] = wasmExports['sqlite3_str_new'];
+  _sqlite3_vmprintf = Module['_sqlite3_vmprintf'] = wasmExports['sqlite3_vmprintf'];
+  _sqlite3_mprintf = Module['_sqlite3_mprintf'] = wasmExports['sqlite3_mprintf'];
+  _sqlite3_vsnprintf = Module['_sqlite3_vsnprintf'] = wasmExports['sqlite3_vsnprintf'];
+  _sqlite3_snprintf = Module['_sqlite3_snprintf'] = wasmExports['sqlite3_snprintf'];
+  _sqlite3_randomness = Module['_sqlite3_randomness'] = wasmExports['sqlite3_randomness'];
+  _sqlite3_stricmp = Module['_sqlite3_stricmp'] = wasmExports['sqlite3_stricmp'];
+  _sqlite3_strnicmp = Module['_sqlite3_strnicmp'] = wasmExports['sqlite3_strnicmp'];
+  _sqlite3_os_init = Module['_sqlite3_os_init'] = wasmExports['sqlite3_os_init'];
+  _getpid = Module['_getpid'] = wasmExports['getpid'];
+  _sqlite3_uri_parameter = Module['_sqlite3_uri_parameter'] = wasmExports['sqlite3_uri_parameter'];
+  ___errno_location = Module['___errno_location'] = wasmExports['__errno_location'];
+  _fsync = Module['_fsync'] = wasmExports['fsync'];
+  _dlopen = Module['_dlopen'] = wasmExports['dlopen'];
+  _dlerror = Module['_dlerror'] = wasmExports['dlerror'];
+  _dlsym = Module['_dlsym'] = wasmExports['dlsym'];
+  _dlclose = Module['_dlclose'] = wasmExports['dlclose'];
+  _time = Module['_time'] = wasmExports['time'];
+  _nanosleep = Module['_nanosleep'] = wasmExports['nanosleep'];
+  _gettimeofday = Module['_gettimeofday'] = wasmExports['gettimeofday'];
+  _sqlite3_os_end = Module['_sqlite3_os_end'] = wasmExports['sqlite3_os_end'];
+  _sqlite3_serialize = Module['_sqlite3_serialize'] = wasmExports['sqlite3_serialize'];
+  _sqlite3_file_control = Module['_sqlite3_file_control'] = wasmExports['sqlite3_file_control'];
+  _sqlite3_step = Module['_sqlite3_step'] = wasmExports['sqlite3_step'];
+  _sqlite3_column_int64 = Module['_sqlite3_column_int64'] = wasmExports['sqlite3_column_int64'];
+  _sqlite3_reset = Module['_sqlite3_reset'] = wasmExports['sqlite3_reset'];
+  _sqlite3_exec = Module['_sqlite3_exec'] = wasmExports['sqlite3_exec'];
+  _sqlite3_column_int = Module['_sqlite3_column_int'] = wasmExports['sqlite3_column_int'];
+  _sqlite3_finalize = Module['_sqlite3_finalize'] = wasmExports['sqlite3_finalize'];
+  _sqlite3_prepare_v2 = Module['_sqlite3_prepare_v2'] = wasmExports['sqlite3_prepare_v2'];
+  _sqlite3_column_text = Module['_sqlite3_column_text'] = wasmExports['sqlite3_column_text'];
+  _sqlite3_column_type = Module['_sqlite3_column_type'] = wasmExports['sqlite3_column_type'];
+  _sqlite3_errmsg = Module['_sqlite3_errmsg'] = wasmExports['sqlite3_errmsg'];
+  _sqlite3_deserialize = Module['_sqlite3_deserialize'] = wasmExports['sqlite3_deserialize'];
+  _sqlite3_database_file_object = Module['_sqlite3_database_file_object'] = wasmExports['sqlite3_database_file_object'];
+  _sqlcipherPagerSetCodec = Module['_sqlcipherPagerSetCodec'] = wasmExports['sqlcipherPagerSetCodec'];
+  _sqlcipherPagerGetCodec = Module['_sqlcipherPagerGetCodec'] = wasmExports['sqlcipherPagerGetCodec'];
+  _sqlcipherPagerCodec = Module['_sqlcipherPagerCodec'] = wasmExports['sqlcipherPagerCodec'];
+  _sqlite3pager_is_sj_pgno = Module['_sqlite3pager_is_sj_pgno'] = wasmExports['sqlite3pager_is_sj_pgno'];
+  _sqlite3pager_error = Module['_sqlite3pager_error'] = wasmExports['sqlite3pager_error'];
+  _sqlite3pager_reset = Module['_sqlite3pager_reset'] = wasmExports['sqlite3pager_reset'];
+  _sqlite3_enable_shared_cache = Module['_sqlite3_enable_shared_cache'] = wasmExports['sqlite3_enable_shared_cache'];
+  _sqlite3_backup_init = Module['_sqlite3_backup_init'] = wasmExports['sqlite3_backup_init'];
+  _sqlcipherCodecGetKey = Module['_sqlcipherCodecGetKey'] = wasmExports['sqlcipherCodecGetKey'];
+  _sqlcipher_free = Module['_sqlcipher_free'] = wasmExports['sqlcipher_free'];
+  _sqlcipher_log = Module['_sqlcipher_log'] = wasmExports['sqlcipher_log'];
+  _sqlcipher_malloc = Module['_sqlcipher_malloc'] = wasmExports['sqlcipher_malloc'];
+  _sqlcipher_find_db_index = Module['_sqlcipher_find_db_index'] = wasmExports['sqlcipher_find_db_index'];
+  _xoshiro_next = Module['_xoshiro_next'] = wasmExports['xoshiro_next'];
+  _sqlite3_backup_step = Module['_sqlite3_backup_step'] = wasmExports['sqlite3_backup_step'];
+  _sqlite3_backup_finish = Module['_sqlite3_backup_finish'] = wasmExports['sqlite3_backup_finish'];
+  _sqlite3_backup_remaining = Module['_sqlite3_backup_remaining'] = wasmExports['sqlite3_backup_remaining'];
+  _sqlite3_backup_pagecount = Module['_sqlite3_backup_pagecount'] = wasmExports['sqlite3_backup_pagecount'];
+  _sqlite3_expired = Module['_sqlite3_expired'] = wasmExports['sqlite3_expired'];
+  _sqlite3_clear_bindings = Module['_sqlite3_clear_bindings'] = wasmExports['sqlite3_clear_bindings'];
+  _sqlite3_value_blob = Module['_sqlite3_value_blob'] = wasmExports['sqlite3_value_blob'];
+  _sqlite3_value_text = Module['_sqlite3_value_text'] = wasmExports['sqlite3_value_text'];
+  _sqlite3_value_bytes = Module['_sqlite3_value_bytes'] = wasmExports['sqlite3_value_bytes'];
+  _sqlite3_value_bytes16 = Module['_sqlite3_value_bytes16'] = wasmExports['sqlite3_value_bytes16'];
+  _sqlite3_value_double = Module['_sqlite3_value_double'] = wasmExports['sqlite3_value_double'];
+  _sqlite3_value_int = Module['_sqlite3_value_int'] = wasmExports['sqlite3_value_int'];
+  _sqlite3_value_int64 = Module['_sqlite3_value_int64'] = wasmExports['sqlite3_value_int64'];
+  _sqlite3_value_subtype = Module['_sqlite3_value_subtype'] = wasmExports['sqlite3_value_subtype'];
+  _sqlite3_value_pointer = Module['_sqlite3_value_pointer'] = wasmExports['sqlite3_value_pointer'];
+  _sqlite3_value_text16 = Module['_sqlite3_value_text16'] = wasmExports['sqlite3_value_text16'];
+  _sqlite3_value_text16be = Module['_sqlite3_value_text16be'] = wasmExports['sqlite3_value_text16be'];
+  _sqlite3_value_text16le = Module['_sqlite3_value_text16le'] = wasmExports['sqlite3_value_text16le'];
+  _sqlite3_value_type = Module['_sqlite3_value_type'] = wasmExports['sqlite3_value_type'];
+  _sqlite3_value_encoding = Module['_sqlite3_value_encoding'] = wasmExports['sqlite3_value_encoding'];
+  _sqlite3_value_nochange = Module['_sqlite3_value_nochange'] = wasmExports['sqlite3_value_nochange'];
+  _sqlite3_value_frombind = Module['_sqlite3_value_frombind'] = wasmExports['sqlite3_value_frombind'];
+  _sqlite3_value_dup = Module['_sqlite3_value_dup'] = wasmExports['sqlite3_value_dup'];
+  _sqlite3_value_free = Module['_sqlite3_value_free'] = wasmExports['sqlite3_value_free'];
+  _sqlite3_result_blob = Module['_sqlite3_result_blob'] = wasmExports['sqlite3_result_blob'];
+  _sqlite3_result_error_nomem = Module['_sqlite3_result_error_nomem'] = wasmExports['sqlite3_result_error_nomem'];
+  _sqlite3_result_blob64 = Module['_sqlite3_result_blob64'] = wasmExports['sqlite3_result_blob64'];
+  _sqlite3_result_double = Module['_sqlite3_result_double'] = wasmExports['sqlite3_result_double'];
+  _sqlite3_result_error = Module['_sqlite3_result_error'] = wasmExports['sqlite3_result_error'];
+  _sqlite3_result_error16 = Module['_sqlite3_result_error16'] = wasmExports['sqlite3_result_error16'];
+  _sqlite3_result_int = Module['_sqlite3_result_int'] = wasmExports['sqlite3_result_int'];
+  _sqlite3_result_int64 = Module['_sqlite3_result_int64'] = wasmExports['sqlite3_result_int64'];
+  _sqlite3_result_null = Module['_sqlite3_result_null'] = wasmExports['sqlite3_result_null'];
+  _sqlite3_result_pointer = Module['_sqlite3_result_pointer'] = wasmExports['sqlite3_result_pointer'];
+  _sqlite3_result_subtype = Module['_sqlite3_result_subtype'] = wasmExports['sqlite3_result_subtype'];
+  _sqlite3_result_text = Module['_sqlite3_result_text'] = wasmExports['sqlite3_result_text'];
+  _sqlite3_result_text64 = Module['_sqlite3_result_text64'] = wasmExports['sqlite3_result_text64'];
+  _sqlite3_result_text16 = Module['_sqlite3_result_text16'] = wasmExports['sqlite3_result_text16'];
+  _sqlite3_result_text16be = Module['_sqlite3_result_text16be'] = wasmExports['sqlite3_result_text16be'];
+  _sqlite3_result_text16le = Module['_sqlite3_result_text16le'] = wasmExports['sqlite3_result_text16le'];
+  _sqlite3_result_value = Module['_sqlite3_result_value'] = wasmExports['sqlite3_result_value'];
+  _sqlite3_result_error_toobig = Module['_sqlite3_result_error_toobig'] = wasmExports['sqlite3_result_error_toobig'];
+  _sqlite3_result_zeroblob = Module['_sqlite3_result_zeroblob'] = wasmExports['sqlite3_result_zeroblob'];
+  _sqlite3_result_zeroblob64 = Module['_sqlite3_result_zeroblob64'] = wasmExports['sqlite3_result_zeroblob64'];
+  _sqlite3_result_error_code = Module['_sqlite3_result_error_code'] = wasmExports['sqlite3_result_error_code'];
+  _sqlite3_user_data = Module['_sqlite3_user_data'] = wasmExports['sqlite3_user_data'];
+  _sqlite3_context_db_handle = Module['_sqlite3_context_db_handle'] = wasmExports['sqlite3_context_db_handle'];
+  _sqlite3_vtab_nochange = Module['_sqlite3_vtab_nochange'] = wasmExports['sqlite3_vtab_nochange'];
+  _sqlite3_vtab_in_first = Module['_sqlite3_vtab_in_first'] = wasmExports['sqlite3_vtab_in_first'];
+  _sqlite3_vtab_in_next = Module['_sqlite3_vtab_in_next'] = wasmExports['sqlite3_vtab_in_next'];
+  _sqlite3_aggregate_context = Module['_sqlite3_aggregate_context'] = wasmExports['sqlite3_aggregate_context'];
+  _sqlite3_get_auxdata = Module['_sqlite3_get_auxdata'] = wasmExports['sqlite3_get_auxdata'];
+  _sqlite3_set_auxdata = Module['_sqlite3_set_auxdata'] = wasmExports['sqlite3_set_auxdata'];
+  _sqlite3_aggregate_count = Module['_sqlite3_aggregate_count'] = wasmExports['sqlite3_aggregate_count'];
+  _sqlite3_column_count = Module['_sqlite3_column_count'] = wasmExports['sqlite3_column_count'];
+  _sqlite3_data_count = Module['_sqlite3_data_count'] = wasmExports['sqlite3_data_count'];
+  _sqlite3_column_blob = Module['_sqlite3_column_blob'] = wasmExports['sqlite3_column_blob'];
+  _sqlite3_column_bytes = Module['_sqlite3_column_bytes'] = wasmExports['sqlite3_column_bytes'];
+  _sqlite3_column_bytes16 = Module['_sqlite3_column_bytes16'] = wasmExports['sqlite3_column_bytes16'];
+  _sqlite3_column_double = Module['_sqlite3_column_double'] = wasmExports['sqlite3_column_double'];
+  _sqlite3_column_value = Module['_sqlite3_column_value'] = wasmExports['sqlite3_column_value'];
+  _sqlite3_column_text16 = Module['_sqlite3_column_text16'] = wasmExports['sqlite3_column_text16'];
+  _sqlite3_column_name = Module['_sqlite3_column_name'] = wasmExports['sqlite3_column_name'];
+  _sqlite3_column_name16 = Module['_sqlite3_column_name16'] = wasmExports['sqlite3_column_name16'];
+  _sqlite3_column_decltype = Module['_sqlite3_column_decltype'] = wasmExports['sqlite3_column_decltype'];
+  _sqlite3_column_decltype16 = Module['_sqlite3_column_decltype16'] = wasmExports['sqlite3_column_decltype16'];
+  _sqlite3_bind_blob = Module['_sqlite3_bind_blob'] = wasmExports['sqlite3_bind_blob'];
+  _sqlite3_bind_blob64 = Module['_sqlite3_bind_blob64'] = wasmExports['sqlite3_bind_blob64'];
+  _sqlite3_bind_double = Module['_sqlite3_bind_double'] = wasmExports['sqlite3_bind_double'];
+  _sqlite3_bind_int = Module['_sqlite3_bind_int'] = wasmExports['sqlite3_bind_int'];
+  _sqlite3_bind_int64 = Module['_sqlite3_bind_int64'] = wasmExports['sqlite3_bind_int64'];
+  _sqlite3_bind_null = Module['_sqlite3_bind_null'] = wasmExports['sqlite3_bind_null'];
+  _sqlite3_bind_pointer = Module['_sqlite3_bind_pointer'] = wasmExports['sqlite3_bind_pointer'];
+  _sqlite3_bind_text = Module['_sqlite3_bind_text'] = wasmExports['sqlite3_bind_text'];
+  _sqlite3_bind_text64 = Module['_sqlite3_bind_text64'] = wasmExports['sqlite3_bind_text64'];
+  _sqlite3_bind_text16 = Module['_sqlite3_bind_text16'] = wasmExports['sqlite3_bind_text16'];
+  _sqlite3_bind_value = Module['_sqlite3_bind_value'] = wasmExports['sqlite3_bind_value'];
+  _sqlite3_bind_zeroblob = Module['_sqlite3_bind_zeroblob'] = wasmExports['sqlite3_bind_zeroblob'];
+  _sqlite3_bind_zeroblob64 = Module['_sqlite3_bind_zeroblob64'] = wasmExports['sqlite3_bind_zeroblob64'];
+  _sqlite3_bind_parameter_count = Module['_sqlite3_bind_parameter_count'] = wasmExports['sqlite3_bind_parameter_count'];
+  _sqlite3_bind_parameter_name = Module['_sqlite3_bind_parameter_name'] = wasmExports['sqlite3_bind_parameter_name'];
+  _sqlite3_bind_parameter_index = Module['_sqlite3_bind_parameter_index'] = wasmExports['sqlite3_bind_parameter_index'];
+  _strncmp = Module['_strncmp'] = wasmExports['strncmp'];
+  _sqlite3_transfer_bindings = Module['_sqlite3_transfer_bindings'] = wasmExports['sqlite3_transfer_bindings'];
+  _sqlite3_db_handle = Module['_sqlite3_db_handle'] = wasmExports['sqlite3_db_handle'];
+  _sqlite3_stmt_readonly = Module['_sqlite3_stmt_readonly'] = wasmExports['sqlite3_stmt_readonly'];
+  _sqlite3_stmt_isexplain = Module['_sqlite3_stmt_isexplain'] = wasmExports['sqlite3_stmt_isexplain'];
+  _sqlite3_stmt_explain = Module['_sqlite3_stmt_explain'] = wasmExports['sqlite3_stmt_explain'];
+  _sqlite3_stmt_busy = Module['_sqlite3_stmt_busy'] = wasmExports['sqlite3_stmt_busy'];
+  _sqlite3_next_stmt = Module['_sqlite3_next_stmt'] = wasmExports['sqlite3_next_stmt'];
+  _sqlite3_stmt_status = Module['_sqlite3_stmt_status'] = wasmExports['sqlite3_stmt_status'];
+  _sqlite3_sql = Module['_sqlite3_sql'] = wasmExports['sqlite3_sql'];
+  _sqlite3_expanded_sql = Module['_sqlite3_expanded_sql'] = wasmExports['sqlite3_expanded_sql'];
+  _sqlite3_value_numeric_type = Module['_sqlite3_value_numeric_type'] = wasmExports['sqlite3_value_numeric_type'];
+  _sqlite3_blob_open = Module['_sqlite3_blob_open'] = wasmExports['sqlite3_blob_open'];
+  _sqlite3_blob_close = Module['_sqlite3_blob_close'] = wasmExports['sqlite3_blob_close'];
+  _sqlite3_blob_read = Module['_sqlite3_blob_read'] = wasmExports['sqlite3_blob_read'];
+  _sqlite3_blob_write = Module['_sqlite3_blob_write'] = wasmExports['sqlite3_blob_write'];
+  _sqlite3_blob_bytes = Module['_sqlite3_blob_bytes'] = wasmExports['sqlite3_blob_bytes'];
+  _sqlite3_blob_reopen = Module['_sqlite3_blob_reopen'] = wasmExports['sqlite3_blob_reopen'];
+  _sqlcipher_mutex = Module['_sqlcipher_mutex'] = wasmExports['sqlcipher_mutex'];
+  _sqlcipher_extra_shutdown = Module['_sqlcipher_extra_shutdown'] = wasmExports['sqlcipher_extra_shutdown'];
+  _atexit = Module['_atexit'] = wasmExports['atexit'];
+  _sqlcipher_leancrypto_setup = Module['_sqlcipher_leancrypto_setup'] = wasmExports['sqlcipher_leancrypto_setup'];
+  _sqlcipher_register_provider = Module['_sqlcipher_register_provider'] = wasmExports['sqlcipher_register_provider'];
+  _sqlite3_auto_extension = Module['_sqlite3_auto_extension'] = wasmExports['sqlite3_auto_extension'];
+  _localtime_r = Module['_localtime_r'] = wasmExports['localtime_r'];
+  _strftime = Module['_strftime'] = wasmExports['strftime'];
+  _fiprintf = Module['_fiprintf'] = wasmExports['fiprintf'];
+  _sqlcipher_get_provider = Module['_sqlcipher_get_provider'] = wasmExports['sqlcipher_get_provider'];
+  _sqlcipher_memset = Module['_sqlcipher_memset'] = wasmExports['sqlcipher_memset'];
+  _sqlcipher_ismemset = Module['_sqlcipher_ismemset'] = wasmExports['sqlcipher_ismemset'];
+  _sqlcipher_memcmp = Module['_sqlcipher_memcmp'] = wasmExports['sqlcipher_memcmp'];
+  _sqlcipher_version = Module['_sqlcipher_version'] = wasmExports['sqlcipher_version'];
+  _sqlcipher_codec_pragma = Module['_sqlcipher_codec_pragma'] = wasmExports['sqlcipher_codec_pragma'];
+  _fopen = Module['_fopen'] = wasmExports['fopen'];
+  _atoi = Module['_atoi'] = wasmExports['atoi'];
+  _fclose = Module['_fclose'] = wasmExports['fclose'];
+  _sqlcipherCodecAttach = Module['_sqlcipherCodecAttach'] = wasmExports['sqlcipherCodecAttach'];
+  _sqlite3_activate_see = Module['_sqlite3_activate_see'] = wasmExports['sqlite3_activate_see'];
+  _sqlite3_key = Module['_sqlite3_key'] = wasmExports['sqlite3_key'];
+  _sqlite3_key_v2 = Module['_sqlite3_key_v2'] = wasmExports['sqlite3_key_v2'];
+  _sqlite3_rekey = Module['_sqlite3_rekey'] = wasmExports['sqlite3_rekey'];
+  _sqlite3_rekey_v2 = Module['_sqlite3_rekey_v2'] = wasmExports['sqlite3_rekey_v2'];
+  _sqlite3_set_authorizer = Module['_sqlite3_set_authorizer'] = wasmExports['sqlite3_set_authorizer'];
+  _sqlite3_strglob = Module['_sqlite3_strglob'] = wasmExports['sqlite3_strglob'];
+  _strcspn = Module['_strcspn'] = wasmExports['strcspn'];
+  _sqlite3_strlike = Module['_sqlite3_strlike'] = wasmExports['sqlite3_strlike'];
+  _sqlite3_load_extension = Module['_sqlite3_load_extension'] = wasmExports['sqlite3_load_extension'];
+  _sqlite3_enable_load_extension = Module['_sqlite3_enable_load_extension'] = wasmExports['sqlite3_enable_load_extension'];
+  _sqlite3_cancel_auto_extension = Module['_sqlite3_cancel_auto_extension'] = wasmExports['sqlite3_cancel_auto_extension'];
+  _sqlite3_reset_auto_extension = Module['_sqlite3_reset_auto_extension'] = wasmExports['sqlite3_reset_auto_extension'];
+  _sqlite3_prepare = Module['_sqlite3_prepare'] = wasmExports['sqlite3_prepare'];
+  _sqlite3_prepare_v3 = Module['_sqlite3_prepare_v3'] = wasmExports['sqlite3_prepare_v3'];
+  _sqlite3_prepare16 = Module['_sqlite3_prepare16'] = wasmExports['sqlite3_prepare16'];
+  _sqlite3_prepare16_v2 = Module['_sqlite3_prepare16_v2'] = wasmExports['sqlite3_prepare16_v2'];
+  _sqlite3_prepare16_v3 = Module['_sqlite3_prepare16_v3'] = wasmExports['sqlite3_prepare16_v3'];
+  _sqlite3_get_table = Module['_sqlite3_get_table'] = wasmExports['sqlite3_get_table'];
+  _sqlite3_free_table = Module['_sqlite3_free_table'] = wasmExports['sqlite3_free_table'];
+  _sqlite3_create_module = Module['_sqlite3_create_module'] = wasmExports['sqlite3_create_module'];
+  _sqlite3_create_module_v2 = Module['_sqlite3_create_module_v2'] = wasmExports['sqlite3_create_module_v2'];
+  _sqlite3_drop_modules = Module['_sqlite3_drop_modules'] = wasmExports['sqlite3_drop_modules'];
+  _sqlite3_declare_vtab = Module['_sqlite3_declare_vtab'] = wasmExports['sqlite3_declare_vtab'];
+  _sqlite3_vtab_on_conflict = Module['_sqlite3_vtab_on_conflict'] = wasmExports['sqlite3_vtab_on_conflict'];
+  _sqlite3_vtab_config = Module['_sqlite3_vtab_config'] = wasmExports['sqlite3_vtab_config'];
+  _sqlite3_vtab_collation = Module['_sqlite3_vtab_collation'] = wasmExports['sqlite3_vtab_collation'];
+  _sqlite3_vtab_in = Module['_sqlite3_vtab_in'] = wasmExports['sqlite3_vtab_in'];
+  _sqlite3_vtab_rhs_value = Module['_sqlite3_vtab_rhs_value'] = wasmExports['sqlite3_vtab_rhs_value'];
+  _sqlite3_vtab_distinct = Module['_sqlite3_vtab_distinct'] = wasmExports['sqlite3_vtab_distinct'];
+  _sqlite3_keyword_name = Module['_sqlite3_keyword_name'] = wasmExports['sqlite3_keyword_name'];
+  _sqlite3_keyword_count = Module['_sqlite3_keyword_count'] = wasmExports['sqlite3_keyword_count'];
+  _sqlite3_keyword_check = Module['_sqlite3_keyword_check'] = wasmExports['sqlite3_keyword_check'];
+  _sqlite3_complete = Module['_sqlite3_complete'] = wasmExports['sqlite3_complete'];
+  _sqlite3_complete16 = Module['_sqlite3_complete16'] = wasmExports['sqlite3_complete16'];
+  _sqlite3_libversion = Module['_sqlite3_libversion'] = wasmExports['sqlite3_libversion'];
+  _sqlite3_libversion_number = Module['_sqlite3_libversion_number'] = wasmExports['sqlite3_libversion_number'];
+  _sqlite3_threadsafe = Module['_sqlite3_threadsafe'] = wasmExports['sqlite3_threadsafe'];
+  _sqlite3_shutdown = Module['_sqlite3_shutdown'] = wasmExports['sqlite3_shutdown'];
+  _sqlite3_db_mutex = Module['_sqlite3_db_mutex'] = wasmExports['sqlite3_db_mutex'];
+  _sqlite3_db_release_memory = Module['_sqlite3_db_release_memory'] = wasmExports['sqlite3_db_release_memory'];
+  _sqlite3_db_cacheflush = Module['_sqlite3_db_cacheflush'] = wasmExports['sqlite3_db_cacheflush'];
+  _sqlite3_db_config = Module['_sqlite3_db_config'] = wasmExports['sqlite3_db_config'];
+  _sqlite3_last_insert_rowid = Module['_sqlite3_last_insert_rowid'] = wasmExports['sqlite3_last_insert_rowid'];
+  _sqlite3_set_last_insert_rowid = Module['_sqlite3_set_last_insert_rowid'] = wasmExports['sqlite3_set_last_insert_rowid'];
+  _sqlite3_changes64 = Module['_sqlite3_changes64'] = wasmExports['sqlite3_changes64'];
+  _sqlite3_changes = Module['_sqlite3_changes'] = wasmExports['sqlite3_changes'];
+  _sqlite3_total_changes64 = Module['_sqlite3_total_changes64'] = wasmExports['sqlite3_total_changes64'];
+  _sqlite3_total_changes = Module['_sqlite3_total_changes'] = wasmExports['sqlite3_total_changes'];
+  _sqlite3_txn_state = Module['_sqlite3_txn_state'] = wasmExports['sqlite3_txn_state'];
+  _sqlite3_close = Module['_sqlite3_close'] = wasmExports['sqlite3_close'];
+  _sqlite3_close_v2 = Module['_sqlite3_close_v2'] = wasmExports['sqlite3_close_v2'];
+  _sqlite3_busy_handler = Module['_sqlite3_busy_handler'] = wasmExports['sqlite3_busy_handler'];
+  _sqlite3_progress_handler = Module['_sqlite3_progress_handler'] = wasmExports['sqlite3_progress_handler'];
+  _sqlite3_busy_timeout = Module['_sqlite3_busy_timeout'] = wasmExports['sqlite3_busy_timeout'];
+  _sqlite3_setlk_timeout = Module['_sqlite3_setlk_timeout'] = wasmExports['sqlite3_setlk_timeout'];
+  _sqlite3_interrupt = Module['_sqlite3_interrupt'] = wasmExports['sqlite3_interrupt'];
+  _sqlite3_is_interrupted = Module['_sqlite3_is_interrupted'] = wasmExports['sqlite3_is_interrupted'];
+  _sqlite3_create_function = Module['_sqlite3_create_function'] = wasmExports['sqlite3_create_function'];
+  _sqlite3_create_function_v2 = Module['_sqlite3_create_function_v2'] = wasmExports['sqlite3_create_function_v2'];
+  _sqlite3_create_window_function = Module['_sqlite3_create_window_function'] = wasmExports['sqlite3_create_window_function'];
+  _sqlite3_create_function16 = Module['_sqlite3_create_function16'] = wasmExports['sqlite3_create_function16'];
+  _sqlite3_overload_function = Module['_sqlite3_overload_function'] = wasmExports['sqlite3_overload_function'];
+  _sqlite3_trace = Module['_sqlite3_trace'] = wasmExports['sqlite3_trace'];
+  _sqlite3_trace_v2 = Module['_sqlite3_trace_v2'] = wasmExports['sqlite3_trace_v2'];
+  _sqlite3_profile = Module['_sqlite3_profile'] = wasmExports['sqlite3_profile'];
+  _sqlite3_commit_hook = Module['_sqlite3_commit_hook'] = wasmExports['sqlite3_commit_hook'];
+  _sqlite3_update_hook = Module['_sqlite3_update_hook'] = wasmExports['sqlite3_update_hook'];
+  _sqlite3_rollback_hook = Module['_sqlite3_rollback_hook'] = wasmExports['sqlite3_rollback_hook'];
+  _sqlite3_autovacuum_pages = Module['_sqlite3_autovacuum_pages'] = wasmExports['sqlite3_autovacuum_pages'];
+  _sqlite3_wal_autocheckpoint = Module['_sqlite3_wal_autocheckpoint'] = wasmExports['sqlite3_wal_autocheckpoint'];
+  _sqlite3_wal_hook = Module['_sqlite3_wal_hook'] = wasmExports['sqlite3_wal_hook'];
+  _sqlite3_wal_checkpoint_v2 = Module['_sqlite3_wal_checkpoint_v2'] = wasmExports['sqlite3_wal_checkpoint_v2'];
+  _sqlite3_wal_checkpoint = Module['_sqlite3_wal_checkpoint'] = wasmExports['sqlite3_wal_checkpoint'];
+  _sqlite3_set_errmsg = Module['_sqlite3_set_errmsg'] = wasmExports['sqlite3_set_errmsg'];
+  _sqlite3_error_offset = Module['_sqlite3_error_offset'] = wasmExports['sqlite3_error_offset'];
+  _sqlite3_errmsg16 = Module['_sqlite3_errmsg16'] = wasmExports['sqlite3_errmsg16'];
+  _sqlite3_errcode = Module['_sqlite3_errcode'] = wasmExports['sqlite3_errcode'];
+  _sqlite3_extended_errcode = Module['_sqlite3_extended_errcode'] = wasmExports['sqlite3_extended_errcode'];
+  _sqlite3_system_errno = Module['_sqlite3_system_errno'] = wasmExports['sqlite3_system_errno'];
+  _sqlite3_errstr = Module['_sqlite3_errstr'] = wasmExports['sqlite3_errstr'];
+  _sqlite3_limit = Module['_sqlite3_limit'] = wasmExports['sqlite3_limit'];
+  _sqlite3_open = Module['_sqlite3_open'] = wasmExports['sqlite3_open'];
+  _sqlite3_open_v2 = Module['_sqlite3_open_v2'] = wasmExports['sqlite3_open_v2'];
+  _sqlite3_open16 = Module['_sqlite3_open16'] = wasmExports['sqlite3_open16'];
+  _sqlite3_create_collation = Module['_sqlite3_create_collation'] = wasmExports['sqlite3_create_collation'];
+  _sqlite3_create_collation_v2 = Module['_sqlite3_create_collation_v2'] = wasmExports['sqlite3_create_collation_v2'];
+  _sqlite3_create_collation16 = Module['_sqlite3_create_collation16'] = wasmExports['sqlite3_create_collation16'];
+  _sqlite3_collation_needed = Module['_sqlite3_collation_needed'] = wasmExports['sqlite3_collation_needed'];
+  _sqlite3_collation_needed16 = Module['_sqlite3_collation_needed16'] = wasmExports['sqlite3_collation_needed16'];
+  _sqlite3_get_clientdata = Module['_sqlite3_get_clientdata'] = wasmExports['sqlite3_get_clientdata'];
+  _sqlite3_set_clientdata = Module['_sqlite3_set_clientdata'] = wasmExports['sqlite3_set_clientdata'];
+  _sqlite3_global_recover = Module['_sqlite3_global_recover'] = wasmExports['sqlite3_global_recover'];
+  _sqlite3_get_autocommit = Module['_sqlite3_get_autocommit'] = wasmExports['sqlite3_get_autocommit'];
+  _sqlite3_thread_cleanup = Module['_sqlite3_thread_cleanup'] = wasmExports['sqlite3_thread_cleanup'];
+  _sqlite3_table_column_metadata = Module['_sqlite3_table_column_metadata'] = wasmExports['sqlite3_table_column_metadata'];
+  _sqlite3_sleep = Module['_sqlite3_sleep'] = wasmExports['sqlite3_sleep'];
+  _sqlite3_extended_result_codes = Module['_sqlite3_extended_result_codes'] = wasmExports['sqlite3_extended_result_codes'];
+  _sqlite3_test_control = Module['_sqlite3_test_control'] = wasmExports['sqlite3_test_control'];
+  _sqlite3_create_filename = Module['_sqlite3_create_filename'] = wasmExports['sqlite3_create_filename'];
+  _sqlite3_free_filename = Module['_sqlite3_free_filename'] = wasmExports['sqlite3_free_filename'];
+  _sqlite3_uri_key = Module['_sqlite3_uri_key'] = wasmExports['sqlite3_uri_key'];
+  _sqlite3_uri_boolean = Module['_sqlite3_uri_boolean'] = wasmExports['sqlite3_uri_boolean'];
+  _sqlite3_uri_int64 = Module['_sqlite3_uri_int64'] = wasmExports['sqlite3_uri_int64'];
+  _strspn = Module['_strspn'] = wasmExports['strspn'];
+  _sqlite3_filename_database = Module['_sqlite3_filename_database'] = wasmExports['sqlite3_filename_database'];
+  _sqlite3_filename_journal = Module['_sqlite3_filename_journal'] = wasmExports['sqlite3_filename_journal'];
+  _sqlite3_filename_wal = Module['_sqlite3_filename_wal'] = wasmExports['sqlite3_filename_wal'];
+  _sqlite3_db_name = Module['_sqlite3_db_name'] = wasmExports['sqlite3_db_name'];
+  _sqlite3_db_filename = Module['_sqlite3_db_filename'] = wasmExports['sqlite3_db_filename'];
+  _sqlite3_db_readonly = Module['_sqlite3_db_readonly'] = wasmExports['sqlite3_db_readonly'];
+  _sqlite3_compileoption_used = Module['_sqlite3_compileoption_used'] = wasmExports['sqlite3_compileoption_used'];
+  _sqlite3_compileoption_get = Module['_sqlite3_compileoption_get'] = wasmExports['sqlite3_compileoption_get'];
+  _sqlite3_sourceid = Module['_sqlite3_sourceid'] = wasmExports['sqlite3_sourceid'];
+  _pthread_mutexattr_init = Module['_pthread_mutexattr_init'] = wasmExports['pthread_mutexattr_init'];
+  _pthread_mutexattr_settype = Module['_pthread_mutexattr_settype'] = wasmExports['pthread_mutexattr_settype'];
+  _pthread_mutex_init = Module['_pthread_mutex_init'] = wasmExports['pthread_mutex_init'];
+  _pthread_mutexattr_destroy = Module['_pthread_mutexattr_destroy'] = wasmExports['pthread_mutexattr_destroy'];
+  _pthread_mutex_destroy = Module['_pthread_mutex_destroy'] = wasmExports['pthread_mutex_destroy'];
+  _pthread_mutex_lock = Module['_pthread_mutex_lock'] = wasmExports['pthread_mutex_lock'];
+  _pthread_mutex_trylock = Module['_pthread_mutex_trylock'] = wasmExports['pthread_mutex_trylock'];
+  _pthread_mutex_unlock = Module['_pthread_mutex_unlock'] = wasmExports['pthread_mutex_unlock'];
+  _lseek = Module['_lseek'] = wasmExports['lseek'];
+  _open = Module['_open'] = wasmExports['open'];
+  _sysconf = Module['_sysconf'] = wasmExports['sysconf'];
+  _utimes = Module['_utimes'] = wasmExports['utimes'];
+  _pthread_join = Module['_pthread_join'] = wasmExports['pthread_join'];
+  _memcmp = Module['_memcmp'] = wasmExports['memcmp'];
+  _pthread_create = Module['_pthread_create'] = wasmExports['pthread_create'];
+  _mlock = Module['_mlock'] = wasmExports['mlock'];
+  _munlock = Module['_munlock'] = wasmExports['munlock'];
+  ___small_fprintf = Module['___small_fprintf'] = wasmExports['__small_fprintf'];
+  _memchr = Module['_memchr'] = wasmExports['memchr'];
+  _strrchr = Module['_strrchr'] = wasmExports['strrchr'];
+  _localtime = Module['_localtime'] = wasmExports['localtime'];
+  _malloc = Module['_malloc'] = wasmExports['malloc'];
+  _free = Module['_free'] = wasmExports['free'];
+  _realloc = Module['_realloc'] = wasmExports['realloc'];
+  _log = Module['_log'] = wasmExports['log'];
+  ___cxa_atexit = Module['___cxa_atexit'] = wasmExports['__cxa_atexit'];
+  _close = Module['_close'] = wasmExports['close'];
+  _access = Module['_access'] = wasmExports['access'];
+  _getcwd = Module['_getcwd'] = wasmExports['getcwd'];
+  _stat = Module['_stat'] = wasmExports['stat'];
+  _fstat = Module['_fstat'] = wasmExports['fstat'];
+  _ftruncate = Module['_ftruncate'] = wasmExports['ftruncate'];
+  _fcntl = Module['_fcntl'] = wasmExports['fcntl'];
+  _read = Module['_read'] = wasmExports['read'];
+  _write = Module['_write'] = wasmExports['write'];
+  _fchmod = Module['_fchmod'] = wasmExports['fchmod'];
+  _unlink = Module['_unlink'] = wasmExports['unlink'];
+  _mkdir = Module['_mkdir'] = wasmExports['mkdir'];
+  _rmdir = Module['_rmdir'] = wasmExports['rmdir'];
+  _fchown = Module['_fchown'] = wasmExports['fchown'];
+  _geteuid = Module['_geteuid'] = wasmExports['geteuid'];
+  _mmap = Module['_mmap'] = wasmExports['mmap'];
+  _munmap = Module['_munmap'] = wasmExports['munmap'];
+  _readlink = Module['_readlink'] = wasmExports['readlink'];
+  _lstat = Module['_lstat'] = wasmExports['lstat'];
+  _getentropy = Module['_getentropy'] = wasmExports['getentropy'];
+  _lc_hkdf_alloc = Module['_lc_hkdf_alloc'] = wasmExports['lc_hkdf_alloc'];
+  _lc_hkdf_extract = Module['_lc_hkdf_extract'] = wasmExports['lc_hkdf_extract'];
+  _lc_hkdf_zero_free = Module['_lc_hkdf_zero_free'] = wasmExports['lc_hkdf_zero_free'];
+  _lc_hkdf_expand = Module['_lc_hkdf_expand'] = wasmExports['lc_hkdf_expand'];
+  _lc_ak_alloc_taglen = Module['_lc_ak_alloc_taglen'] = wasmExports['lc_ak_alloc_taglen'];
+  _lc_aead_setkey = Module['_lc_aead_setkey'] = wasmExports['lc_aead_setkey'];
+  _lc_aead_zero_free = Module['_lc_aead_zero_free'] = wasmExports['lc_aead_zero_free'];
+  _lc_aead_encrypt = Module['_lc_aead_encrypt'] = wasmExports['lc_aead_encrypt'];
+  _lc_aead_decrypt = Module['_lc_aead_decrypt'] = wasmExports['lc_aead_decrypt'];
+  _get_full_entropy = Module['_get_full_entropy'] = wasmExports['get_full_entropy'];
+  _seeded_rng_noise_fini = Module['_seeded_rng_noise_fini'] = wasmExports['seeded_rng_noise_fini'];
+  _seeded_rng_noise_init = Module['_seeded_rng_noise_init'] = wasmExports['seeded_rng_noise_init'];
+  _seeded_rng_status = Module['_seeded_rng_status'] = wasmExports['seeded_rng_status'];
+  _lc_memcpy_secure = Module['_lc_memcpy_secure'] = wasmExports['lc_memcpy_secure'];
+  _lc_wasm_aead_encrypt = Module['_lc_wasm_aead_encrypt'] = wasmExports['lc_wasm_aead_encrypt'];
+  _lc_wasm_aead_decrypt = Module['_lc_wasm_aead_decrypt'] = wasmExports['lc_wasm_aead_decrypt'];
+  _lc_wasm_hkdf_sha3_512 = Module['_lc_wasm_hkdf_sha3_512'] = wasmExports['lc_wasm_hkdf_sha3_512'];
+  _lc_wasm_key_size = Module['_lc_wasm_key_size'] = wasmExports['lc_wasm_key_size'];
+  _lc_wasm_nonce_size = Module['_lc_wasm_nonce_size'] = wasmExports['lc_wasm_nonce_size'];
+  _lc_wasm_tag_size = Module['_lc_wasm_tag_size'] = wasmExports['lc_wasm_tag_size'];
+  _lc_bike_5_bike_decode = Module['_lc_bike_5_bike_decode'] = wasmExports['lc_bike_5_bike_decode'];
+  _lc_bike_5_bit_slice_full_subtract_port = Module['_lc_bike_5_bit_slice_full_subtract_port'] = wasmExports['lc_bike_5_bit_slice_full_subtract_port'];
+  _lc_bike_5_bit_sliced_adder_port = Module['_lc_bike_5_bit_sliced_adder_port'] = wasmExports['lc_bike_5_bit_sliced_adder_port'];
+  _lc_bike_5_dup_port = Module['_lc_bike_5_dup_port'] = wasmExports['lc_bike_5_dup_port'];
+  _lc_bike_5_rotate_right_port = Module['_lc_bike_5_rotate_right_port'] = wasmExports['lc_bike_5_rotate_right_port'];
+  _lc_bike_5_gf2x_mod_mul = Module['_lc_bike_5_gf2x_mod_mul'] = wasmExports['lc_bike_5_gf2x_mod_mul'];
+  _iprintf = Module['_iprintf'] = wasmExports['iprintf'];
+  ___stack_chk_fail = Module['___stack_chk_fail'] = wasmExports['__stack_chk_fail'];
+  _lc_bike_5_gf2x_mod_inv = Module['_lc_bike_5_gf2x_mod_inv'] = wasmExports['lc_bike_5_gf2x_mod_inv'];
+  _lc_bike_5_gf2x_red_port = Module['_lc_bike_5_gf2x_red_port'] = wasmExports['lc_bike_5_gf2x_red_port'];
+  _lc_bike_5_k_sqr_port = Module['_lc_bike_5_k_sqr_port'] = wasmExports['lc_bike_5_k_sqr_port'];
+  _lc_bike_5_karatzuba_add3_port = Module['_lc_bike_5_karatzuba_add3_port'] = wasmExports['lc_bike_5_karatzuba_add3_port'];
+  _lc_bike_5_karatzuba_add2_port = Module['_lc_bike_5_karatzuba_add2_port'] = wasmExports['lc_bike_5_karatzuba_add2_port'];
+  _lc_bike_5_karatzuba_add1_port = Module['_lc_bike_5_karatzuba_add1_port'] = wasmExports['lc_bike_5_karatzuba_add1_port'];
+  _lc_bike_5_gf2x_sqr_port = Module['_lc_bike_5_gf2x_sqr_port'] = wasmExports['lc_bike_5_gf2x_sqr_port'];
+  _lc_bike_5_gf2x_mul_base_port = Module['_lc_bike_5_gf2x_mul_base_port'] = wasmExports['lc_bike_5_gf2x_mul_base_port'];
+  _lc_bike_5_gf2x_mod_mul_with_ctx = Module['_lc_bike_5_gf2x_mod_mul_with_ctx'] = wasmExports['lc_bike_5_gf2x_mod_mul_with_ctx'];
+  _lc_bike_5_keypair = Module['_lc_bike_5_keypair'] = wasmExports['lc_bike_5_keypair'];
+  _lc_rng_check = Module['_lc_rng_check'] = wasmExports['lc_rng_check'];
+  _lc_rng_generate = Module['_lc_rng_generate'] = wasmExports['lc_rng_generate'];
+  _lc_bike_5_generate_secret_key = Module['_lc_bike_5_generate_secret_key'] = wasmExports['lc_bike_5_generate_secret_key'];
+  _lc_bike_5_keypair_from_seed = Module['_lc_bike_5_keypair_from_seed'] = wasmExports['lc_bike_5_keypair_from_seed'];
+  _lc_bike_5_enc_internal = Module['_lc_bike_5_enc_internal'] = wasmExports['lc_bike_5_enc_internal'];
+  _lc_bike_5_generate_error_vector = Module['_lc_bike_5_generate_error_vector'] = wasmExports['lc_bike_5_generate_error_vector'];
+  _lc_hash_init = Module['_lc_hash_init'] = wasmExports['lc_hash_init'];
+  _lc_hash_update = Module['_lc_hash_update'] = wasmExports['lc_hash_update'];
+  _lc_hash_final = Module['_lc_hash_final'] = wasmExports['lc_hash_final'];
+  _lc_hash_zero = Module['_lc_hash_zero'] = wasmExports['lc_hash_zero'];
+  _lc_bike_5_enc = Module['_lc_bike_5_enc'] = wasmExports['lc_bike_5_enc'];
+  _lc_bike_5_enc_kdf = Module['_lc_bike_5_enc_kdf'] = wasmExports['lc_bike_5_enc_kdf'];
+  _lc_kmac = Module['_lc_kmac'] = wasmExports['lc_kmac'];
+  _lc_bike_5_dec = Module['_lc_bike_5_dec'] = wasmExports['lc_bike_5_dec'];
+  _lc_memcmp_secure = Module['_lc_memcmp_secure'] = wasmExports['lc_memcmp_secure'];
+  _lc_bike_5_dec_kdf = Module['_lc_bike_5_dec_kdf'] = wasmExports['lc_bike_5_dec_kdf'];
+  _lc_hash_set_digestsize = Module['_lc_hash_set_digestsize'] = wasmExports['lc_hash_set_digestsize'];
+  _lc_bike_5_secure_set_bits_port = Module['_lc_bike_5_secure_set_bits_port'] = wasmExports['lc_bike_5_secure_set_bits_port'];
+  _lc_bike_3_bike_decode = Module['_lc_bike_3_bike_decode'] = wasmExports['lc_bike_3_bike_decode'];
+  _lc_bike_3_bit_slice_full_subtract_port = Module['_lc_bike_3_bit_slice_full_subtract_port'] = wasmExports['lc_bike_3_bit_slice_full_subtract_port'];
+  _lc_bike_3_bit_sliced_adder_port = Module['_lc_bike_3_bit_sliced_adder_port'] = wasmExports['lc_bike_3_bit_sliced_adder_port'];
+  _lc_bike_3_dup_port = Module['_lc_bike_3_dup_port'] = wasmExports['lc_bike_3_dup_port'];
+  _lc_bike_3_rotate_right_port = Module['_lc_bike_3_rotate_right_port'] = wasmExports['lc_bike_3_rotate_right_port'];
+  _lc_bike_3_gf2x_mod_mul = Module['_lc_bike_3_gf2x_mod_mul'] = wasmExports['lc_bike_3_gf2x_mod_mul'];
+  _lc_bike_3_gf2x_mod_inv = Module['_lc_bike_3_gf2x_mod_inv'] = wasmExports['lc_bike_3_gf2x_mod_inv'];
+  _lc_bike_3_gf2x_red_port = Module['_lc_bike_3_gf2x_red_port'] = wasmExports['lc_bike_3_gf2x_red_port'];
+  _lc_bike_3_k_sqr_port = Module['_lc_bike_3_k_sqr_port'] = wasmExports['lc_bike_3_k_sqr_port'];
+  _lc_bike_3_karatzuba_add3_port = Module['_lc_bike_3_karatzuba_add3_port'] = wasmExports['lc_bike_3_karatzuba_add3_port'];
+  _lc_bike_3_karatzuba_add2_port = Module['_lc_bike_3_karatzuba_add2_port'] = wasmExports['lc_bike_3_karatzuba_add2_port'];
+  _lc_bike_3_karatzuba_add1_port = Module['_lc_bike_3_karatzuba_add1_port'] = wasmExports['lc_bike_3_karatzuba_add1_port'];
+  _lc_bike_3_gf2x_sqr_port = Module['_lc_bike_3_gf2x_sqr_port'] = wasmExports['lc_bike_3_gf2x_sqr_port'];
+  _lc_bike_3_gf2x_mul_base_port = Module['_lc_bike_3_gf2x_mul_base_port'] = wasmExports['lc_bike_3_gf2x_mul_base_port'];
+  _lc_bike_3_gf2x_mod_mul_with_ctx = Module['_lc_bike_3_gf2x_mod_mul_with_ctx'] = wasmExports['lc_bike_3_gf2x_mod_mul_with_ctx'];
+  _lc_bike_3_keypair = Module['_lc_bike_3_keypair'] = wasmExports['lc_bike_3_keypair'];
+  _lc_bike_3_generate_secret_key = Module['_lc_bike_3_generate_secret_key'] = wasmExports['lc_bike_3_generate_secret_key'];
+  _lc_bike_3_keypair_from_seed = Module['_lc_bike_3_keypair_from_seed'] = wasmExports['lc_bike_3_keypair_from_seed'];
+  _lc_bike_3_enc_internal = Module['_lc_bike_3_enc_internal'] = wasmExports['lc_bike_3_enc_internal'];
+  _lc_bike_3_generate_error_vector = Module['_lc_bike_3_generate_error_vector'] = wasmExports['lc_bike_3_generate_error_vector'];
+  _lc_bike_3_enc = Module['_lc_bike_3_enc'] = wasmExports['lc_bike_3_enc'];
+  _lc_bike_3_enc_kdf = Module['_lc_bike_3_enc_kdf'] = wasmExports['lc_bike_3_enc_kdf'];
+  _lc_bike_3_dec = Module['_lc_bike_3_dec'] = wasmExports['lc_bike_3_dec'];
+  _lc_bike_3_dec_kdf = Module['_lc_bike_3_dec_kdf'] = wasmExports['lc_bike_3_dec_kdf'];
+  _lc_bike_3_secure_set_bits_port = Module['_lc_bike_3_secure_set_bits_port'] = wasmExports['lc_bike_3_secure_set_bits_port'];
+  _lc_bike_1_bike_decode = Module['_lc_bike_1_bike_decode'] = wasmExports['lc_bike_1_bike_decode'];
+  _lc_bike_1_bit_slice_full_subtract_port = Module['_lc_bike_1_bit_slice_full_subtract_port'] = wasmExports['lc_bike_1_bit_slice_full_subtract_port'];
+  _lc_bike_1_bit_sliced_adder_port = Module['_lc_bike_1_bit_sliced_adder_port'] = wasmExports['lc_bike_1_bit_sliced_adder_port'];
+  _lc_bike_1_dup_port = Module['_lc_bike_1_dup_port'] = wasmExports['lc_bike_1_dup_port'];
+  _lc_bike_1_rotate_right_port = Module['_lc_bike_1_rotate_right_port'] = wasmExports['lc_bike_1_rotate_right_port'];
+  _lc_bike_1_gf2x_mod_mul = Module['_lc_bike_1_gf2x_mod_mul'] = wasmExports['lc_bike_1_gf2x_mod_mul'];
+  _lc_bike_1_gf2x_mod_inv = Module['_lc_bike_1_gf2x_mod_inv'] = wasmExports['lc_bike_1_gf2x_mod_inv'];
+  _lc_bike_1_gf2x_red_port = Module['_lc_bike_1_gf2x_red_port'] = wasmExports['lc_bike_1_gf2x_red_port'];
+  _lc_bike_1_k_sqr_port = Module['_lc_bike_1_k_sqr_port'] = wasmExports['lc_bike_1_k_sqr_port'];
+  _lc_bike_1_karatzuba_add3_port = Module['_lc_bike_1_karatzuba_add3_port'] = wasmExports['lc_bike_1_karatzuba_add3_port'];
+  _lc_bike_1_karatzuba_add2_port = Module['_lc_bike_1_karatzuba_add2_port'] = wasmExports['lc_bike_1_karatzuba_add2_port'];
+  _lc_bike_1_karatzuba_add1_port = Module['_lc_bike_1_karatzuba_add1_port'] = wasmExports['lc_bike_1_karatzuba_add1_port'];
+  _lc_bike_1_gf2x_sqr_port = Module['_lc_bike_1_gf2x_sqr_port'] = wasmExports['lc_bike_1_gf2x_sqr_port'];
+  _lc_bike_1_gf2x_mul_base_port = Module['_lc_bike_1_gf2x_mul_base_port'] = wasmExports['lc_bike_1_gf2x_mul_base_port'];
+  _lc_bike_1_gf2x_mod_mul_with_ctx = Module['_lc_bike_1_gf2x_mod_mul_with_ctx'] = wasmExports['lc_bike_1_gf2x_mod_mul_with_ctx'];
+  _lc_bike_1_keypair = Module['_lc_bike_1_keypair'] = wasmExports['lc_bike_1_keypair'];
+  _lc_bike_1_generate_secret_key = Module['_lc_bike_1_generate_secret_key'] = wasmExports['lc_bike_1_generate_secret_key'];
+  _lc_bike_1_keypair_from_seed = Module['_lc_bike_1_keypair_from_seed'] = wasmExports['lc_bike_1_keypair_from_seed'];
+  _lc_bike_1_enc_internal = Module['_lc_bike_1_enc_internal'] = wasmExports['lc_bike_1_enc_internal'];
+  _lc_bike_1_generate_error_vector = Module['_lc_bike_1_generate_error_vector'] = wasmExports['lc_bike_1_generate_error_vector'];
+  _lc_bike_1_enc = Module['_lc_bike_1_enc'] = wasmExports['lc_bike_1_enc'];
+  _lc_bike_1_enc_kdf = Module['_lc_bike_1_enc_kdf'] = wasmExports['lc_bike_1_enc_kdf'];
+  _lc_bike_1_dec = Module['_lc_bike_1_dec'] = wasmExports['lc_bike_1_dec'];
+  _lc_bike_1_dec_kdf = Module['_lc_bike_1_dec_kdf'] = wasmExports['lc_bike_1_dec_kdf'];
+  _lc_bike_1_secure_set_bits_port = Module['_lc_bike_1_secure_set_bits_port'] = wasmExports['lc_bike_1_secure_set_bits_port'];
+  _lc_hqc_256_code_encode = Module['_lc_hqc_256_code_encode'] = wasmExports['lc_hqc_256_code_encode'];
+  _lc_hqc_256_reed_solomon_encode = Module['_lc_hqc_256_reed_solomon_encode'] = wasmExports['lc_hqc_256_reed_solomon_encode'];
+  _lc_hqc_256_reed_muller_encode = Module['_lc_hqc_256_reed_muller_encode'] = wasmExports['lc_hqc_256_reed_muller_encode'];
+  _lc_hqc_256_code_decode = Module['_lc_hqc_256_code_decode'] = wasmExports['lc_hqc_256_code_decode'];
+  _lc_hqc_256_reed_muller_decode = Module['_lc_hqc_256_reed_muller_decode'] = wasmExports['lc_hqc_256_reed_muller_decode'];
+  _lc_hqc_256_reed_solomon_decode = Module['_lc_hqc_256_reed_solomon_decode'] = wasmExports['lc_hqc_256_reed_solomon_decode'];
+  _lc_hqc_256_fft = Module['_lc_hqc_256_fft'] = wasmExports['lc_hqc_256_fft'];
+  _lc_hqc_256_gf_square = Module['_lc_hqc_256_gf_square'] = wasmExports['lc_hqc_256_gf_square'];
+  _lc_hqc_256_gf_mul = Module['_lc_hqc_256_gf_mul'] = wasmExports['lc_hqc_256_gf_mul'];
+  _lc_hqc_256_gf_inverse = Module['_lc_hqc_256_gf_inverse'] = wasmExports['lc_hqc_256_gf_inverse'];
+  _lc_hqc_256_fft_retrieve_error_poly = Module['_lc_hqc_256_fft_retrieve_error_poly'] = wasmExports['lc_hqc_256_fft_retrieve_error_poly'];
+  _lc_hqc_256_vect_mul = Module['_lc_hqc_256_vect_mul'] = wasmExports['lc_hqc_256_vect_mul'];
+  _lc_hqc_256_hqc_pke_keygen = Module['_lc_hqc_256_hqc_pke_keygen'] = wasmExports['lc_hqc_256_hqc_pke_keygen'];
+  _seedexpander_init = Module['_seedexpander_init'] = wasmExports['seedexpander_init'];
+  _lc_hqc_256_vect_set_random_fixed_weight = Module['_lc_hqc_256_vect_set_random_fixed_weight'] = wasmExports['lc_hqc_256_vect_set_random_fixed_weight'];
+  _lc_hqc_256_vect_set_random = Module['_lc_hqc_256_vect_set_random'] = wasmExports['lc_hqc_256_vect_set_random'];
+  _lc_hqc_256_vect_add = Module['_lc_hqc_256_vect_add'] = wasmExports['lc_hqc_256_vect_add'];
+  _lc_hqc_256_hqc_public_key_to_string = Module['_lc_hqc_256_hqc_public_key_to_string'] = wasmExports['lc_hqc_256_hqc_public_key_to_string'];
+  _lc_hqc_256_hqc_secret_key_to_string = Module['_lc_hqc_256_hqc_secret_key_to_string'] = wasmExports['lc_hqc_256_hqc_secret_key_to_string'];
+  _lc_hqc_256_hqc_pke_encrypt = Module['_lc_hqc_256_hqc_pke_encrypt'] = wasmExports['lc_hqc_256_hqc_pke_encrypt'];
+  _lc_hqc_256_hqc_public_key_from_string = Module['_lc_hqc_256_hqc_public_key_from_string'] = wasmExports['lc_hqc_256_hqc_public_key_from_string'];
+  _lc_hqc_256_vect_resize = Module['_lc_hqc_256_vect_resize'] = wasmExports['lc_hqc_256_vect_resize'];
+  _lc_hqc_256_hqc_pke_decrypt = Module['_lc_hqc_256_hqc_pke_decrypt'] = wasmExports['lc_hqc_256_hqc_pke_decrypt'];
+  _lc_hqc_256_hqc_secret_key_from_string = Module['_lc_hqc_256_hqc_secret_key_from_string'] = wasmExports['lc_hqc_256_hqc_secret_key_from_string'];
+  _lc_hqc_256_keypair_c = Module['_lc_hqc_256_keypair_c'] = wasmExports['lc_hqc_256_keypair_c'];
+  _fips140_mode_enabled = Module['_fips140_mode_enabled'] = wasmExports['fips140_mode_enabled'];
+  _lc_hqc_256_enc = Module['_lc_hqc_256_enc'] = wasmExports['lc_hqc_256_enc'];
+  _lc_hqc_256_dec = Module['_lc_hqc_256_dec'] = wasmExports['lc_hqc_256_dec'];
+  _alg_status_set_result = Module['_alg_status_set_result'] = wasmExports['alg_status_set_result'];
+  _lc_hqc_256_keypair_from_seed_c = Module['_lc_hqc_256_keypair_from_seed_c'] = wasmExports['lc_hqc_256_keypair_from_seed_c'];
+  _lc_hqc_256_enc_internal_c = Module['_lc_hqc_256_enc_internal_c'] = wasmExports['lc_hqc_256_enc_internal_c'];
+  _lc_hqc_256_store8_arr = Module['_lc_hqc_256_store8_arr'] = wasmExports['lc_hqc_256_store8_arr'];
+  _lc_hqc_256_hqc_ciphertext_to_string = Module['_lc_hqc_256_hqc_ciphertext_to_string'] = wasmExports['lc_hqc_256_hqc_ciphertext_to_string'];
+  _lc_hqc_256_enc_c = Module['_lc_hqc_256_enc_c'] = wasmExports['lc_hqc_256_enc_c'];
+  _lc_hqc_256_enc_kdf_c = Module['_lc_hqc_256_enc_kdf_c'] = wasmExports['lc_hqc_256_enc_kdf_c'];
+  _lc_hqc_256_dec_c = Module['_lc_hqc_256_dec_c'] = wasmExports['lc_hqc_256_dec_c'];
+  _lc_hqc_256_hqc_ciphertext_from_string = Module['_lc_hqc_256_hqc_ciphertext_from_string'] = wasmExports['lc_hqc_256_hqc_ciphertext_from_string'];
+  _lc_hqc_256_vect_compare = Module['_lc_hqc_256_vect_compare'] = wasmExports['lc_hqc_256_vect_compare'];
+  _lc_hqc_256_dec_kdf_c = Module['_lc_hqc_256_dec_kdf_c'] = wasmExports['lc_hqc_256_dec_kdf_c'];
+  _lc_hqc_256_hqc_kem_keygen_selftest = Module['_lc_hqc_256_hqc_kem_keygen_selftest'] = wasmExports['lc_hqc_256_hqc_kem_keygen_selftest'];
+  _alg_status_get_result = Module['_alg_status_get_result'] = wasmExports['alg_status_get_result'];
+  _lc_rng_zero = Module['_lc_rng_zero'] = wasmExports['lc_rng_zero'];
+  _lc_rng_seed = Module['_lc_rng_seed'] = wasmExports['lc_rng_seed'];
+  _lc_compare_selftest = Module['_lc_compare_selftest'] = wasmExports['lc_compare_selftest'];
+  _lc_hqc_256_hqc_kem_enc_selftest = Module['_lc_hqc_256_hqc_kem_enc_selftest'] = wasmExports['lc_hqc_256_hqc_kem_enc_selftest'];
+  _lc_hqc_256_hqc_kem_dec_selftest = Module['_lc_hqc_256_hqc_kem_dec_selftest'] = wasmExports['lc_hqc_256_hqc_kem_dec_selftest'];
+  _lc_hqc_256_load8_arr = Module['_lc_hqc_256_load8_arr'] = wasmExports['lc_hqc_256_load8_arr'];
+  _seedexpander = Module['_seedexpander'] = wasmExports['seedexpander'];
+  _lc_hqc_256_keypair = Module['_lc_hqc_256_keypair'] = wasmExports['lc_hqc_256_keypair'];
+  _lc_hqc_256_keypair_from_seed = Module['_lc_hqc_256_keypair_from_seed'] = wasmExports['lc_hqc_256_keypair_from_seed'];
+  _lc_hqc_256_enc_internal = Module['_lc_hqc_256_enc_internal'] = wasmExports['lc_hqc_256_enc_internal'];
+  _lc_hqc_256_enc_kdf = Module['_lc_hqc_256_enc_kdf'] = wasmExports['lc_hqc_256_enc_kdf'];
+  _lc_hqc_256_dec_kdf = Module['_lc_hqc_256_dec_kdf'] = wasmExports['lc_hqc_256_dec_kdf'];
+  _lc_hqc_192_code_encode = Module['_lc_hqc_192_code_encode'] = wasmExports['lc_hqc_192_code_encode'];
+  _lc_hqc_192_reed_solomon_encode = Module['_lc_hqc_192_reed_solomon_encode'] = wasmExports['lc_hqc_192_reed_solomon_encode'];
+  _lc_hqc_192_reed_muller_encode = Module['_lc_hqc_192_reed_muller_encode'] = wasmExports['lc_hqc_192_reed_muller_encode'];
+  _lc_hqc_192_code_decode = Module['_lc_hqc_192_code_decode'] = wasmExports['lc_hqc_192_code_decode'];
+  _lc_hqc_192_reed_muller_decode = Module['_lc_hqc_192_reed_muller_decode'] = wasmExports['lc_hqc_192_reed_muller_decode'];
+  _lc_hqc_192_reed_solomon_decode = Module['_lc_hqc_192_reed_solomon_decode'] = wasmExports['lc_hqc_192_reed_solomon_decode'];
+  _lc_hqc_192_fft = Module['_lc_hqc_192_fft'] = wasmExports['lc_hqc_192_fft'];
+  _lc_hqc_192_gf_square = Module['_lc_hqc_192_gf_square'] = wasmExports['lc_hqc_192_gf_square'];
+  _lc_hqc_192_gf_mul = Module['_lc_hqc_192_gf_mul'] = wasmExports['lc_hqc_192_gf_mul'];
+  _lc_hqc_192_gf_inverse = Module['_lc_hqc_192_gf_inverse'] = wasmExports['lc_hqc_192_gf_inverse'];
+  _lc_hqc_192_fft_retrieve_error_poly = Module['_lc_hqc_192_fft_retrieve_error_poly'] = wasmExports['lc_hqc_192_fft_retrieve_error_poly'];
+  _lc_hqc_192_vect_mul = Module['_lc_hqc_192_vect_mul'] = wasmExports['lc_hqc_192_vect_mul'];
+  _lc_hqc_192_hqc_pke_keygen = Module['_lc_hqc_192_hqc_pke_keygen'] = wasmExports['lc_hqc_192_hqc_pke_keygen'];
+  _lc_hqc_192_vect_set_random_fixed_weight = Module['_lc_hqc_192_vect_set_random_fixed_weight'] = wasmExports['lc_hqc_192_vect_set_random_fixed_weight'];
+  _lc_hqc_192_vect_set_random = Module['_lc_hqc_192_vect_set_random'] = wasmExports['lc_hqc_192_vect_set_random'];
+  _lc_hqc_192_vect_add = Module['_lc_hqc_192_vect_add'] = wasmExports['lc_hqc_192_vect_add'];
+  _lc_hqc_192_hqc_public_key_to_string = Module['_lc_hqc_192_hqc_public_key_to_string'] = wasmExports['lc_hqc_192_hqc_public_key_to_string'];
+  _lc_hqc_192_hqc_secret_key_to_string = Module['_lc_hqc_192_hqc_secret_key_to_string'] = wasmExports['lc_hqc_192_hqc_secret_key_to_string'];
+  _lc_hqc_192_hqc_pke_encrypt = Module['_lc_hqc_192_hqc_pke_encrypt'] = wasmExports['lc_hqc_192_hqc_pke_encrypt'];
+  _lc_hqc_192_hqc_public_key_from_string = Module['_lc_hqc_192_hqc_public_key_from_string'] = wasmExports['lc_hqc_192_hqc_public_key_from_string'];
+  _lc_hqc_192_vect_resize = Module['_lc_hqc_192_vect_resize'] = wasmExports['lc_hqc_192_vect_resize'];
+  _lc_hqc_192_hqc_pke_decrypt = Module['_lc_hqc_192_hqc_pke_decrypt'] = wasmExports['lc_hqc_192_hqc_pke_decrypt'];
+  _lc_hqc_192_hqc_secret_key_from_string = Module['_lc_hqc_192_hqc_secret_key_from_string'] = wasmExports['lc_hqc_192_hqc_secret_key_from_string'];
+  _lc_hqc_192_keypair_c = Module['_lc_hqc_192_keypair_c'] = wasmExports['lc_hqc_192_keypair_c'];
+  _lc_hqc_192_enc = Module['_lc_hqc_192_enc'] = wasmExports['lc_hqc_192_enc'];
+  _lc_hqc_192_dec = Module['_lc_hqc_192_dec'] = wasmExports['lc_hqc_192_dec'];
+  _lc_hqc_192_keypair_from_seed_c = Module['_lc_hqc_192_keypair_from_seed_c'] = wasmExports['lc_hqc_192_keypair_from_seed_c'];
+  _lc_hqc_192_enc_internal_c = Module['_lc_hqc_192_enc_internal_c'] = wasmExports['lc_hqc_192_enc_internal_c'];
+  _lc_hqc_192_store8_arr = Module['_lc_hqc_192_store8_arr'] = wasmExports['lc_hqc_192_store8_arr'];
+  _lc_hqc_192_hqc_ciphertext_to_string = Module['_lc_hqc_192_hqc_ciphertext_to_string'] = wasmExports['lc_hqc_192_hqc_ciphertext_to_string'];
+  _lc_hqc_192_enc_c = Module['_lc_hqc_192_enc_c'] = wasmExports['lc_hqc_192_enc_c'];
+  _lc_hqc_192_enc_kdf_c = Module['_lc_hqc_192_enc_kdf_c'] = wasmExports['lc_hqc_192_enc_kdf_c'];
+  _lc_hqc_192_dec_c = Module['_lc_hqc_192_dec_c'] = wasmExports['lc_hqc_192_dec_c'];
+  _lc_hqc_192_hqc_ciphertext_from_string = Module['_lc_hqc_192_hqc_ciphertext_from_string'] = wasmExports['lc_hqc_192_hqc_ciphertext_from_string'];
+  _lc_hqc_192_vect_compare = Module['_lc_hqc_192_vect_compare'] = wasmExports['lc_hqc_192_vect_compare'];
+  _lc_hqc_192_dec_kdf_c = Module['_lc_hqc_192_dec_kdf_c'] = wasmExports['lc_hqc_192_dec_kdf_c'];
+  _lc_hqc_192_hqc_kem_keygen_selftest = Module['_lc_hqc_192_hqc_kem_keygen_selftest'] = wasmExports['lc_hqc_192_hqc_kem_keygen_selftest'];
+  _lc_hqc_192_hqc_kem_enc_selftest = Module['_lc_hqc_192_hqc_kem_enc_selftest'] = wasmExports['lc_hqc_192_hqc_kem_enc_selftest'];
+  _lc_hqc_192_hqc_kem_dec_selftest = Module['_lc_hqc_192_hqc_kem_dec_selftest'] = wasmExports['lc_hqc_192_hqc_kem_dec_selftest'];
+  _lc_hqc_192_load8_arr = Module['_lc_hqc_192_load8_arr'] = wasmExports['lc_hqc_192_load8_arr'];
+  _lc_hqc_192_keypair = Module['_lc_hqc_192_keypair'] = wasmExports['lc_hqc_192_keypair'];
+  _lc_hqc_192_keypair_from_seed = Module['_lc_hqc_192_keypair_from_seed'] = wasmExports['lc_hqc_192_keypair_from_seed'];
+  _lc_hqc_192_enc_internal = Module['_lc_hqc_192_enc_internal'] = wasmExports['lc_hqc_192_enc_internal'];
+  _lc_hqc_192_enc_kdf = Module['_lc_hqc_192_enc_kdf'] = wasmExports['lc_hqc_192_enc_kdf'];
+  _lc_hqc_192_dec_kdf = Module['_lc_hqc_192_dec_kdf'] = wasmExports['lc_hqc_192_dec_kdf'];
+  _lc_hqc_128_code_encode = Module['_lc_hqc_128_code_encode'] = wasmExports['lc_hqc_128_code_encode'];
+  _lc_hqc_128_reed_solomon_encode = Module['_lc_hqc_128_reed_solomon_encode'] = wasmExports['lc_hqc_128_reed_solomon_encode'];
+  _lc_hqc_128_reed_muller_encode = Module['_lc_hqc_128_reed_muller_encode'] = wasmExports['lc_hqc_128_reed_muller_encode'];
+  _lc_hqc_128_code_decode = Module['_lc_hqc_128_code_decode'] = wasmExports['lc_hqc_128_code_decode'];
+  _lc_hqc_128_reed_muller_decode = Module['_lc_hqc_128_reed_muller_decode'] = wasmExports['lc_hqc_128_reed_muller_decode'];
+  _lc_hqc_128_reed_solomon_decode = Module['_lc_hqc_128_reed_solomon_decode'] = wasmExports['lc_hqc_128_reed_solomon_decode'];
+  _lc_hqc_128_fft = Module['_lc_hqc_128_fft'] = wasmExports['lc_hqc_128_fft'];
+  _lc_hqc_128_gf_square = Module['_lc_hqc_128_gf_square'] = wasmExports['lc_hqc_128_gf_square'];
+  _lc_hqc_128_gf_mul = Module['_lc_hqc_128_gf_mul'] = wasmExports['lc_hqc_128_gf_mul'];
+  _lc_hqc_128_gf_inverse = Module['_lc_hqc_128_gf_inverse'] = wasmExports['lc_hqc_128_gf_inverse'];
+  _lc_hqc_128_fft_retrieve_error_poly = Module['_lc_hqc_128_fft_retrieve_error_poly'] = wasmExports['lc_hqc_128_fft_retrieve_error_poly'];
+  _lc_hqc_128_vect_mul = Module['_lc_hqc_128_vect_mul'] = wasmExports['lc_hqc_128_vect_mul'];
+  _lc_hqc_128_hqc_pke_keygen = Module['_lc_hqc_128_hqc_pke_keygen'] = wasmExports['lc_hqc_128_hqc_pke_keygen'];
+  _lc_hqc_128_vect_set_random_fixed_weight = Module['_lc_hqc_128_vect_set_random_fixed_weight'] = wasmExports['lc_hqc_128_vect_set_random_fixed_weight'];
+  _lc_hqc_128_vect_set_random = Module['_lc_hqc_128_vect_set_random'] = wasmExports['lc_hqc_128_vect_set_random'];
+  _lc_hqc_128_vect_add = Module['_lc_hqc_128_vect_add'] = wasmExports['lc_hqc_128_vect_add'];
+  _lc_hqc_128_hqc_public_key_to_string = Module['_lc_hqc_128_hqc_public_key_to_string'] = wasmExports['lc_hqc_128_hqc_public_key_to_string'];
+  _lc_hqc_128_hqc_secret_key_to_string = Module['_lc_hqc_128_hqc_secret_key_to_string'] = wasmExports['lc_hqc_128_hqc_secret_key_to_string'];
+  _lc_hqc_128_hqc_pke_encrypt = Module['_lc_hqc_128_hqc_pke_encrypt'] = wasmExports['lc_hqc_128_hqc_pke_encrypt'];
+  _lc_hqc_128_hqc_public_key_from_string = Module['_lc_hqc_128_hqc_public_key_from_string'] = wasmExports['lc_hqc_128_hqc_public_key_from_string'];
+  _lc_hqc_128_vect_resize = Module['_lc_hqc_128_vect_resize'] = wasmExports['lc_hqc_128_vect_resize'];
+  _lc_hqc_128_hqc_pke_decrypt = Module['_lc_hqc_128_hqc_pke_decrypt'] = wasmExports['lc_hqc_128_hqc_pke_decrypt'];
+  _lc_hqc_128_hqc_secret_key_from_string = Module['_lc_hqc_128_hqc_secret_key_from_string'] = wasmExports['lc_hqc_128_hqc_secret_key_from_string'];
+  _lc_hqc_128_keypair_c = Module['_lc_hqc_128_keypair_c'] = wasmExports['lc_hqc_128_keypair_c'];
+  _lc_hqc_128_enc = Module['_lc_hqc_128_enc'] = wasmExports['lc_hqc_128_enc'];
+  _lc_hqc_128_dec = Module['_lc_hqc_128_dec'] = wasmExports['lc_hqc_128_dec'];
+  _lc_hqc_128_keypair_from_seed_c = Module['_lc_hqc_128_keypair_from_seed_c'] = wasmExports['lc_hqc_128_keypair_from_seed_c'];
+  _lc_hqc_128_enc_internal_c = Module['_lc_hqc_128_enc_internal_c'] = wasmExports['lc_hqc_128_enc_internal_c'];
+  _lc_hqc_128_store8_arr = Module['_lc_hqc_128_store8_arr'] = wasmExports['lc_hqc_128_store8_arr'];
+  _lc_hqc_128_hqc_ciphertext_to_string = Module['_lc_hqc_128_hqc_ciphertext_to_string'] = wasmExports['lc_hqc_128_hqc_ciphertext_to_string'];
+  _lc_hqc_128_enc_c = Module['_lc_hqc_128_enc_c'] = wasmExports['lc_hqc_128_enc_c'];
+  _lc_hqc_128_enc_kdf_c = Module['_lc_hqc_128_enc_kdf_c'] = wasmExports['lc_hqc_128_enc_kdf_c'];
+  _lc_hqc_128_dec_c = Module['_lc_hqc_128_dec_c'] = wasmExports['lc_hqc_128_dec_c'];
+  _lc_hqc_128_hqc_ciphertext_from_string = Module['_lc_hqc_128_hqc_ciphertext_from_string'] = wasmExports['lc_hqc_128_hqc_ciphertext_from_string'];
+  _lc_hqc_128_vect_compare = Module['_lc_hqc_128_vect_compare'] = wasmExports['lc_hqc_128_vect_compare'];
+  _lc_hqc_128_dec_kdf_c = Module['_lc_hqc_128_dec_kdf_c'] = wasmExports['lc_hqc_128_dec_kdf_c'];
+  _lc_hqc_128_hqc_kem_keygen_selftest = Module['_lc_hqc_128_hqc_kem_keygen_selftest'] = wasmExports['lc_hqc_128_hqc_kem_keygen_selftest'];
+  _lc_hqc_128_hqc_kem_enc_selftest = Module['_lc_hqc_128_hqc_kem_enc_selftest'] = wasmExports['lc_hqc_128_hqc_kem_enc_selftest'];
+  _lc_hqc_128_hqc_kem_dec_selftest = Module['_lc_hqc_128_hqc_kem_dec_selftest'] = wasmExports['lc_hqc_128_hqc_kem_dec_selftest'];
+  _lc_hqc_128_load8_arr = Module['_lc_hqc_128_load8_arr'] = wasmExports['lc_hqc_128_load8_arr'];
+  _lc_hqc_128_keypair = Module['_lc_hqc_128_keypair'] = wasmExports['lc_hqc_128_keypair'];
+  _lc_hqc_128_keypair_from_seed = Module['_lc_hqc_128_keypair_from_seed'] = wasmExports['lc_hqc_128_keypair_from_seed'];
+  _lc_hqc_128_enc_internal = Module['_lc_hqc_128_enc_internal'] = wasmExports['lc_hqc_128_enc_internal'];
+  _lc_hqc_128_enc_kdf = Module['_lc_hqc_128_enc_kdf'] = wasmExports['lc_hqc_128_enc_kdf'];
+  _lc_hqc_128_dec_kdf = Module['_lc_hqc_128_dec_kdf'] = wasmExports['lc_hqc_128_dec_kdf'];
+  _lc_kyber_1024__keypair_from_seed = Module['_lc_kyber_1024__keypair_from_seed'] = wasmExports['lc_kyber_1024__keypair_from_seed'];
+  _lc_hash = Module['_lc_hash'] = wasmExports['lc_hash'];
+  _lc_kyber_1024_enc = Module['_lc_kyber_1024_enc'] = wasmExports['lc_kyber_1024_enc'];
+  _lc_kyber_1024_dec = Module['_lc_kyber_1024_dec'] = wasmExports['lc_kyber_1024_dec'];
+  _lc_kyber_1024__keypair = Module['_lc_kyber_1024__keypair'] = wasmExports['lc_kyber_1024__keypair'];
+  _lc_kyber_1024__pk_from_sk = Module['_lc_kyber_1024__pk_from_sk'] = wasmExports['lc_kyber_1024__pk_from_sk'];
+  _lc_kyber_1024__enc = Module['_lc_kyber_1024__enc'] = wasmExports['lc_kyber_1024__enc'];
+  _lc_kyber_1024__enc_kdf = Module['_lc_kyber_1024__enc_kdf'] = wasmExports['lc_kyber_1024__enc_kdf'];
+  _lc_kyber_1024_iv_sk = Module['_lc_kyber_1024_iv_sk'] = wasmExports['lc_kyber_1024_iv_sk'];
+  _lc_kyber_1024__dec = Module['_lc_kyber_1024__dec'] = wasmExports['lc_kyber_1024__dec'];
+  _lc_kyber_1024__dec_kdf = Module['_lc_kyber_1024__dec_kdf'] = wasmExports['lc_kyber_1024__dec_kdf'];
+  _lc_kyber_1024_keypair_from_seed_c = Module['_lc_kyber_1024_keypair_from_seed_c'] = wasmExports['lc_kyber_1024_keypair_from_seed_c'];
+  _lc_kyber_1024_indcpa_keypair = Module['_lc_kyber_1024_indcpa_keypair'] = wasmExports['lc_kyber_1024_indcpa_keypair'];
+  _lc_kyber_1024_keypair_c = Module['_lc_kyber_1024_keypair_c'] = wasmExports['lc_kyber_1024_keypair_c'];
+  _lc_kyber_1024_pk_from_sk_c = Module['_lc_kyber_1024_pk_from_sk_c'] = wasmExports['lc_kyber_1024_pk_from_sk_c'];
+  _lc_kyber_1024_enc_c = Module['_lc_kyber_1024_enc_c'] = wasmExports['lc_kyber_1024_enc_c'];
+  _lc_kyber_1024_indcpa_enc = Module['_lc_kyber_1024_indcpa_enc'] = wasmExports['lc_kyber_1024_indcpa_enc'];
+  _lc_kyber_1024_enc_kdf_c = Module['_lc_kyber_1024_enc_kdf_c'] = wasmExports['lc_kyber_1024_enc_kdf_c'];
+  _lc_kyber_1024_dec_c = Module['_lc_kyber_1024_dec_c'] = wasmExports['lc_kyber_1024_dec_c'];
+  _lc_kyber_1024_indcpa_dec = Module['_lc_kyber_1024_indcpa_dec'] = wasmExports['lc_kyber_1024_indcpa_dec'];
+  _lc_kyber_1024_dec_kdf_c = Module['_lc_kyber_1024_dec_kdf_c'] = wasmExports['lc_kyber_1024_dec_kdf_c'];
+  _lc_kex_1024_uake_initiator_init_internal = Module['_lc_kex_1024_uake_initiator_init_internal'] = wasmExports['lc_kex_1024_uake_initiator_init_internal'];
+  _lc_kyber_1024_keypair = Module['_lc_kyber_1024_keypair'] = wasmExports['lc_kyber_1024_keypair'];
+  _lc_kyber_1024_enc_internal = Module['_lc_kyber_1024_enc_internal'] = wasmExports['lc_kyber_1024_enc_internal'];
+  _lc_kex_1024_uake_initiator_init = Module['_lc_kex_1024_uake_initiator_init'] = wasmExports['lc_kex_1024_uake_initiator_init'];
+  _lc_kex_1024_uake_responder_ss_internal = Module['_lc_kex_1024_uake_responder_ss_internal'] = wasmExports['lc_kex_1024_uake_responder_ss_internal'];
+  _lc_kmac_zero = Module['_lc_kmac_zero'] = wasmExports['lc_kmac_zero'];
+  _lc_kmac_init = Module['_lc_kmac_init'] = wasmExports['lc_kmac_init'];
+  _lc_kmac_update = Module['_lc_kmac_update'] = wasmExports['lc_kmac_update'];
+  _lc_kmac_final = Module['_lc_kmac_final'] = wasmExports['lc_kmac_final'];
+  _lc_kex_1024_uake_responder_ss = Module['_lc_kex_1024_uake_responder_ss'] = wasmExports['lc_kex_1024_uake_responder_ss'];
+  _lc_kex_1024_uake_initiator_ss = Module['_lc_kex_1024_uake_initiator_ss'] = wasmExports['lc_kex_1024_uake_initiator_ss'];
+  _lc_kex_1024_ake_initiator_init_internal = Module['_lc_kex_1024_ake_initiator_init_internal'] = wasmExports['lc_kex_1024_ake_initiator_init_internal'];
+  _lc_kex_1024_ake_initiator_init = Module['_lc_kex_1024_ake_initiator_init'] = wasmExports['lc_kex_1024_ake_initiator_init'];
+  _lc_kex_1024_ake_responder_ss_internal = Module['_lc_kex_1024_ake_responder_ss_internal'] = wasmExports['lc_kex_1024_ake_responder_ss_internal'];
+  _lc_kex_1024_ake_responder_ss = Module['_lc_kex_1024_ake_responder_ss'] = wasmExports['lc_kex_1024_ake_responder_ss'];
+  _lc_kex_1024_ake_initiator_ss = Module['_lc_kex_1024_ake_initiator_ss'] = wasmExports['lc_kex_1024_ake_initiator_ss'];
+  _lc_kyber_1024_poly_getnoise_eta1 = Module['_lc_kyber_1024_poly_getnoise_eta1'] = wasmExports['lc_kyber_1024_poly_getnoise_eta1'];
+  _kyber_ntt = Module['_kyber_ntt'] = wasmExports['kyber_ntt'];
+  _lc_kyber_1024_basemul = Module['_lc_kyber_1024_basemul'] = wasmExports['lc_kyber_1024_basemul'];
+  _lc_kyber_1024_poly_getnoise_eta2 = Module['_lc_kyber_1024_poly_getnoise_eta2'] = wasmExports['lc_kyber_1024_poly_getnoise_eta2'];
+  _kyber_invntt = Module['_kyber_invntt'] = wasmExports['kyber_invntt'];
+  _lc_kyber_1024_polyvec_compress = Module['_lc_kyber_1024_polyvec_compress'] = wasmExports['lc_kyber_1024_polyvec_compress'];
+  _lc_kyber_1024_poly_compress = Module['_lc_kyber_1024_poly_compress'] = wasmExports['lc_kyber_1024_poly_compress'];
+  _lc_kyber_1024_polyvec_decompress = Module['_lc_kyber_1024_polyvec_decompress'] = wasmExports['lc_kyber_1024_polyvec_decompress'];
+  _lc_kyber_1024_poly_decompress = Module['_lc_kyber_1024_poly_decompress'] = wasmExports['lc_kyber_1024_poly_decompress'];
+  _cbd2 = Module['_cbd2'] = wasmExports['cbd2'];
+  _lc_kyber_1024_kem_keygen_selftest = Module['_lc_kyber_1024_kem_keygen_selftest'] = wasmExports['lc_kyber_1024_kem_keygen_selftest'];
+  _lc_kyber_1024_kem_enc_selftest = Module['_lc_kyber_1024_kem_enc_selftest'] = wasmExports['lc_kyber_1024_kem_enc_selftest'];
+  _lc_kyber_1024_kem_dec_selftest = Module['_lc_kyber_1024_kem_dec_selftest'] = wasmExports['lc_kyber_1024_kem_dec_selftest'];
+  _lc_kyber_1024_kem_enc_kdf_selftest = Module['_lc_kyber_1024_kem_enc_kdf_selftest'] = wasmExports['lc_kyber_1024_kem_enc_kdf_selftest'];
+  _lc_kyber_1024_kem_dec_kdf_selftest = Module['_lc_kyber_1024_kem_dec_kdf_selftest'] = wasmExports['lc_kyber_1024_kem_dec_kdf_selftest'];
+  _lc_kyber_1024_ies_enc_internal = Module['_lc_kyber_1024_ies_enc_internal'] = wasmExports['lc_kyber_1024_ies_enc_internal'];
+  _lc_kyber_1024_enc_kdf_internal = Module['_lc_kyber_1024_enc_kdf_internal'] = wasmExports['lc_kyber_1024_enc_kdf_internal'];
+  _lc_kyber_1024_ies_enc = Module['_lc_kyber_1024_ies_enc'] = wasmExports['lc_kyber_1024_ies_enc'];
+  _lc_kyber_1024_ies_enc_init_internal = Module['_lc_kyber_1024_ies_enc_init_internal'] = wasmExports['lc_kyber_1024_ies_enc_init_internal'];
+  _lc_aead_dec_init = Module['_lc_aead_dec_init'] = wasmExports['lc_aead_dec_init'];
+  _lc_kyber_1024_ies_enc_init = Module['_lc_kyber_1024_ies_enc_init'] = wasmExports['lc_kyber_1024_ies_enc_init'];
+  _lc_kyber_1024_ies_dec = Module['_lc_kyber_1024_ies_dec'] = wasmExports['lc_kyber_1024_ies_dec'];
+  _lc_kyber_1024_dec_kdf = Module['_lc_kyber_1024_dec_kdf'] = wasmExports['lc_kyber_1024_dec_kdf'];
+  _lc_kyber_1024_ies_dec_init = Module['_lc_kyber_1024_ies_dec_init'] = wasmExports['lc_kyber_1024_ies_dec_init'];
+  _lc_kyber_1024_x25519_keypair = Module['_lc_kyber_1024_x25519_keypair'] = wasmExports['lc_kyber_1024_x25519_keypair'];
+  _lc_x25519_keypair_internal = Module['_lc_x25519_keypair_internal'] = wasmExports['lc_x25519_keypair_internal'];
+  _lc_kyber_1024_x25519_pk_from_sk = Module['_lc_kyber_1024_x25519_pk_from_sk'] = wasmExports['lc_kyber_1024_x25519_pk_from_sk'];
+  _lc_kyber_1024_pk_from_sk = Module['_lc_kyber_1024_pk_from_sk'] = wasmExports['lc_kyber_1024_pk_from_sk'];
+  _lc_x25519_pk_from_sk = Module['_lc_x25519_pk_from_sk'] = wasmExports['lc_x25519_pk_from_sk'];
+  _lc_kyber_1024_x25519_enc_internal = Module['_lc_kyber_1024_x25519_enc_internal'] = wasmExports['lc_kyber_1024_x25519_enc_internal'];
+  _lc_x25519_ss_internal = Module['_lc_x25519_ss_internal'] = wasmExports['lc_x25519_ss_internal'];
+  _lc_kyber_1024_x25519_enc = Module['_lc_kyber_1024_x25519_enc'] = wasmExports['lc_kyber_1024_x25519_enc'];
+  _lc_kyber_1024_x25519_enc_kdf_internal = Module['_lc_kyber_1024_x25519_enc_kdf_internal'] = wasmExports['lc_kyber_1024_x25519_enc_kdf_internal'];
+  _lc_kyber_1024_x25519_enc_kdf = Module['_lc_kyber_1024_x25519_enc_kdf'] = wasmExports['lc_kyber_1024_x25519_enc_kdf'];
+  _lc_kyber_1024_x25519_dec_internal = Module['_lc_kyber_1024_x25519_dec_internal'] = wasmExports['lc_kyber_1024_x25519_dec_internal'];
+  _lc_kyber_1024_x25519_dec = Module['_lc_kyber_1024_x25519_dec'] = wasmExports['lc_kyber_1024_x25519_dec'];
+  _lc_kyber_1024_x25519_dec_kdf = Module['_lc_kyber_1024_x25519_dec_kdf'] = wasmExports['lc_kyber_1024_x25519_dec_kdf'];
+  _lc_kex_1024_x25519_uake_initiator_init_internal = Module['_lc_kex_1024_x25519_uake_initiator_init_internal'] = wasmExports['lc_kex_1024_x25519_uake_initiator_init_internal'];
+  _lc_kex_1024_x25519_uake_initiator_init = Module['_lc_kex_1024_x25519_uake_initiator_init'] = wasmExports['lc_kex_1024_x25519_uake_initiator_init'];
+  _lc_kex_1024_x25519_uake_responder_ss_internal = Module['_lc_kex_1024_x25519_uake_responder_ss_internal'] = wasmExports['lc_kex_1024_x25519_uake_responder_ss_internal'];
+  _lc_kex_1024_x25519_uake_responder_ss = Module['_lc_kex_1024_x25519_uake_responder_ss'] = wasmExports['lc_kex_1024_x25519_uake_responder_ss'];
+  _lc_kex_1024_x25519_uake_initiator_ss = Module['_lc_kex_1024_x25519_uake_initiator_ss'] = wasmExports['lc_kex_1024_x25519_uake_initiator_ss'];
+  _lc_kex_1024_x25519_ake_initiator_init_internal = Module['_lc_kex_1024_x25519_ake_initiator_init_internal'] = wasmExports['lc_kex_1024_x25519_ake_initiator_init_internal'];
+  _lc_kex_1024_x25519_ake_initiator_init = Module['_lc_kex_1024_x25519_ake_initiator_init'] = wasmExports['lc_kex_1024_x25519_ake_initiator_init'];
+  _lc_kex_1024_x25519_ake_responder_ss_internal = Module['_lc_kex_1024_x25519_ake_responder_ss_internal'] = wasmExports['lc_kex_1024_x25519_ake_responder_ss_internal'];
+  _lc_kex_1024_x25519_ake_responder_ss = Module['_lc_kex_1024_x25519_ake_responder_ss'] = wasmExports['lc_kex_1024_x25519_ake_responder_ss'];
+  _lc_kex_1024_x25519_ake_initiator_ss = Module['_lc_kex_1024_x25519_ake_initiator_ss'] = wasmExports['lc_kex_1024_x25519_ake_initiator_ss'];
+  _lc_kyber_1024_x25519_ies_enc_internal = Module['_lc_kyber_1024_x25519_ies_enc_internal'] = wasmExports['lc_kyber_1024_x25519_ies_enc_internal'];
+  _lc_kyber_1024_x25519_ies_enc = Module['_lc_kyber_1024_x25519_ies_enc'] = wasmExports['lc_kyber_1024_x25519_ies_enc'];
+  _lc_kyber_1024_x25519_ies_enc_init_internal = Module['_lc_kyber_1024_x25519_ies_enc_init_internal'] = wasmExports['lc_kyber_1024_x25519_ies_enc_init_internal'];
+  _lc_kyber_1024_x25519_ies_enc_init = Module['_lc_kyber_1024_x25519_ies_enc_init'] = wasmExports['lc_kyber_1024_x25519_ies_enc_init'];
+  _lc_kyber_1024_x25519_ies_dec = Module['_lc_kyber_1024_x25519_ies_dec'] = wasmExports['lc_kyber_1024_x25519_ies_dec'];
+  _lc_kyber_1024_x25519_ies_dec_init = Module['_lc_kyber_1024_x25519_ies_dec_init'] = wasmExports['lc_kyber_1024_x25519_ies_dec_init'];
+  _lc_kyber_1024_x448_keypair = Module['_lc_kyber_1024_x448_keypair'] = wasmExports['lc_kyber_1024_x448_keypair'];
+  _lc_x448_keypair_internal = Module['_lc_x448_keypair_internal'] = wasmExports['lc_x448_keypair_internal'];
+  _lc_kyber_1024_x448_pk_from_sk = Module['_lc_kyber_1024_x448_pk_from_sk'] = wasmExports['lc_kyber_1024_x448_pk_from_sk'];
+  _lc_x448_pk_from_sk = Module['_lc_x448_pk_from_sk'] = wasmExports['lc_x448_pk_from_sk'];
+  _lc_kyber_1024_x448_enc_internal = Module['_lc_kyber_1024_x448_enc_internal'] = wasmExports['lc_kyber_1024_x448_enc_internal'];
+  _lc_x448_ss_internal = Module['_lc_x448_ss_internal'] = wasmExports['lc_x448_ss_internal'];
+  _lc_kyber_1024_x448_enc = Module['_lc_kyber_1024_x448_enc'] = wasmExports['lc_kyber_1024_x448_enc'];
+  _lc_kyber_1024_x448_enc_kdf_internal = Module['_lc_kyber_1024_x448_enc_kdf_internal'] = wasmExports['lc_kyber_1024_x448_enc_kdf_internal'];
+  _lc_kyber_1024_x448_enc_kdf = Module['_lc_kyber_1024_x448_enc_kdf'] = wasmExports['lc_kyber_1024_x448_enc_kdf'];
+  _lc_kyber_1024_x448_dec_internal = Module['_lc_kyber_1024_x448_dec_internal'] = wasmExports['lc_kyber_1024_x448_dec_internal'];
+  _lc_kyber_1024_x448_dec = Module['_lc_kyber_1024_x448_dec'] = wasmExports['lc_kyber_1024_x448_dec'];
+  _lc_kyber_1024_x448_dec_kdf = Module['_lc_kyber_1024_x448_dec_kdf'] = wasmExports['lc_kyber_1024_x448_dec_kdf'];
+  _lc_kex_1024_x448_uake_initiator_init_internal = Module['_lc_kex_1024_x448_uake_initiator_init_internal'] = wasmExports['lc_kex_1024_x448_uake_initiator_init_internal'];
+  _lc_kex_1024_x448_uake_initiator_init = Module['_lc_kex_1024_x448_uake_initiator_init'] = wasmExports['lc_kex_1024_x448_uake_initiator_init'];
+  _lc_kex_1024_x448_uake_responder_ss_internal = Module['_lc_kex_1024_x448_uake_responder_ss_internal'] = wasmExports['lc_kex_1024_x448_uake_responder_ss_internal'];
+  _lc_kex_1024_x448_uake_responder_ss = Module['_lc_kex_1024_x448_uake_responder_ss'] = wasmExports['lc_kex_1024_x448_uake_responder_ss'];
+  _lc_kex_1024_x448_uake_initiator_ss = Module['_lc_kex_1024_x448_uake_initiator_ss'] = wasmExports['lc_kex_1024_x448_uake_initiator_ss'];
+  _lc_kex_1024_x448_ake_initiator_init_internal = Module['_lc_kex_1024_x448_ake_initiator_init_internal'] = wasmExports['lc_kex_1024_x448_ake_initiator_init_internal'];
+  _lc_kex_1024_x448_ake_initiator_init = Module['_lc_kex_1024_x448_ake_initiator_init'] = wasmExports['lc_kex_1024_x448_ake_initiator_init'];
+  _lc_kex_1024_x448_ake_responder_ss_internal = Module['_lc_kex_1024_x448_ake_responder_ss_internal'] = wasmExports['lc_kex_1024_x448_ake_responder_ss_internal'];
+  _lc_kex_1024_x448_ake_responder_ss = Module['_lc_kex_1024_x448_ake_responder_ss'] = wasmExports['lc_kex_1024_x448_ake_responder_ss'];
+  _lc_kex_1024_x448_ake_initiator_ss = Module['_lc_kex_1024_x448_ake_initiator_ss'] = wasmExports['lc_kex_1024_x448_ake_initiator_ss'];
+  _lc_kyber_1024_x448_ies_enc_internal = Module['_lc_kyber_1024_x448_ies_enc_internal'] = wasmExports['lc_kyber_1024_x448_ies_enc_internal'];
+  _lc_kyber_1024_x448_ies_enc = Module['_lc_kyber_1024_x448_ies_enc'] = wasmExports['lc_kyber_1024_x448_ies_enc'];
+  _lc_kyber_1024_x448_ies_enc_init_internal = Module['_lc_kyber_1024_x448_ies_enc_init_internal'] = wasmExports['lc_kyber_1024_x448_ies_enc_init_internal'];
+  _lc_kyber_1024_x448_ies_enc_init = Module['_lc_kyber_1024_x448_ies_enc_init'] = wasmExports['lc_kyber_1024_x448_ies_enc_init'];
+  _lc_kyber_1024_x448_ies_dec = Module['_lc_kyber_1024_x448_ies_dec'] = wasmExports['lc_kyber_1024_x448_ies_dec'];
+  _lc_kyber_1024_x448_ies_dec_init = Module['_lc_kyber_1024_x448_ies_dec_init'] = wasmExports['lc_kyber_1024_x448_ies_dec_init'];
+  _lc_kyber_1024_keypair_from_seed = Module['_lc_kyber_1024_keypair_from_seed'] = wasmExports['lc_kyber_1024_keypair_from_seed'];
+  _lc_kyber_1024_enc_kdf = Module['_lc_kyber_1024_enc_kdf'] = wasmExports['lc_kyber_1024_enc_kdf'];
+  _lc_kyber_768__keypair_from_seed = Module['_lc_kyber_768__keypair_from_seed'] = wasmExports['lc_kyber_768__keypair_from_seed'];
+  _lc_kyber_768_enc = Module['_lc_kyber_768_enc'] = wasmExports['lc_kyber_768_enc'];
+  _lc_kyber_768_dec = Module['_lc_kyber_768_dec'] = wasmExports['lc_kyber_768_dec'];
+  _lc_kyber_768__keypair = Module['_lc_kyber_768__keypair'] = wasmExports['lc_kyber_768__keypair'];
+  _lc_kyber_768__pk_from_sk = Module['_lc_kyber_768__pk_from_sk'] = wasmExports['lc_kyber_768__pk_from_sk'];
+  _lc_kyber_768__enc = Module['_lc_kyber_768__enc'] = wasmExports['lc_kyber_768__enc'];
+  _lc_kyber_768__enc_kdf = Module['_lc_kyber_768__enc_kdf'] = wasmExports['lc_kyber_768__enc_kdf'];
+  _lc_kyber_768_iv_sk = Module['_lc_kyber_768_iv_sk'] = wasmExports['lc_kyber_768_iv_sk'];
+  _lc_kyber_768__dec = Module['_lc_kyber_768__dec'] = wasmExports['lc_kyber_768__dec'];
+  _lc_kyber_768__dec_kdf = Module['_lc_kyber_768__dec_kdf'] = wasmExports['lc_kyber_768__dec_kdf'];
+  _lc_kyber_768_keypair_from_seed_c = Module['_lc_kyber_768_keypair_from_seed_c'] = wasmExports['lc_kyber_768_keypair_from_seed_c'];
+  _lc_kyber_768_indcpa_keypair = Module['_lc_kyber_768_indcpa_keypair'] = wasmExports['lc_kyber_768_indcpa_keypair'];
+  _lc_kyber_768_keypair_c = Module['_lc_kyber_768_keypair_c'] = wasmExports['lc_kyber_768_keypair_c'];
+  _lc_kyber_768_pk_from_sk_c = Module['_lc_kyber_768_pk_from_sk_c'] = wasmExports['lc_kyber_768_pk_from_sk_c'];
+  _lc_kyber_768_enc_c = Module['_lc_kyber_768_enc_c'] = wasmExports['lc_kyber_768_enc_c'];
+  _lc_kyber_768_indcpa_enc = Module['_lc_kyber_768_indcpa_enc'] = wasmExports['lc_kyber_768_indcpa_enc'];
+  _lc_kyber_768_enc_kdf_c = Module['_lc_kyber_768_enc_kdf_c'] = wasmExports['lc_kyber_768_enc_kdf_c'];
+  _lc_kyber_768_dec_c = Module['_lc_kyber_768_dec_c'] = wasmExports['lc_kyber_768_dec_c'];
+  _lc_kyber_768_indcpa_dec = Module['_lc_kyber_768_indcpa_dec'] = wasmExports['lc_kyber_768_indcpa_dec'];
+  _lc_kyber_768_dec_kdf_c = Module['_lc_kyber_768_dec_kdf_c'] = wasmExports['lc_kyber_768_dec_kdf_c'];
+  _lc_kex_768_uake_initiator_init_internal = Module['_lc_kex_768_uake_initiator_init_internal'] = wasmExports['lc_kex_768_uake_initiator_init_internal'];
+  _lc_kyber_768_keypair = Module['_lc_kyber_768_keypair'] = wasmExports['lc_kyber_768_keypair'];
+  _lc_kyber_768_enc_internal = Module['_lc_kyber_768_enc_internal'] = wasmExports['lc_kyber_768_enc_internal'];
+  _lc_kex_768_uake_initiator_init = Module['_lc_kex_768_uake_initiator_init'] = wasmExports['lc_kex_768_uake_initiator_init'];
+  _lc_kex_768_uake_responder_ss_internal = Module['_lc_kex_768_uake_responder_ss_internal'] = wasmExports['lc_kex_768_uake_responder_ss_internal'];
+  _lc_kex_768_uake_responder_ss = Module['_lc_kex_768_uake_responder_ss'] = wasmExports['lc_kex_768_uake_responder_ss'];
+  _lc_kex_768_uake_initiator_ss = Module['_lc_kex_768_uake_initiator_ss'] = wasmExports['lc_kex_768_uake_initiator_ss'];
+  _lc_kex_768_ake_initiator_init_internal = Module['_lc_kex_768_ake_initiator_init_internal'] = wasmExports['lc_kex_768_ake_initiator_init_internal'];
+  _lc_kex_768_ake_initiator_init = Module['_lc_kex_768_ake_initiator_init'] = wasmExports['lc_kex_768_ake_initiator_init'];
+  _lc_kex_768_ake_responder_ss_internal = Module['_lc_kex_768_ake_responder_ss_internal'] = wasmExports['lc_kex_768_ake_responder_ss_internal'];
+  _lc_kex_768_ake_responder_ss = Module['_lc_kex_768_ake_responder_ss'] = wasmExports['lc_kex_768_ake_responder_ss'];
+  _lc_kex_768_ake_initiator_ss = Module['_lc_kex_768_ake_initiator_ss'] = wasmExports['lc_kex_768_ake_initiator_ss'];
+  _lc_kyber_768_poly_getnoise_eta1 = Module['_lc_kyber_768_poly_getnoise_eta1'] = wasmExports['lc_kyber_768_poly_getnoise_eta1'];
+  _lc_kyber_768_basemul = Module['_lc_kyber_768_basemul'] = wasmExports['lc_kyber_768_basemul'];
+  _lc_kyber_768_poly_getnoise_eta2 = Module['_lc_kyber_768_poly_getnoise_eta2'] = wasmExports['lc_kyber_768_poly_getnoise_eta2'];
+  _lc_kyber_768_polyvec_compress = Module['_lc_kyber_768_polyvec_compress'] = wasmExports['lc_kyber_768_polyvec_compress'];
+  _lc_kyber_768_poly_compress = Module['_lc_kyber_768_poly_compress'] = wasmExports['lc_kyber_768_poly_compress'];
+  _lc_kyber_768_polyvec_decompress = Module['_lc_kyber_768_polyvec_decompress'] = wasmExports['lc_kyber_768_polyvec_decompress'];
+  _lc_kyber_768_poly_decompress = Module['_lc_kyber_768_poly_decompress'] = wasmExports['lc_kyber_768_poly_decompress'];
+  _lc_kyber_768_kem_keygen_selftest = Module['_lc_kyber_768_kem_keygen_selftest'] = wasmExports['lc_kyber_768_kem_keygen_selftest'];
+  _lc_kyber_768_kem_enc_selftest = Module['_lc_kyber_768_kem_enc_selftest'] = wasmExports['lc_kyber_768_kem_enc_selftest'];
+  _lc_kyber_768_kem_dec_selftest = Module['_lc_kyber_768_kem_dec_selftest'] = wasmExports['lc_kyber_768_kem_dec_selftest'];
+  _lc_kyber_768_kem_enc_kdf_selftest = Module['_lc_kyber_768_kem_enc_kdf_selftest'] = wasmExports['lc_kyber_768_kem_enc_kdf_selftest'];
+  _lc_kyber_768_kem_dec_kdf_selftest = Module['_lc_kyber_768_kem_dec_kdf_selftest'] = wasmExports['lc_kyber_768_kem_dec_kdf_selftest'];
+  _lc_kyber_768_ies_enc_internal = Module['_lc_kyber_768_ies_enc_internal'] = wasmExports['lc_kyber_768_ies_enc_internal'];
+  _lc_kyber_768_enc_kdf_internal = Module['_lc_kyber_768_enc_kdf_internal'] = wasmExports['lc_kyber_768_enc_kdf_internal'];
+  _lc_kyber_768_ies_enc = Module['_lc_kyber_768_ies_enc'] = wasmExports['lc_kyber_768_ies_enc'];
+  _lc_kyber_768_ies_enc_init_internal = Module['_lc_kyber_768_ies_enc_init_internal'] = wasmExports['lc_kyber_768_ies_enc_init_internal'];
+  _lc_kyber_768_ies_enc_init = Module['_lc_kyber_768_ies_enc_init'] = wasmExports['lc_kyber_768_ies_enc_init'];
+  _lc_kyber_768_ies_dec = Module['_lc_kyber_768_ies_dec'] = wasmExports['lc_kyber_768_ies_dec'];
+  _lc_kyber_768_dec_kdf = Module['_lc_kyber_768_dec_kdf'] = wasmExports['lc_kyber_768_dec_kdf'];
+  _lc_kyber_768_ies_dec_init = Module['_lc_kyber_768_ies_dec_init'] = wasmExports['lc_kyber_768_ies_dec_init'];
+  _lc_kyber_768_x25519_keypair = Module['_lc_kyber_768_x25519_keypair'] = wasmExports['lc_kyber_768_x25519_keypair'];
+  _lc_kyber_768_x25519_pk_from_sk = Module['_lc_kyber_768_x25519_pk_from_sk'] = wasmExports['lc_kyber_768_x25519_pk_from_sk'];
+  _lc_kyber_768_pk_from_sk = Module['_lc_kyber_768_pk_from_sk'] = wasmExports['lc_kyber_768_pk_from_sk'];
+  _lc_kyber_768_x25519_enc_internal = Module['_lc_kyber_768_x25519_enc_internal'] = wasmExports['lc_kyber_768_x25519_enc_internal'];
+  _lc_kyber_768_x25519_enc = Module['_lc_kyber_768_x25519_enc'] = wasmExports['lc_kyber_768_x25519_enc'];
+  _lc_kyber_768_x25519_enc_kdf_internal = Module['_lc_kyber_768_x25519_enc_kdf_internal'] = wasmExports['lc_kyber_768_x25519_enc_kdf_internal'];
+  _lc_kyber_768_x25519_enc_kdf = Module['_lc_kyber_768_x25519_enc_kdf'] = wasmExports['lc_kyber_768_x25519_enc_kdf'];
+  _lc_kyber_768_x25519_dec_internal = Module['_lc_kyber_768_x25519_dec_internal'] = wasmExports['lc_kyber_768_x25519_dec_internal'];
+  _lc_kyber_768_x25519_dec = Module['_lc_kyber_768_x25519_dec'] = wasmExports['lc_kyber_768_x25519_dec'];
+  _lc_kyber_768_x25519_dec_kdf = Module['_lc_kyber_768_x25519_dec_kdf'] = wasmExports['lc_kyber_768_x25519_dec_kdf'];
+  _lc_kex_768_x25519_uake_initiator_init_internal = Module['_lc_kex_768_x25519_uake_initiator_init_internal'] = wasmExports['lc_kex_768_x25519_uake_initiator_init_internal'];
+  _lc_kex_768_x25519_uake_initiator_init = Module['_lc_kex_768_x25519_uake_initiator_init'] = wasmExports['lc_kex_768_x25519_uake_initiator_init'];
+  _lc_kex_768_x25519_uake_responder_ss_internal = Module['_lc_kex_768_x25519_uake_responder_ss_internal'] = wasmExports['lc_kex_768_x25519_uake_responder_ss_internal'];
+  _lc_kex_768_x25519_uake_responder_ss = Module['_lc_kex_768_x25519_uake_responder_ss'] = wasmExports['lc_kex_768_x25519_uake_responder_ss'];
+  _lc_kex_768_x25519_uake_initiator_ss = Module['_lc_kex_768_x25519_uake_initiator_ss'] = wasmExports['lc_kex_768_x25519_uake_initiator_ss'];
+  _lc_kex_768_x25519_ake_initiator_init_internal = Module['_lc_kex_768_x25519_ake_initiator_init_internal'] = wasmExports['lc_kex_768_x25519_ake_initiator_init_internal'];
+  _lc_kex_768_x25519_ake_initiator_init = Module['_lc_kex_768_x25519_ake_initiator_init'] = wasmExports['lc_kex_768_x25519_ake_initiator_init'];
+  _lc_kex_768_x25519_ake_responder_ss_internal = Module['_lc_kex_768_x25519_ake_responder_ss_internal'] = wasmExports['lc_kex_768_x25519_ake_responder_ss_internal'];
+  _lc_kex_768_x25519_ake_responder_ss = Module['_lc_kex_768_x25519_ake_responder_ss'] = wasmExports['lc_kex_768_x25519_ake_responder_ss'];
+  _lc_kex_768_x25519_ake_initiator_ss = Module['_lc_kex_768_x25519_ake_initiator_ss'] = wasmExports['lc_kex_768_x25519_ake_initiator_ss'];
+  _lc_kyber_768_x25519_ies_enc_internal = Module['_lc_kyber_768_x25519_ies_enc_internal'] = wasmExports['lc_kyber_768_x25519_ies_enc_internal'];
+  _lc_kyber_768_x25519_ies_enc = Module['_lc_kyber_768_x25519_ies_enc'] = wasmExports['lc_kyber_768_x25519_ies_enc'];
+  _lc_kyber_768_x25519_ies_enc_init_internal = Module['_lc_kyber_768_x25519_ies_enc_init_internal'] = wasmExports['lc_kyber_768_x25519_ies_enc_init_internal'];
+  _lc_kyber_768_x25519_ies_enc_init = Module['_lc_kyber_768_x25519_ies_enc_init'] = wasmExports['lc_kyber_768_x25519_ies_enc_init'];
+  _lc_kyber_768_x25519_ies_dec = Module['_lc_kyber_768_x25519_ies_dec'] = wasmExports['lc_kyber_768_x25519_ies_dec'];
+  _lc_kyber_768_x25519_ies_dec_init = Module['_lc_kyber_768_x25519_ies_dec_init'] = wasmExports['lc_kyber_768_x25519_ies_dec_init'];
+  _lc_kyber_768_x448_keypair = Module['_lc_kyber_768_x448_keypair'] = wasmExports['lc_kyber_768_x448_keypair'];
+  _lc_kyber_768_x448_pk_from_sk = Module['_lc_kyber_768_x448_pk_from_sk'] = wasmExports['lc_kyber_768_x448_pk_from_sk'];
+  _lc_kyber_768_x448_enc_internal = Module['_lc_kyber_768_x448_enc_internal'] = wasmExports['lc_kyber_768_x448_enc_internal'];
+  _lc_kyber_768_x448_enc = Module['_lc_kyber_768_x448_enc'] = wasmExports['lc_kyber_768_x448_enc'];
+  _lc_kyber_768_x448_enc_kdf_internal = Module['_lc_kyber_768_x448_enc_kdf_internal'] = wasmExports['lc_kyber_768_x448_enc_kdf_internal'];
+  _lc_kyber_768_x448_enc_kdf = Module['_lc_kyber_768_x448_enc_kdf'] = wasmExports['lc_kyber_768_x448_enc_kdf'];
+  _lc_kyber_768_x448_dec_internal = Module['_lc_kyber_768_x448_dec_internal'] = wasmExports['lc_kyber_768_x448_dec_internal'];
+  _lc_kyber_768_x448_dec = Module['_lc_kyber_768_x448_dec'] = wasmExports['lc_kyber_768_x448_dec'];
+  _lc_kyber_768_x448_dec_kdf = Module['_lc_kyber_768_x448_dec_kdf'] = wasmExports['lc_kyber_768_x448_dec_kdf'];
+  _lc_kex_768_x448_uake_initiator_init_internal = Module['_lc_kex_768_x448_uake_initiator_init_internal'] = wasmExports['lc_kex_768_x448_uake_initiator_init_internal'];
+  _lc_kex_768_x448_uake_initiator_init = Module['_lc_kex_768_x448_uake_initiator_init'] = wasmExports['lc_kex_768_x448_uake_initiator_init'];
+  _lc_kex_768_x448_uake_responder_ss_internal = Module['_lc_kex_768_x448_uake_responder_ss_internal'] = wasmExports['lc_kex_768_x448_uake_responder_ss_internal'];
+  _lc_kex_768_x448_uake_responder_ss = Module['_lc_kex_768_x448_uake_responder_ss'] = wasmExports['lc_kex_768_x448_uake_responder_ss'];
+  _lc_kex_768_x448_uake_initiator_ss = Module['_lc_kex_768_x448_uake_initiator_ss'] = wasmExports['lc_kex_768_x448_uake_initiator_ss'];
+  _lc_kex_768_x448_ake_initiator_init_internal = Module['_lc_kex_768_x448_ake_initiator_init_internal'] = wasmExports['lc_kex_768_x448_ake_initiator_init_internal'];
+  _lc_kex_768_x448_ake_initiator_init = Module['_lc_kex_768_x448_ake_initiator_init'] = wasmExports['lc_kex_768_x448_ake_initiator_init'];
+  _lc_kex_768_x448_ake_responder_ss_internal = Module['_lc_kex_768_x448_ake_responder_ss_internal'] = wasmExports['lc_kex_768_x448_ake_responder_ss_internal'];
+  _lc_kex_768_x448_ake_responder_ss = Module['_lc_kex_768_x448_ake_responder_ss'] = wasmExports['lc_kex_768_x448_ake_responder_ss'];
+  _lc_kex_768_x448_ake_initiator_ss = Module['_lc_kex_768_x448_ake_initiator_ss'] = wasmExports['lc_kex_768_x448_ake_initiator_ss'];
+  _lc_kyber_768_x448_ies_enc_internal = Module['_lc_kyber_768_x448_ies_enc_internal'] = wasmExports['lc_kyber_768_x448_ies_enc_internal'];
+  _lc_kyber_768_x448_ies_enc = Module['_lc_kyber_768_x448_ies_enc'] = wasmExports['lc_kyber_768_x448_ies_enc'];
+  _lc_kyber_768_x448_ies_enc_init_internal = Module['_lc_kyber_768_x448_ies_enc_init_internal'] = wasmExports['lc_kyber_768_x448_ies_enc_init_internal'];
+  _lc_kyber_768_x448_ies_enc_init = Module['_lc_kyber_768_x448_ies_enc_init'] = wasmExports['lc_kyber_768_x448_ies_enc_init'];
+  _lc_kyber_768_x448_ies_dec = Module['_lc_kyber_768_x448_ies_dec'] = wasmExports['lc_kyber_768_x448_ies_dec'];
+  _lc_kyber_768_x448_ies_dec_init = Module['_lc_kyber_768_x448_ies_dec_init'] = wasmExports['lc_kyber_768_x448_ies_dec_init'];
+  _lc_kyber_768_keypair_from_seed = Module['_lc_kyber_768_keypair_from_seed'] = wasmExports['lc_kyber_768_keypair_from_seed'];
+  _lc_kyber_768_enc_kdf = Module['_lc_kyber_768_enc_kdf'] = wasmExports['lc_kyber_768_enc_kdf'];
+  _lc_kyber_512__keypair_from_seed = Module['_lc_kyber_512__keypair_from_seed'] = wasmExports['lc_kyber_512__keypair_from_seed'];
+  _lc_kyber_512_enc = Module['_lc_kyber_512_enc'] = wasmExports['lc_kyber_512_enc'];
+  _lc_kyber_512_dec = Module['_lc_kyber_512_dec'] = wasmExports['lc_kyber_512_dec'];
+  _lc_kyber_512__keypair = Module['_lc_kyber_512__keypair'] = wasmExports['lc_kyber_512__keypair'];
+  _lc_kyber_512__pk_from_sk = Module['_lc_kyber_512__pk_from_sk'] = wasmExports['lc_kyber_512__pk_from_sk'];
+  _lc_kyber_512__enc = Module['_lc_kyber_512__enc'] = wasmExports['lc_kyber_512__enc'];
+  _lc_kyber_512__enc_kdf = Module['_lc_kyber_512__enc_kdf'] = wasmExports['lc_kyber_512__enc_kdf'];
+  _lc_kyber_512_iv_sk = Module['_lc_kyber_512_iv_sk'] = wasmExports['lc_kyber_512_iv_sk'];
+  _lc_kyber_512__dec = Module['_lc_kyber_512__dec'] = wasmExports['lc_kyber_512__dec'];
+  _lc_kyber_512__dec_kdf = Module['_lc_kyber_512__dec_kdf'] = wasmExports['lc_kyber_512__dec_kdf'];
+  _lc_kyber_512_keypair_from_seed_c = Module['_lc_kyber_512_keypair_from_seed_c'] = wasmExports['lc_kyber_512_keypair_from_seed_c'];
+  _lc_kyber_512_indcpa_keypair = Module['_lc_kyber_512_indcpa_keypair'] = wasmExports['lc_kyber_512_indcpa_keypair'];
+  _lc_kyber_512_keypair_c = Module['_lc_kyber_512_keypair_c'] = wasmExports['lc_kyber_512_keypair_c'];
+  _lc_kyber_512_pk_from_sk_c = Module['_lc_kyber_512_pk_from_sk_c'] = wasmExports['lc_kyber_512_pk_from_sk_c'];
+  _lc_kyber_512_enc_c = Module['_lc_kyber_512_enc_c'] = wasmExports['lc_kyber_512_enc_c'];
+  _lc_kyber_512_indcpa_enc = Module['_lc_kyber_512_indcpa_enc'] = wasmExports['lc_kyber_512_indcpa_enc'];
+  _lc_kyber_512_enc_kdf_c = Module['_lc_kyber_512_enc_kdf_c'] = wasmExports['lc_kyber_512_enc_kdf_c'];
+  _lc_kyber_512_dec_c = Module['_lc_kyber_512_dec_c'] = wasmExports['lc_kyber_512_dec_c'];
+  _lc_kyber_512_indcpa_dec = Module['_lc_kyber_512_indcpa_dec'] = wasmExports['lc_kyber_512_indcpa_dec'];
+  _lc_kyber_512_dec_kdf_c = Module['_lc_kyber_512_dec_kdf_c'] = wasmExports['lc_kyber_512_dec_kdf_c'];
+  _lc_kex_512_uake_initiator_init_internal = Module['_lc_kex_512_uake_initiator_init_internal'] = wasmExports['lc_kex_512_uake_initiator_init_internal'];
+  _lc_kyber_512_keypair = Module['_lc_kyber_512_keypair'] = wasmExports['lc_kyber_512_keypair'];
+  _lc_kyber_512_enc_internal = Module['_lc_kyber_512_enc_internal'] = wasmExports['lc_kyber_512_enc_internal'];
+  _lc_kex_512_uake_initiator_init = Module['_lc_kex_512_uake_initiator_init'] = wasmExports['lc_kex_512_uake_initiator_init'];
+  _lc_kex_512_uake_responder_ss_internal = Module['_lc_kex_512_uake_responder_ss_internal'] = wasmExports['lc_kex_512_uake_responder_ss_internal'];
+  _lc_kex_512_uake_responder_ss = Module['_lc_kex_512_uake_responder_ss'] = wasmExports['lc_kex_512_uake_responder_ss'];
+  _lc_kex_512_uake_initiator_ss = Module['_lc_kex_512_uake_initiator_ss'] = wasmExports['lc_kex_512_uake_initiator_ss'];
+  _lc_kex_512_ake_initiator_init_internal = Module['_lc_kex_512_ake_initiator_init_internal'] = wasmExports['lc_kex_512_ake_initiator_init_internal'];
+  _lc_kex_512_ake_initiator_init = Module['_lc_kex_512_ake_initiator_init'] = wasmExports['lc_kex_512_ake_initiator_init'];
+  _lc_kex_512_ake_responder_ss_internal = Module['_lc_kex_512_ake_responder_ss_internal'] = wasmExports['lc_kex_512_ake_responder_ss_internal'];
+  _lc_kex_512_ake_responder_ss = Module['_lc_kex_512_ake_responder_ss'] = wasmExports['lc_kex_512_ake_responder_ss'];
+  _lc_kex_512_ake_initiator_ss = Module['_lc_kex_512_ake_initiator_ss'] = wasmExports['lc_kex_512_ake_initiator_ss'];
+  _lc_kyber_512_poly_getnoise_eta1 = Module['_lc_kyber_512_poly_getnoise_eta1'] = wasmExports['lc_kyber_512_poly_getnoise_eta1'];
+  _lc_kyber_512_basemul = Module['_lc_kyber_512_basemul'] = wasmExports['lc_kyber_512_basemul'];
+  _lc_kyber_512_poly_getnoise_eta2 = Module['_lc_kyber_512_poly_getnoise_eta2'] = wasmExports['lc_kyber_512_poly_getnoise_eta2'];
+  _lc_kyber_512_polyvec_compress = Module['_lc_kyber_512_polyvec_compress'] = wasmExports['lc_kyber_512_polyvec_compress'];
+  _lc_kyber_512_poly_compress = Module['_lc_kyber_512_poly_compress'] = wasmExports['lc_kyber_512_poly_compress'];
+  _lc_kyber_512_polyvec_decompress = Module['_lc_kyber_512_polyvec_decompress'] = wasmExports['lc_kyber_512_polyvec_decompress'];
+  _lc_kyber_512_poly_decompress = Module['_lc_kyber_512_poly_decompress'] = wasmExports['lc_kyber_512_poly_decompress'];
+  _cbd3 = Module['_cbd3'] = wasmExports['cbd3'];
+  _lc_kyber_512_kem_keygen_selftest = Module['_lc_kyber_512_kem_keygen_selftest'] = wasmExports['lc_kyber_512_kem_keygen_selftest'];
+  _lc_kyber_512_kem_enc_selftest = Module['_lc_kyber_512_kem_enc_selftest'] = wasmExports['lc_kyber_512_kem_enc_selftest'];
+  _lc_kyber_512_kem_dec_selftest = Module['_lc_kyber_512_kem_dec_selftest'] = wasmExports['lc_kyber_512_kem_dec_selftest'];
+  _lc_kyber_512_kem_enc_kdf_selftest = Module['_lc_kyber_512_kem_enc_kdf_selftest'] = wasmExports['lc_kyber_512_kem_enc_kdf_selftest'];
+  _lc_kyber_512_kem_dec_kdf_selftest = Module['_lc_kyber_512_kem_dec_kdf_selftest'] = wasmExports['lc_kyber_512_kem_dec_kdf_selftest'];
+  _lc_kyber_512_ies_enc_internal = Module['_lc_kyber_512_ies_enc_internal'] = wasmExports['lc_kyber_512_ies_enc_internal'];
+  _lc_kyber_512_enc_kdf_internal = Module['_lc_kyber_512_enc_kdf_internal'] = wasmExports['lc_kyber_512_enc_kdf_internal'];
+  _lc_kyber_512_ies_enc = Module['_lc_kyber_512_ies_enc'] = wasmExports['lc_kyber_512_ies_enc'];
+  _lc_kyber_512_ies_enc_init_internal = Module['_lc_kyber_512_ies_enc_init_internal'] = wasmExports['lc_kyber_512_ies_enc_init_internal'];
+  _lc_kyber_512_ies_enc_init = Module['_lc_kyber_512_ies_enc_init'] = wasmExports['lc_kyber_512_ies_enc_init'];
+  _lc_kyber_512_ies_dec = Module['_lc_kyber_512_ies_dec'] = wasmExports['lc_kyber_512_ies_dec'];
+  _lc_kyber_512_dec_kdf = Module['_lc_kyber_512_dec_kdf'] = wasmExports['lc_kyber_512_dec_kdf'];
+  _lc_kyber_512_ies_dec_init = Module['_lc_kyber_512_ies_dec_init'] = wasmExports['lc_kyber_512_ies_dec_init'];
+  _lc_kyber_512_x25519_keypair = Module['_lc_kyber_512_x25519_keypair'] = wasmExports['lc_kyber_512_x25519_keypair'];
+  _lc_kyber_512_x25519_pk_from_sk = Module['_lc_kyber_512_x25519_pk_from_sk'] = wasmExports['lc_kyber_512_x25519_pk_from_sk'];
+  _lc_kyber_512_pk_from_sk = Module['_lc_kyber_512_pk_from_sk'] = wasmExports['lc_kyber_512_pk_from_sk'];
+  _lc_kyber_512_x25519_enc_internal = Module['_lc_kyber_512_x25519_enc_internal'] = wasmExports['lc_kyber_512_x25519_enc_internal'];
+  _lc_kyber_512_x25519_enc = Module['_lc_kyber_512_x25519_enc'] = wasmExports['lc_kyber_512_x25519_enc'];
+  _lc_kyber_512_x25519_enc_kdf_internal = Module['_lc_kyber_512_x25519_enc_kdf_internal'] = wasmExports['lc_kyber_512_x25519_enc_kdf_internal'];
+  _lc_kyber_512_x25519_enc_kdf = Module['_lc_kyber_512_x25519_enc_kdf'] = wasmExports['lc_kyber_512_x25519_enc_kdf'];
+  _lc_kyber_512_x25519_dec_internal = Module['_lc_kyber_512_x25519_dec_internal'] = wasmExports['lc_kyber_512_x25519_dec_internal'];
+  _lc_kyber_512_x25519_dec = Module['_lc_kyber_512_x25519_dec'] = wasmExports['lc_kyber_512_x25519_dec'];
+  _lc_kyber_512_x25519_dec_kdf = Module['_lc_kyber_512_x25519_dec_kdf'] = wasmExports['lc_kyber_512_x25519_dec_kdf'];
+  _lc_kex_512_x25519_uake_initiator_init_internal = Module['_lc_kex_512_x25519_uake_initiator_init_internal'] = wasmExports['lc_kex_512_x25519_uake_initiator_init_internal'];
+  _lc_kex_512_x25519_uake_initiator_init = Module['_lc_kex_512_x25519_uake_initiator_init'] = wasmExports['lc_kex_512_x25519_uake_initiator_init'];
+  _lc_kex_512_x25519_uake_responder_ss_internal = Module['_lc_kex_512_x25519_uake_responder_ss_internal'] = wasmExports['lc_kex_512_x25519_uake_responder_ss_internal'];
+  _lc_kex_512_x25519_uake_responder_ss = Module['_lc_kex_512_x25519_uake_responder_ss'] = wasmExports['lc_kex_512_x25519_uake_responder_ss'];
+  _lc_kex_512_x25519_uake_initiator_ss = Module['_lc_kex_512_x25519_uake_initiator_ss'] = wasmExports['lc_kex_512_x25519_uake_initiator_ss'];
+  _lc_kex_512_x25519_ake_initiator_init_internal = Module['_lc_kex_512_x25519_ake_initiator_init_internal'] = wasmExports['lc_kex_512_x25519_ake_initiator_init_internal'];
+  _lc_kex_512_x25519_ake_initiator_init = Module['_lc_kex_512_x25519_ake_initiator_init'] = wasmExports['lc_kex_512_x25519_ake_initiator_init'];
+  _lc_kex_512_x25519_ake_responder_ss_internal = Module['_lc_kex_512_x25519_ake_responder_ss_internal'] = wasmExports['lc_kex_512_x25519_ake_responder_ss_internal'];
+  _lc_kex_512_x25519_ake_responder_ss = Module['_lc_kex_512_x25519_ake_responder_ss'] = wasmExports['lc_kex_512_x25519_ake_responder_ss'];
+  _lc_kex_512_x25519_ake_initiator_ss = Module['_lc_kex_512_x25519_ake_initiator_ss'] = wasmExports['lc_kex_512_x25519_ake_initiator_ss'];
+  _lc_kyber_512_x25519_ies_enc_internal = Module['_lc_kyber_512_x25519_ies_enc_internal'] = wasmExports['lc_kyber_512_x25519_ies_enc_internal'];
+  _lc_kyber_512_x25519_ies_enc = Module['_lc_kyber_512_x25519_ies_enc'] = wasmExports['lc_kyber_512_x25519_ies_enc'];
+  _lc_kyber_512_x25519_ies_enc_init_internal = Module['_lc_kyber_512_x25519_ies_enc_init_internal'] = wasmExports['lc_kyber_512_x25519_ies_enc_init_internal'];
+  _lc_kyber_512_x25519_ies_enc_init = Module['_lc_kyber_512_x25519_ies_enc_init'] = wasmExports['lc_kyber_512_x25519_ies_enc_init'];
+  _lc_kyber_512_x25519_ies_dec = Module['_lc_kyber_512_x25519_ies_dec'] = wasmExports['lc_kyber_512_x25519_ies_dec'];
+  _lc_kyber_512_x25519_ies_dec_init = Module['_lc_kyber_512_x25519_ies_dec_init'] = wasmExports['lc_kyber_512_x25519_ies_dec_init'];
+  _lc_kyber_512_x448_keypair = Module['_lc_kyber_512_x448_keypair'] = wasmExports['lc_kyber_512_x448_keypair'];
+  _lc_kyber_512_x448_pk_from_sk = Module['_lc_kyber_512_x448_pk_from_sk'] = wasmExports['lc_kyber_512_x448_pk_from_sk'];
+  _lc_kyber_512_x448_enc_internal = Module['_lc_kyber_512_x448_enc_internal'] = wasmExports['lc_kyber_512_x448_enc_internal'];
+  _lc_kyber_512_x448_enc = Module['_lc_kyber_512_x448_enc'] = wasmExports['lc_kyber_512_x448_enc'];
+  _lc_kyber_512_x448_enc_kdf_internal = Module['_lc_kyber_512_x448_enc_kdf_internal'] = wasmExports['lc_kyber_512_x448_enc_kdf_internal'];
+  _lc_kyber_512_x448_enc_kdf = Module['_lc_kyber_512_x448_enc_kdf'] = wasmExports['lc_kyber_512_x448_enc_kdf'];
+  _lc_kyber_512_x448_dec_internal = Module['_lc_kyber_512_x448_dec_internal'] = wasmExports['lc_kyber_512_x448_dec_internal'];
+  _lc_kyber_512_x448_dec = Module['_lc_kyber_512_x448_dec'] = wasmExports['lc_kyber_512_x448_dec'];
+  _lc_kyber_512_x448_dec_kdf = Module['_lc_kyber_512_x448_dec_kdf'] = wasmExports['lc_kyber_512_x448_dec_kdf'];
+  _lc_kex_512_x448_uake_initiator_init_internal = Module['_lc_kex_512_x448_uake_initiator_init_internal'] = wasmExports['lc_kex_512_x448_uake_initiator_init_internal'];
+  _lc_kex_512_x448_uake_initiator_init = Module['_lc_kex_512_x448_uake_initiator_init'] = wasmExports['lc_kex_512_x448_uake_initiator_init'];
+  _lc_kex_512_x448_uake_responder_ss_internal = Module['_lc_kex_512_x448_uake_responder_ss_internal'] = wasmExports['lc_kex_512_x448_uake_responder_ss_internal'];
+  _lc_kex_512_x448_uake_responder_ss = Module['_lc_kex_512_x448_uake_responder_ss'] = wasmExports['lc_kex_512_x448_uake_responder_ss'];
+  _lc_kex_512_x448_uake_initiator_ss = Module['_lc_kex_512_x448_uake_initiator_ss'] = wasmExports['lc_kex_512_x448_uake_initiator_ss'];
+  _lc_kex_512_x448_ake_initiator_init_internal = Module['_lc_kex_512_x448_ake_initiator_init_internal'] = wasmExports['lc_kex_512_x448_ake_initiator_init_internal'];
+  _lc_kex_512_x448_ake_initiator_init = Module['_lc_kex_512_x448_ake_initiator_init'] = wasmExports['lc_kex_512_x448_ake_initiator_init'];
+  _lc_kex_512_x448_ake_responder_ss_internal = Module['_lc_kex_512_x448_ake_responder_ss_internal'] = wasmExports['lc_kex_512_x448_ake_responder_ss_internal'];
+  _lc_kex_512_x448_ake_responder_ss = Module['_lc_kex_512_x448_ake_responder_ss'] = wasmExports['lc_kex_512_x448_ake_responder_ss'];
+  _lc_kex_512_x448_ake_initiator_ss = Module['_lc_kex_512_x448_ake_initiator_ss'] = wasmExports['lc_kex_512_x448_ake_initiator_ss'];
+  _lc_kyber_512_x448_ies_enc_internal = Module['_lc_kyber_512_x448_ies_enc_internal'] = wasmExports['lc_kyber_512_x448_ies_enc_internal'];
+  _lc_kyber_512_x448_ies_enc = Module['_lc_kyber_512_x448_ies_enc'] = wasmExports['lc_kyber_512_x448_ies_enc'];
+  _lc_kyber_512_x448_ies_enc_init_internal = Module['_lc_kyber_512_x448_ies_enc_init_internal'] = wasmExports['lc_kyber_512_x448_ies_enc_init_internal'];
+  _lc_kyber_512_x448_ies_enc_init = Module['_lc_kyber_512_x448_ies_enc_init'] = wasmExports['lc_kyber_512_x448_ies_enc_init'];
+  _lc_kyber_512_x448_ies_dec = Module['_lc_kyber_512_x448_ies_dec'] = wasmExports['lc_kyber_512_x448_ies_dec'];
+  _lc_kyber_512_x448_ies_dec_init = Module['_lc_kyber_512_x448_ies_dec_init'] = wasmExports['lc_kyber_512_x448_ies_dec_init'];
+  _lc_kyber_512_keypair_from_seed = Module['_lc_kyber_512_keypair_from_seed'] = wasmExports['lc_kyber_512_keypair_from_seed'];
+  _lc_kyber_512_enc_kdf = Module['_lc_kyber_512_enc_kdf'] = wasmExports['lc_kyber_512_enc_kdf'];
+  _lc_dilithium_87_poly_uniform_eta = Module['_lc_dilithium_87_poly_uniform_eta'] = wasmExports['lc_dilithium_87_poly_uniform_eta'];
+  _lc_dilithium_87_polyeta_pack = Module['_lc_dilithium_87_polyeta_pack'] = wasmExports['lc_dilithium_87_polyeta_pack'];
+  _lc_dilithium_87_polyeta_unpack = Module['_lc_dilithium_87_polyeta_unpack'] = wasmExports['lc_dilithium_87_polyeta_unpack'];
+  _lc_dilithium_87_polyz_pack = Module['_lc_dilithium_87_polyz_pack'] = wasmExports['lc_dilithium_87_polyz_pack'];
+  _lc_dilithium_87_polyz_unpack = Module['_lc_dilithium_87_polyz_unpack'] = wasmExports['lc_dilithium_87_polyz_unpack'];
+  _lc_dilithium_87_polyw1_pack = Module['_lc_dilithium_87_polyw1_pack'] = wasmExports['lc_dilithium_87_polyw1_pack'];
+  _lc_dilithium_87_poly_challenge = Module['_lc_dilithium_87_poly_challenge'] = wasmExports['lc_dilithium_87_poly_challenge'];
+  _lc_dilithium_87_poly_uniform_gamma1 = Module['_lc_dilithium_87_poly_uniform_gamma1'] = wasmExports['lc_dilithium_87_poly_uniform_gamma1'];
+  _lc_dilithium_87_decompose = Module['_lc_dilithium_87_decompose'] = wasmExports['lc_dilithium_87_decompose'];
+  _lc_dilithium_87_make_hint = Module['_lc_dilithium_87_make_hint'] = wasmExports['lc_dilithium_87_make_hint'];
+  _lc_dilithium_87_use_hint = Module['_lc_dilithium_87_use_hint'] = wasmExports['lc_dilithium_87_use_hint'];
+  _lc_dilithium_87_keypair_tester = Module['_lc_dilithium_87_keypair_tester'] = wasmExports['lc_dilithium_87_keypair_tester'];
+  _lc_dilithium_87_siggen_tester = Module['_lc_dilithium_87_siggen_tester'] = wasmExports['lc_dilithium_87_siggen_tester'];
+  _lc_dilithium_87_sigver_tester = Module['_lc_dilithium_87_sigver_tester'] = wasmExports['lc_dilithium_87_sigver_tester'];
+  _lc_dilithium_87_ctx_alloc = Module['_lc_dilithium_87_ctx_alloc'] = wasmExports['lc_dilithium_87_ctx_alloc'];
+  _lc_alloc_aligned = Module['_lc_alloc_aligned'] = wasmExports['lc_alloc_aligned'];
+  _lc_dilithium_87_ctx_alloc_ahat = Module['_lc_dilithium_87_ctx_alloc_ahat'] = wasmExports['lc_dilithium_87_ctx_alloc_ahat'];
+  _lc_dilithium_87_ctx_zero_free = Module['_lc_dilithium_87_ctx_zero_free'] = wasmExports['lc_dilithium_87_ctx_zero_free'];
+  _lc_free = Module['_lc_free'] = wasmExports['lc_free'];
+  _lc_dilithium_87_keypair_from_seed_c = Module['_lc_dilithium_87_keypair_from_seed_c'] = wasmExports['lc_dilithium_87_keypair_from_seed_c'];
+  _lc_dilithium_87_pk_from_sk_c = Module['_lc_dilithium_87_pk_from_sk_c'] = wasmExports['lc_dilithium_87_pk_from_sk_c'];
+  _lc_dilithium_87_keypair_c = Module['_lc_dilithium_87_keypair_c'] = wasmExports['lc_dilithium_87_keypair_c'];
+  _lc_xof = Module['_lc_xof'] = wasmExports['lc_xof'];
+  _ntt = Module['_ntt'] = wasmExports['ntt'];
+  _poly_uniform = Module['_poly_uniform'] = wasmExports['poly_uniform'];
+  _invntt_tomont = Module['_invntt_tomont'] = wasmExports['invntt_tomont'];
+  _power2round = Module['_power2round'] = wasmExports['power2round'];
+  _polyt1_pack = Module['_polyt1_pack'] = wasmExports['polyt1_pack'];
+  _polyt0_pack = Module['_polyt0_pack'] = wasmExports['polyt0_pack'];
+  _lc_dilithium_87_sign = Module['_lc_dilithium_87_sign'] = wasmExports['lc_dilithium_87_sign'];
+  _lc_dilithium_87_verify = Module['_lc_dilithium_87_verify'] = wasmExports['lc_dilithium_87_verify'];
+  _lc_dilithium_87_sign_c = Module['_lc_dilithium_87_sign_c'] = wasmExports['lc_dilithium_87_sign_c'];
+  _lc_dilithium_87_sign_ctx_c = Module['_lc_dilithium_87_sign_ctx_c'] = wasmExports['lc_dilithium_87_sign_ctx_c'];
+  _signature_domain_separation = Module['_signature_domain_separation'] = wasmExports['signature_domain_separation'];
+  _lc_dilithium_87_sign_init_c = Module['_lc_dilithium_87_sign_init_c'] = wasmExports['lc_dilithium_87_sign_init_c'];
+  _lc_dilithium_87_sign_update_c = Module['_lc_dilithium_87_sign_update_c'] = wasmExports['lc_dilithium_87_sign_update_c'];
+  _lc_dilithium_87_sign_final_c = Module['_lc_dilithium_87_sign_final_c'] = wasmExports['lc_dilithium_87_sign_final_c'];
+  _polyt0_unpack = Module['_polyt0_unpack'] = wasmExports['polyt0_unpack'];
+  _poly_chknorm = Module['_poly_chknorm'] = wasmExports['poly_chknorm'];
+  _lc_dilithium_87_verify_c = Module['_lc_dilithium_87_verify_c'] = wasmExports['lc_dilithium_87_verify_c'];
+  _lc_dilithium_87_verify_ctx_c = Module['_lc_dilithium_87_verify_ctx_c'] = wasmExports['lc_dilithium_87_verify_ctx_c'];
+  _lc_dilithium_87_verify_init_c = Module['_lc_dilithium_87_verify_init_c'] = wasmExports['lc_dilithium_87_verify_init_c'];
+  _lc_dilithium_87_verify_update_c = Module['_lc_dilithium_87_verify_update_c'] = wasmExports['lc_dilithium_87_verify_update_c'];
+  _lc_dilithium_87_verify_final_c = Module['_lc_dilithium_87_verify_final_c'] = wasmExports['lc_dilithium_87_verify_final_c'];
+  _lc_dilithium_87_ed25519_common_init = Module['_lc_dilithium_87_ed25519_common_init'] = wasmExports['lc_dilithium_87_ed25519_common_init'];
+  _lc_dilithium_87_ed25519_common_update = Module['_lc_dilithium_87_ed25519_common_update'] = wasmExports['lc_dilithium_87_ed25519_common_update'];
+  _lc_dilithium_87_ed25519_ctx_alloc = Module['_lc_dilithium_87_ed25519_ctx_alloc'] = wasmExports['lc_dilithium_87_ed25519_ctx_alloc'];
+  _lc_dilithium_87_ed25519_ctx_zero_free = Module['_lc_dilithium_87_ed25519_ctx_zero_free'] = wasmExports['lc_dilithium_87_ed25519_ctx_zero_free'];
+  _lc_dilithium_87_ed25519_keypair = Module['_lc_dilithium_87_ed25519_keypair'] = wasmExports['lc_dilithium_87_ed25519_keypair'];
+  _lc_dilithium_87_keypair = Module['_lc_dilithium_87_keypair'] = wasmExports['lc_dilithium_87_keypair'];
+  _lc_ed25519_keypair_internal = Module['_lc_ed25519_keypair_internal'] = wasmExports['lc_ed25519_keypair_internal'];
+  _lc_dilithium_87_ed25519_pk_from_sk = Module['_lc_dilithium_87_ed25519_pk_from_sk'] = wasmExports['lc_dilithium_87_ed25519_pk_from_sk'];
+  _lc_dilithium_87_pk_from_sk = Module['_lc_dilithium_87_pk_from_sk'] = wasmExports['lc_dilithium_87_pk_from_sk'];
+  _lc_ed25519_pk_from_sk = Module['_lc_ed25519_pk_from_sk'] = wasmExports['lc_ed25519_pk_from_sk'];
+  _lc_dilithium_87_ed25519_sign_ctx = Module['_lc_dilithium_87_ed25519_sign_ctx'] = wasmExports['lc_dilithium_87_ed25519_sign_ctx'];
+  _lc_dilithium_87_ed25519_sign_final = Module['_lc_dilithium_87_ed25519_sign_final'] = wasmExports['lc_dilithium_87_ed25519_sign_final'];
+  _lc_dilithium_87_ed25519_sign_init = Module['_lc_dilithium_87_ed25519_sign_init'] = wasmExports['lc_dilithium_87_ed25519_sign_init'];
+  _lc_dilithium_87_ed25519_sign_update = Module['_lc_dilithium_87_ed25519_sign_update'] = wasmExports['lc_dilithium_87_ed25519_sign_update'];
+  _lc_dilithium_87_sign_ctx = Module['_lc_dilithium_87_sign_ctx'] = wasmExports['lc_dilithium_87_sign_ctx'];
+  _lc_ed25519_sign_ctx = Module['_lc_ed25519_sign_ctx'] = wasmExports['lc_ed25519_sign_ctx'];
+  _lc_dilithium_87_ed25519_sign = Module['_lc_dilithium_87_ed25519_sign'] = wasmExports['lc_dilithium_87_ed25519_sign'];
+  _lc_dilithium_87_ed25519_verify_ctx = Module['_lc_dilithium_87_ed25519_verify_ctx'] = wasmExports['lc_dilithium_87_ed25519_verify_ctx'];
+  _lc_dilithium_87_ed25519_verify_final = Module['_lc_dilithium_87_ed25519_verify_final'] = wasmExports['lc_dilithium_87_ed25519_verify_final'];
+  _lc_dilithium_87_ed25519_verify_init = Module['_lc_dilithium_87_ed25519_verify_init'] = wasmExports['lc_dilithium_87_ed25519_verify_init'];
+  _lc_dilithium_87_ed25519_verify_update = Module['_lc_dilithium_87_ed25519_verify_update'] = wasmExports['lc_dilithium_87_ed25519_verify_update'];
+  _lc_dilithium_87_verify_ctx = Module['_lc_dilithium_87_verify_ctx'] = wasmExports['lc_dilithium_87_verify_ctx'];
+  _lc_ed25519_verify_ctx = Module['_lc_ed25519_verify_ctx'] = wasmExports['lc_ed25519_verify_ctx'];
+  _lc_dilithium_87_ed25519_verify = Module['_lc_dilithium_87_ed25519_verify'] = wasmExports['lc_dilithium_87_ed25519_verify'];
+  _lc_dilithium_87_ed448_common_init = Module['_lc_dilithium_87_ed448_common_init'] = wasmExports['lc_dilithium_87_ed448_common_init'];
+  _lc_dilithium_87_ed448_common_update = Module['_lc_dilithium_87_ed448_common_update'] = wasmExports['lc_dilithium_87_ed448_common_update'];
+  _lc_dilithium_87_ed448_ctx_alloc = Module['_lc_dilithium_87_ed448_ctx_alloc'] = wasmExports['lc_dilithium_87_ed448_ctx_alloc'];
+  _lc_dilithium_87_ed448_ctx_zero_free = Module['_lc_dilithium_87_ed448_ctx_zero_free'] = wasmExports['lc_dilithium_87_ed448_ctx_zero_free'];
+  _lc_dilithium_87_ed448_keypair = Module['_lc_dilithium_87_ed448_keypair'] = wasmExports['lc_dilithium_87_ed448_keypair'];
+  _lc_ed448_keypair_internal = Module['_lc_ed448_keypair_internal'] = wasmExports['lc_ed448_keypair_internal'];
+  _lc_dilithium_87_ed448_pk_from_sk = Module['_lc_dilithium_87_ed448_pk_from_sk'] = wasmExports['lc_dilithium_87_ed448_pk_from_sk'];
+  _lc_ed448_pk_from_sk = Module['_lc_ed448_pk_from_sk'] = wasmExports['lc_ed448_pk_from_sk'];
+  _lc_dilithium_87_ed448_sign_ctx = Module['_lc_dilithium_87_ed448_sign_ctx'] = wasmExports['lc_dilithium_87_ed448_sign_ctx'];
+  _lc_dilithium_87_ed448_sign_final = Module['_lc_dilithium_87_ed448_sign_final'] = wasmExports['lc_dilithium_87_ed448_sign_final'];
+  _lc_dilithium_87_ed448_sign_init = Module['_lc_dilithium_87_ed448_sign_init'] = wasmExports['lc_dilithium_87_ed448_sign_init'];
+  _lc_dilithium_87_ed448_sign_update = Module['_lc_dilithium_87_ed448_sign_update'] = wasmExports['lc_dilithium_87_ed448_sign_update'];
+  _lc_ed448_sign_ctx = Module['_lc_ed448_sign_ctx'] = wasmExports['lc_ed448_sign_ctx'];
+  _lc_dilithium_87_ed448_sign = Module['_lc_dilithium_87_ed448_sign'] = wasmExports['lc_dilithium_87_ed448_sign'];
+  _lc_dilithium_87_ed448_verify_ctx = Module['_lc_dilithium_87_ed448_verify_ctx'] = wasmExports['lc_dilithium_87_ed448_verify_ctx'];
+  _lc_dilithium_87_ed448_verify_final = Module['_lc_dilithium_87_ed448_verify_final'] = wasmExports['lc_dilithium_87_ed448_verify_final'];
+  _lc_dilithium_87_ed448_verify_init = Module['_lc_dilithium_87_ed448_verify_init'] = wasmExports['lc_dilithium_87_ed448_verify_init'];
+  _lc_dilithium_87_ed448_verify_update = Module['_lc_dilithium_87_ed448_verify_update'] = wasmExports['lc_dilithium_87_ed448_verify_update'];
+  _lc_ed448_verify_ctx = Module['_lc_ed448_verify_ctx'] = wasmExports['lc_ed448_verify_ctx'];
+  _lc_dilithium_87_ed448_verify = Module['_lc_dilithium_87_ed448_verify'] = wasmExports['lc_dilithium_87_ed448_verify'];
+  _lc_dilithium_87_keypair_from_seed = Module['_lc_dilithium_87_keypair_from_seed'] = wasmExports['lc_dilithium_87_keypair_from_seed'];
+  _lc_dilithium_87_sign_init = Module['_lc_dilithium_87_sign_init'] = wasmExports['lc_dilithium_87_sign_init'];
+  _lc_dilithium_87_sign_update = Module['_lc_dilithium_87_sign_update'] = wasmExports['lc_dilithium_87_sign_update'];
+  _lc_dilithium_87_sign_final = Module['_lc_dilithium_87_sign_final'] = wasmExports['lc_dilithium_87_sign_final'];
+  _lc_dilithium_87_verify_init = Module['_lc_dilithium_87_verify_init'] = wasmExports['lc_dilithium_87_verify_init'];
+  _lc_dilithium_87_verify_update = Module['_lc_dilithium_87_verify_update'] = wasmExports['lc_dilithium_87_verify_update'];
+  _lc_dilithium_87_verify_final = Module['_lc_dilithium_87_verify_final'] = wasmExports['lc_dilithium_87_verify_final'];
+  _lc_dilithium_65_poly_uniform_eta = Module['_lc_dilithium_65_poly_uniform_eta'] = wasmExports['lc_dilithium_65_poly_uniform_eta'];
+  _lc_dilithium_65_polyeta_pack = Module['_lc_dilithium_65_polyeta_pack'] = wasmExports['lc_dilithium_65_polyeta_pack'];
+  _lc_dilithium_65_polyeta_unpack = Module['_lc_dilithium_65_polyeta_unpack'] = wasmExports['lc_dilithium_65_polyeta_unpack'];
+  _lc_dilithium_65_polyz_pack = Module['_lc_dilithium_65_polyz_pack'] = wasmExports['lc_dilithium_65_polyz_pack'];
+  _lc_dilithium_65_polyz_unpack = Module['_lc_dilithium_65_polyz_unpack'] = wasmExports['lc_dilithium_65_polyz_unpack'];
+  _lc_dilithium_65_polyw1_pack = Module['_lc_dilithium_65_polyw1_pack'] = wasmExports['lc_dilithium_65_polyw1_pack'];
+  _lc_dilithium_65_poly_challenge = Module['_lc_dilithium_65_poly_challenge'] = wasmExports['lc_dilithium_65_poly_challenge'];
+  _lc_dilithium_65_poly_uniform_gamma1 = Module['_lc_dilithium_65_poly_uniform_gamma1'] = wasmExports['lc_dilithium_65_poly_uniform_gamma1'];
+  _lc_dilithium_65_decompose = Module['_lc_dilithium_65_decompose'] = wasmExports['lc_dilithium_65_decompose'];
+  _lc_dilithium_65_make_hint = Module['_lc_dilithium_65_make_hint'] = wasmExports['lc_dilithium_65_make_hint'];
+  _lc_dilithium_65_use_hint = Module['_lc_dilithium_65_use_hint'] = wasmExports['lc_dilithium_65_use_hint'];
+  _lc_dilithium_65_keypair_tester = Module['_lc_dilithium_65_keypair_tester'] = wasmExports['lc_dilithium_65_keypair_tester'];
+  _lc_dilithium_65_siggen_tester = Module['_lc_dilithium_65_siggen_tester'] = wasmExports['lc_dilithium_65_siggen_tester'];
+  _lc_dilithium_65_sigver_tester = Module['_lc_dilithium_65_sigver_tester'] = wasmExports['lc_dilithium_65_sigver_tester'];
+  _lc_dilithium_65_ctx_alloc = Module['_lc_dilithium_65_ctx_alloc'] = wasmExports['lc_dilithium_65_ctx_alloc'];
+  _lc_dilithium_65_ctx_alloc_ahat = Module['_lc_dilithium_65_ctx_alloc_ahat'] = wasmExports['lc_dilithium_65_ctx_alloc_ahat'];
+  _lc_dilithium_65_ctx_zero_free = Module['_lc_dilithium_65_ctx_zero_free'] = wasmExports['lc_dilithium_65_ctx_zero_free'];
+  _lc_dilithium_65_keypair_from_seed_c = Module['_lc_dilithium_65_keypair_from_seed_c'] = wasmExports['lc_dilithium_65_keypair_from_seed_c'];
+  _lc_dilithium_65_pk_from_sk_c = Module['_lc_dilithium_65_pk_from_sk_c'] = wasmExports['lc_dilithium_65_pk_from_sk_c'];
+  _lc_dilithium_65_keypair_c = Module['_lc_dilithium_65_keypair_c'] = wasmExports['lc_dilithium_65_keypair_c'];
+  _lc_dilithium_65_sign = Module['_lc_dilithium_65_sign'] = wasmExports['lc_dilithium_65_sign'];
+  _lc_dilithium_65_verify = Module['_lc_dilithium_65_verify'] = wasmExports['lc_dilithium_65_verify'];
+  _lc_dilithium_65_sign_c = Module['_lc_dilithium_65_sign_c'] = wasmExports['lc_dilithium_65_sign_c'];
+  _lc_dilithium_65_sign_ctx_c = Module['_lc_dilithium_65_sign_ctx_c'] = wasmExports['lc_dilithium_65_sign_ctx_c'];
+  _lc_dilithium_65_sign_init_c = Module['_lc_dilithium_65_sign_init_c'] = wasmExports['lc_dilithium_65_sign_init_c'];
+  _lc_dilithium_65_sign_update_c = Module['_lc_dilithium_65_sign_update_c'] = wasmExports['lc_dilithium_65_sign_update_c'];
+  _lc_dilithium_65_sign_final_c = Module['_lc_dilithium_65_sign_final_c'] = wasmExports['lc_dilithium_65_sign_final_c'];
+  _lc_dilithium_65_verify_c = Module['_lc_dilithium_65_verify_c'] = wasmExports['lc_dilithium_65_verify_c'];
+  _lc_dilithium_65_verify_ctx_c = Module['_lc_dilithium_65_verify_ctx_c'] = wasmExports['lc_dilithium_65_verify_ctx_c'];
+  _lc_dilithium_65_verify_init_c = Module['_lc_dilithium_65_verify_init_c'] = wasmExports['lc_dilithium_65_verify_init_c'];
+  _lc_dilithium_65_verify_update_c = Module['_lc_dilithium_65_verify_update_c'] = wasmExports['lc_dilithium_65_verify_update_c'];
+  _lc_dilithium_65_verify_final_c = Module['_lc_dilithium_65_verify_final_c'] = wasmExports['lc_dilithium_65_verify_final_c'];
+  _lc_dilithium_65_ed25519_common_init = Module['_lc_dilithium_65_ed25519_common_init'] = wasmExports['lc_dilithium_65_ed25519_common_init'];
+  _lc_dilithium_65_ed25519_common_update = Module['_lc_dilithium_65_ed25519_common_update'] = wasmExports['lc_dilithium_65_ed25519_common_update'];
+  _lc_dilithium_65_ed25519_ctx_alloc = Module['_lc_dilithium_65_ed25519_ctx_alloc'] = wasmExports['lc_dilithium_65_ed25519_ctx_alloc'];
+  _lc_dilithium_65_ed25519_ctx_zero_free = Module['_lc_dilithium_65_ed25519_ctx_zero_free'] = wasmExports['lc_dilithium_65_ed25519_ctx_zero_free'];
+  _lc_dilithium_65_ed25519_keypair = Module['_lc_dilithium_65_ed25519_keypair'] = wasmExports['lc_dilithium_65_ed25519_keypair'];
+  _lc_dilithium_65_keypair = Module['_lc_dilithium_65_keypair'] = wasmExports['lc_dilithium_65_keypair'];
+  _lc_dilithium_65_ed25519_pk_from_sk = Module['_lc_dilithium_65_ed25519_pk_from_sk'] = wasmExports['lc_dilithium_65_ed25519_pk_from_sk'];
+  _lc_dilithium_65_pk_from_sk = Module['_lc_dilithium_65_pk_from_sk'] = wasmExports['lc_dilithium_65_pk_from_sk'];
+  _lc_dilithium_65_ed25519_sign_ctx = Module['_lc_dilithium_65_ed25519_sign_ctx'] = wasmExports['lc_dilithium_65_ed25519_sign_ctx'];
+  _lc_dilithium_65_ed25519_sign_final = Module['_lc_dilithium_65_ed25519_sign_final'] = wasmExports['lc_dilithium_65_ed25519_sign_final'];
+  _lc_dilithium_65_ed25519_sign_init = Module['_lc_dilithium_65_ed25519_sign_init'] = wasmExports['lc_dilithium_65_ed25519_sign_init'];
+  _lc_dilithium_65_ed25519_sign_update = Module['_lc_dilithium_65_ed25519_sign_update'] = wasmExports['lc_dilithium_65_ed25519_sign_update'];
+  _lc_dilithium_65_sign_ctx = Module['_lc_dilithium_65_sign_ctx'] = wasmExports['lc_dilithium_65_sign_ctx'];
+  _lc_dilithium_65_ed25519_sign = Module['_lc_dilithium_65_ed25519_sign'] = wasmExports['lc_dilithium_65_ed25519_sign'];
+  _lc_dilithium_65_ed25519_verify_ctx = Module['_lc_dilithium_65_ed25519_verify_ctx'] = wasmExports['lc_dilithium_65_ed25519_verify_ctx'];
+  _lc_dilithium_65_ed25519_verify_final = Module['_lc_dilithium_65_ed25519_verify_final'] = wasmExports['lc_dilithium_65_ed25519_verify_final'];
+  _lc_dilithium_65_ed25519_verify_init = Module['_lc_dilithium_65_ed25519_verify_init'] = wasmExports['lc_dilithium_65_ed25519_verify_init'];
+  _lc_dilithium_65_ed25519_verify_update = Module['_lc_dilithium_65_ed25519_verify_update'] = wasmExports['lc_dilithium_65_ed25519_verify_update'];
+  _lc_dilithium_65_verify_ctx = Module['_lc_dilithium_65_verify_ctx'] = wasmExports['lc_dilithium_65_verify_ctx'];
+  _lc_dilithium_65_ed25519_verify = Module['_lc_dilithium_65_ed25519_verify'] = wasmExports['lc_dilithium_65_ed25519_verify'];
+  _lc_dilithium_65_ed448_common_init = Module['_lc_dilithium_65_ed448_common_init'] = wasmExports['lc_dilithium_65_ed448_common_init'];
+  _lc_dilithium_65_ed448_common_update = Module['_lc_dilithium_65_ed448_common_update'] = wasmExports['lc_dilithium_65_ed448_common_update'];
+  _lc_dilithium_65_ed448_ctx_alloc = Module['_lc_dilithium_65_ed448_ctx_alloc'] = wasmExports['lc_dilithium_65_ed448_ctx_alloc'];
+  _lc_dilithium_65_ed448_ctx_zero_free = Module['_lc_dilithium_65_ed448_ctx_zero_free'] = wasmExports['lc_dilithium_65_ed448_ctx_zero_free'];
+  _lc_dilithium_65_ed448_keypair = Module['_lc_dilithium_65_ed448_keypair'] = wasmExports['lc_dilithium_65_ed448_keypair'];
+  _lc_dilithium_65_ed448_pk_from_sk = Module['_lc_dilithium_65_ed448_pk_from_sk'] = wasmExports['lc_dilithium_65_ed448_pk_from_sk'];
+  _lc_dilithium_65_ed448_sign_ctx = Module['_lc_dilithium_65_ed448_sign_ctx'] = wasmExports['lc_dilithium_65_ed448_sign_ctx'];
+  _lc_dilithium_65_ed448_sign_final = Module['_lc_dilithium_65_ed448_sign_final'] = wasmExports['lc_dilithium_65_ed448_sign_final'];
+  _lc_dilithium_65_ed448_sign_init = Module['_lc_dilithium_65_ed448_sign_init'] = wasmExports['lc_dilithium_65_ed448_sign_init'];
+  _lc_dilithium_65_ed448_sign_update = Module['_lc_dilithium_65_ed448_sign_update'] = wasmExports['lc_dilithium_65_ed448_sign_update'];
+  _lc_dilithium_65_ed448_sign = Module['_lc_dilithium_65_ed448_sign'] = wasmExports['lc_dilithium_65_ed448_sign'];
+  _lc_dilithium_65_ed448_verify_ctx = Module['_lc_dilithium_65_ed448_verify_ctx'] = wasmExports['lc_dilithium_65_ed448_verify_ctx'];
+  _lc_dilithium_65_ed448_verify_final = Module['_lc_dilithium_65_ed448_verify_final'] = wasmExports['lc_dilithium_65_ed448_verify_final'];
+  _lc_dilithium_65_ed448_verify_init = Module['_lc_dilithium_65_ed448_verify_init'] = wasmExports['lc_dilithium_65_ed448_verify_init'];
+  _lc_dilithium_65_ed448_verify_update = Module['_lc_dilithium_65_ed448_verify_update'] = wasmExports['lc_dilithium_65_ed448_verify_update'];
+  _lc_dilithium_65_ed448_verify = Module['_lc_dilithium_65_ed448_verify'] = wasmExports['lc_dilithium_65_ed448_verify'];
+  _lc_dilithium_65_keypair_from_seed = Module['_lc_dilithium_65_keypair_from_seed'] = wasmExports['lc_dilithium_65_keypair_from_seed'];
+  _lc_dilithium_65_sign_init = Module['_lc_dilithium_65_sign_init'] = wasmExports['lc_dilithium_65_sign_init'];
+  _lc_dilithium_65_sign_update = Module['_lc_dilithium_65_sign_update'] = wasmExports['lc_dilithium_65_sign_update'];
+  _lc_dilithium_65_sign_final = Module['_lc_dilithium_65_sign_final'] = wasmExports['lc_dilithium_65_sign_final'];
+  _lc_dilithium_65_verify_init = Module['_lc_dilithium_65_verify_init'] = wasmExports['lc_dilithium_65_verify_init'];
+  _lc_dilithium_65_verify_update = Module['_lc_dilithium_65_verify_update'] = wasmExports['lc_dilithium_65_verify_update'];
+  _lc_dilithium_65_verify_final = Module['_lc_dilithium_65_verify_final'] = wasmExports['lc_dilithium_65_verify_final'];
+  _lc_dilithium_44_poly_uniform_eta = Module['_lc_dilithium_44_poly_uniform_eta'] = wasmExports['lc_dilithium_44_poly_uniform_eta'];
+  _lc_dilithium_44_polyeta_pack = Module['_lc_dilithium_44_polyeta_pack'] = wasmExports['lc_dilithium_44_polyeta_pack'];
+  _lc_dilithium_44_polyeta_unpack = Module['_lc_dilithium_44_polyeta_unpack'] = wasmExports['lc_dilithium_44_polyeta_unpack'];
+  _lc_dilithium_44_polyz_pack = Module['_lc_dilithium_44_polyz_pack'] = wasmExports['lc_dilithium_44_polyz_pack'];
+  _lc_dilithium_44_polyz_unpack = Module['_lc_dilithium_44_polyz_unpack'] = wasmExports['lc_dilithium_44_polyz_unpack'];
+  _lc_dilithium_44_polyw1_pack = Module['_lc_dilithium_44_polyw1_pack'] = wasmExports['lc_dilithium_44_polyw1_pack'];
+  _lc_dilithium_44_poly_challenge = Module['_lc_dilithium_44_poly_challenge'] = wasmExports['lc_dilithium_44_poly_challenge'];
+  _lc_dilithium_44_poly_uniform_gamma1 = Module['_lc_dilithium_44_poly_uniform_gamma1'] = wasmExports['lc_dilithium_44_poly_uniform_gamma1'];
+  _lc_dilithium_44_decompose = Module['_lc_dilithium_44_decompose'] = wasmExports['lc_dilithium_44_decompose'];
+  _lc_dilithium_44_make_hint = Module['_lc_dilithium_44_make_hint'] = wasmExports['lc_dilithium_44_make_hint'];
+  _lc_dilithium_44_use_hint = Module['_lc_dilithium_44_use_hint'] = wasmExports['lc_dilithium_44_use_hint'];
+  _lc_dilithium_44_keypair_tester = Module['_lc_dilithium_44_keypair_tester'] = wasmExports['lc_dilithium_44_keypair_tester'];
+  _lc_dilithium_44_siggen_tester = Module['_lc_dilithium_44_siggen_tester'] = wasmExports['lc_dilithium_44_siggen_tester'];
+  _lc_dilithium_44_sigver_tester = Module['_lc_dilithium_44_sigver_tester'] = wasmExports['lc_dilithium_44_sigver_tester'];
+  _lc_dilithium_44_ctx_alloc = Module['_lc_dilithium_44_ctx_alloc'] = wasmExports['lc_dilithium_44_ctx_alloc'];
+  _lc_dilithium_44_ctx_alloc_ahat = Module['_lc_dilithium_44_ctx_alloc_ahat'] = wasmExports['lc_dilithium_44_ctx_alloc_ahat'];
+  _lc_dilithium_44_ctx_zero_free = Module['_lc_dilithium_44_ctx_zero_free'] = wasmExports['lc_dilithium_44_ctx_zero_free'];
+  _lc_dilithium_44_keypair_from_seed_c = Module['_lc_dilithium_44_keypair_from_seed_c'] = wasmExports['lc_dilithium_44_keypair_from_seed_c'];
+  _lc_dilithium_44_pk_from_sk_c = Module['_lc_dilithium_44_pk_from_sk_c'] = wasmExports['lc_dilithium_44_pk_from_sk_c'];
+  _lc_dilithium_44_keypair_c = Module['_lc_dilithium_44_keypair_c'] = wasmExports['lc_dilithium_44_keypair_c'];
+  _lc_dilithium_44_sign = Module['_lc_dilithium_44_sign'] = wasmExports['lc_dilithium_44_sign'];
+  _lc_dilithium_44_verify = Module['_lc_dilithium_44_verify'] = wasmExports['lc_dilithium_44_verify'];
+  _lc_dilithium_44_sign_c = Module['_lc_dilithium_44_sign_c'] = wasmExports['lc_dilithium_44_sign_c'];
+  _lc_dilithium_44_sign_ctx_c = Module['_lc_dilithium_44_sign_ctx_c'] = wasmExports['lc_dilithium_44_sign_ctx_c'];
+  _lc_dilithium_44_sign_init_c = Module['_lc_dilithium_44_sign_init_c'] = wasmExports['lc_dilithium_44_sign_init_c'];
+  _lc_dilithium_44_sign_update_c = Module['_lc_dilithium_44_sign_update_c'] = wasmExports['lc_dilithium_44_sign_update_c'];
+  _lc_dilithium_44_sign_final_c = Module['_lc_dilithium_44_sign_final_c'] = wasmExports['lc_dilithium_44_sign_final_c'];
+  _lc_dilithium_44_verify_c = Module['_lc_dilithium_44_verify_c'] = wasmExports['lc_dilithium_44_verify_c'];
+  _lc_dilithium_44_verify_ctx_c = Module['_lc_dilithium_44_verify_ctx_c'] = wasmExports['lc_dilithium_44_verify_ctx_c'];
+  _lc_dilithium_44_verify_init_c = Module['_lc_dilithium_44_verify_init_c'] = wasmExports['lc_dilithium_44_verify_init_c'];
+  _lc_dilithium_44_verify_update_c = Module['_lc_dilithium_44_verify_update_c'] = wasmExports['lc_dilithium_44_verify_update_c'];
+  _lc_dilithium_44_verify_final_c = Module['_lc_dilithium_44_verify_final_c'] = wasmExports['lc_dilithium_44_verify_final_c'];
+  _lc_dilithium_44_ed25519_common_init = Module['_lc_dilithium_44_ed25519_common_init'] = wasmExports['lc_dilithium_44_ed25519_common_init'];
+  _lc_dilithium_44_ed25519_common_update = Module['_lc_dilithium_44_ed25519_common_update'] = wasmExports['lc_dilithium_44_ed25519_common_update'];
+  _lc_dilithium_44_ed25519_ctx_alloc = Module['_lc_dilithium_44_ed25519_ctx_alloc'] = wasmExports['lc_dilithium_44_ed25519_ctx_alloc'];
+  _lc_dilithium_44_ed25519_ctx_zero_free = Module['_lc_dilithium_44_ed25519_ctx_zero_free'] = wasmExports['lc_dilithium_44_ed25519_ctx_zero_free'];
+  _lc_dilithium_44_ed25519_keypair = Module['_lc_dilithium_44_ed25519_keypair'] = wasmExports['lc_dilithium_44_ed25519_keypair'];
+  _lc_dilithium_44_keypair = Module['_lc_dilithium_44_keypair'] = wasmExports['lc_dilithium_44_keypair'];
+  _lc_dilithium_44_ed25519_pk_from_sk = Module['_lc_dilithium_44_ed25519_pk_from_sk'] = wasmExports['lc_dilithium_44_ed25519_pk_from_sk'];
+  _lc_dilithium_44_pk_from_sk = Module['_lc_dilithium_44_pk_from_sk'] = wasmExports['lc_dilithium_44_pk_from_sk'];
+  _lc_dilithium_44_ed25519_sign_ctx = Module['_lc_dilithium_44_ed25519_sign_ctx'] = wasmExports['lc_dilithium_44_ed25519_sign_ctx'];
+  _lc_dilithium_44_ed25519_sign_final = Module['_lc_dilithium_44_ed25519_sign_final'] = wasmExports['lc_dilithium_44_ed25519_sign_final'];
+  _lc_dilithium_44_ed25519_sign_init = Module['_lc_dilithium_44_ed25519_sign_init'] = wasmExports['lc_dilithium_44_ed25519_sign_init'];
+  _lc_dilithium_44_ed25519_sign_update = Module['_lc_dilithium_44_ed25519_sign_update'] = wasmExports['lc_dilithium_44_ed25519_sign_update'];
+  _lc_dilithium_44_sign_ctx = Module['_lc_dilithium_44_sign_ctx'] = wasmExports['lc_dilithium_44_sign_ctx'];
+  _lc_dilithium_44_ed25519_sign = Module['_lc_dilithium_44_ed25519_sign'] = wasmExports['lc_dilithium_44_ed25519_sign'];
+  _lc_dilithium_44_ed25519_verify_ctx = Module['_lc_dilithium_44_ed25519_verify_ctx'] = wasmExports['lc_dilithium_44_ed25519_verify_ctx'];
+  _lc_dilithium_44_ed25519_verify_final = Module['_lc_dilithium_44_ed25519_verify_final'] = wasmExports['lc_dilithium_44_ed25519_verify_final'];
+  _lc_dilithium_44_ed25519_verify_init = Module['_lc_dilithium_44_ed25519_verify_init'] = wasmExports['lc_dilithium_44_ed25519_verify_init'];
+  _lc_dilithium_44_ed25519_verify_update = Module['_lc_dilithium_44_ed25519_verify_update'] = wasmExports['lc_dilithium_44_ed25519_verify_update'];
+  _lc_dilithium_44_verify_ctx = Module['_lc_dilithium_44_verify_ctx'] = wasmExports['lc_dilithium_44_verify_ctx'];
+  _lc_dilithium_44_ed25519_verify = Module['_lc_dilithium_44_ed25519_verify'] = wasmExports['lc_dilithium_44_ed25519_verify'];
+  _lc_dilithium_44_ed448_common_init = Module['_lc_dilithium_44_ed448_common_init'] = wasmExports['lc_dilithium_44_ed448_common_init'];
+  _lc_dilithium_44_ed448_common_update = Module['_lc_dilithium_44_ed448_common_update'] = wasmExports['lc_dilithium_44_ed448_common_update'];
+  _lc_dilithium_44_ed448_ctx_alloc = Module['_lc_dilithium_44_ed448_ctx_alloc'] = wasmExports['lc_dilithium_44_ed448_ctx_alloc'];
+  _lc_dilithium_44_ed448_ctx_zero_free = Module['_lc_dilithium_44_ed448_ctx_zero_free'] = wasmExports['lc_dilithium_44_ed448_ctx_zero_free'];
+  _lc_dilithium_44_ed448_keypair = Module['_lc_dilithium_44_ed448_keypair'] = wasmExports['lc_dilithium_44_ed448_keypair'];
+  _lc_dilithium_44_ed448_pk_from_sk = Module['_lc_dilithium_44_ed448_pk_from_sk'] = wasmExports['lc_dilithium_44_ed448_pk_from_sk'];
+  _lc_dilithium_44_ed448_sign_ctx = Module['_lc_dilithium_44_ed448_sign_ctx'] = wasmExports['lc_dilithium_44_ed448_sign_ctx'];
+  _lc_dilithium_44_ed448_sign_final = Module['_lc_dilithium_44_ed448_sign_final'] = wasmExports['lc_dilithium_44_ed448_sign_final'];
+  _lc_dilithium_44_ed448_sign_init = Module['_lc_dilithium_44_ed448_sign_init'] = wasmExports['lc_dilithium_44_ed448_sign_init'];
+  _lc_dilithium_44_ed448_sign_update = Module['_lc_dilithium_44_ed448_sign_update'] = wasmExports['lc_dilithium_44_ed448_sign_update'];
+  _lc_dilithium_44_ed448_sign = Module['_lc_dilithium_44_ed448_sign'] = wasmExports['lc_dilithium_44_ed448_sign'];
+  _lc_dilithium_44_ed448_verify_ctx = Module['_lc_dilithium_44_ed448_verify_ctx'] = wasmExports['lc_dilithium_44_ed448_verify_ctx'];
+  _lc_dilithium_44_ed448_verify_final = Module['_lc_dilithium_44_ed448_verify_final'] = wasmExports['lc_dilithium_44_ed448_verify_final'];
+  _lc_dilithium_44_ed448_verify_init = Module['_lc_dilithium_44_ed448_verify_init'] = wasmExports['lc_dilithium_44_ed448_verify_init'];
+  _lc_dilithium_44_ed448_verify_update = Module['_lc_dilithium_44_ed448_verify_update'] = wasmExports['lc_dilithium_44_ed448_verify_update'];
+  _lc_dilithium_44_ed448_verify = Module['_lc_dilithium_44_ed448_verify'] = wasmExports['lc_dilithium_44_ed448_verify'];
+  _lc_dilithium_44_keypair_from_seed = Module['_lc_dilithium_44_keypair_from_seed'] = wasmExports['lc_dilithium_44_keypair_from_seed'];
+  _lc_dilithium_44_sign_init = Module['_lc_dilithium_44_sign_init'] = wasmExports['lc_dilithium_44_sign_init'];
+  _lc_dilithium_44_sign_update = Module['_lc_dilithium_44_sign_update'] = wasmExports['lc_dilithium_44_sign_update'];
+  _lc_dilithium_44_sign_final = Module['_lc_dilithium_44_sign_final'] = wasmExports['lc_dilithium_44_sign_final'];
+  _lc_dilithium_44_verify_init = Module['_lc_dilithium_44_verify_init'] = wasmExports['lc_dilithium_44_verify_init'];
+  _lc_dilithium_44_verify_update = Module['_lc_dilithium_44_verify_update'] = wasmExports['lc_dilithium_44_verify_update'];
+  _lc_dilithium_44_verify_final = Module['_lc_dilithium_44_verify_final'] = wasmExports['lc_dilithium_44_verify_final'];
+  _lc_sphincs_shake_256s_fors_sign_c = Module['_lc_sphincs_shake_256s_fors_sign_c'] = wasmExports['lc_sphincs_shake_256s_fors_sign_c'];
+  _lc_sphincs_shake_256s_treehashx1 = Module['_lc_sphincs_shake_256s_treehashx1'] = wasmExports['lc_sphincs_shake_256s_treehashx1'];
+  _lc_sphincs_shake_256s_thash = Module['_lc_sphincs_shake_256s_thash'] = wasmExports['lc_sphincs_shake_256s_thash'];
+  _lc_sphincs_shake_256s_fors_pk_from_sig_c = Module['_lc_sphincs_shake_256s_fors_pk_from_sig_c'] = wasmExports['lc_sphincs_shake_256s_fors_pk_from_sig_c'];
+  _lc_sphincs_shake_256s_compute_root = Module['_lc_sphincs_shake_256s_compute_root'] = wasmExports['lc_sphincs_shake_256s_compute_root'];
+  _lc_sphincs_shake_256s_gen_message_random = Module['_lc_sphincs_shake_256s_gen_message_random'] = wasmExports['lc_sphincs_shake_256s_gen_message_random'];
+  _lc_sphincs_shake_256s_hash_message = Module['_lc_sphincs_shake_256s_hash_message'] = wasmExports['lc_sphincs_shake_256s_hash_message'];
+  _lc_sphincs_shake_256s_bytes_to_ull = Module['_lc_sphincs_shake_256s_bytes_to_ull'] = wasmExports['lc_sphincs_shake_256s_bytes_to_ull'];
+  _lc_sphincs_shake_256s_sphincs_merkle_sign_c = Module['_lc_sphincs_shake_256s_sphincs_merkle_sign_c'] = wasmExports['lc_sphincs_shake_256s_sphincs_merkle_sign_c'];
+  _lc_sphincs_shake_256s_chain_lengths_c = Module['_lc_sphincs_shake_256s_chain_lengths_c'] = wasmExports['lc_sphincs_shake_256s_chain_lengths_c'];
+  _lc_sphincs_shake_256s_wots_gen_leafx1 = Module['_lc_sphincs_shake_256s_wots_gen_leafx1'] = wasmExports['lc_sphincs_shake_256s_wots_gen_leafx1'];
+  _lc_sphincs_shake_256s_sphincs_merkle_gen_root_c = Module['_lc_sphincs_shake_256s_sphincs_merkle_gen_root_c'] = wasmExports['lc_sphincs_shake_256s_sphincs_merkle_gen_root_c'];
+  _lc_sphincs_shake_256s_selftest_keygen = Module['_lc_sphincs_shake_256s_selftest_keygen'] = wasmExports['lc_sphincs_shake_256s_selftest_keygen'];
+  _lc_sphincs_shake_256s_keypair_nocheck = Module['_lc_sphincs_shake_256s_keypair_nocheck'] = wasmExports['lc_sphincs_shake_256s_keypair_nocheck'];
+  _lc_sphincs_shake_256s_selftest_siggen = Module['_lc_sphincs_shake_256s_selftest_siggen'] = wasmExports['lc_sphincs_shake_256s_selftest_siggen'];
+  _lc_sphincs_shake_256s_sign_ctx_nocheck = Module['_lc_sphincs_shake_256s_sign_ctx_nocheck'] = wasmExports['lc_sphincs_shake_256s_sign_ctx_nocheck'];
+  _lc_sphincs_shake_256s_selftest_sigver = Module['_lc_sphincs_shake_256s_selftest_sigver'] = wasmExports['lc_sphincs_shake_256s_selftest_sigver'];
+  _lc_sphincs_shake_256s_verify_ctx_nocheck = Module['_lc_sphincs_shake_256s_verify_ctx_nocheck'] = wasmExports['lc_sphincs_shake_256s_verify_ctx_nocheck'];
+  _lc_sphincs_shake_256s_ctx_alloc = Module['_lc_sphincs_shake_256s_ctx_alloc'] = wasmExports['lc_sphincs_shake_256s_ctx_alloc'];
+  _lc_sphincs_shake_256s_ctx_zero_free = Module['_lc_sphincs_shake_256s_ctx_zero_free'] = wasmExports['lc_sphincs_shake_256s_ctx_zero_free'];
+  _lc_sphincs_shake_256s_thash_ascon = Module['_lc_sphincs_shake_256s_thash_ascon'] = wasmExports['lc_sphincs_shake_256s_thash_ascon'];
+  _lc_sphincs_shake_256s_ull_to_bytes = Module['_lc_sphincs_shake_256s_ull_to_bytes'] = wasmExports['lc_sphincs_shake_256s_ull_to_bytes'];
+  _lc_sphincs_shake_256s_wots_pk_from_sig_c = Module['_lc_sphincs_shake_256s_wots_pk_from_sig_c'] = wasmExports['lc_sphincs_shake_256s_wots_pk_from_sig_c'];
+  _lc_sphincs_shake_256s_keypair_from_seed = Module['_lc_sphincs_shake_256s_keypair_from_seed'] = wasmExports['lc_sphincs_shake_256s_keypair_from_seed'];
+  _lc_sphincs_shake_256s_pk_from_sk = Module['_lc_sphincs_shake_256s_pk_from_sk'] = wasmExports['lc_sphincs_shake_256s_pk_from_sk'];
+  _lc_cpu_feature_available = Module['_lc_cpu_feature_available'] = wasmExports['lc_cpu_feature_available'];
+  _lc_sphincs_shake_256s_sign = Module['_lc_sphincs_shake_256s_sign'] = wasmExports['lc_sphincs_shake_256s_sign'];
+  _lc_sphincs_shake_256s_verify = Module['_lc_sphincs_shake_256s_verify'] = wasmExports['lc_sphincs_shake_256s_verify'];
+  _lc_sphincs_shake_256s_keypair = Module['_lc_sphincs_shake_256s_keypair'] = wasmExports['lc_sphincs_shake_256s_keypair'];
+  _lc_sphincs_shake_256s_sign_ctx = Module['_lc_sphincs_shake_256s_sign_ctx'] = wasmExports['lc_sphincs_shake_256s_sign_ctx'];
+  _lc_sphincs_shake_256s_sign_init = Module['_lc_sphincs_shake_256s_sign_init'] = wasmExports['lc_sphincs_shake_256s_sign_init'];
+  _lc_sphincs_shake_256s_sign_update = Module['_lc_sphincs_shake_256s_sign_update'] = wasmExports['lc_sphincs_shake_256s_sign_update'];
+  _lc_sphincs_shake_256s_sign_final = Module['_lc_sphincs_shake_256s_sign_final'] = wasmExports['lc_sphincs_shake_256s_sign_final'];
+  _lc_hash_digestsize = Module['_lc_hash_digestsize'] = wasmExports['lc_hash_digestsize'];
+  _lc_sphincs_shake_256s_verify_ctx = Module['_lc_sphincs_shake_256s_verify_ctx'] = wasmExports['lc_sphincs_shake_256s_verify_ctx'];
+  _lc_sphincs_shake_256s_verify_init = Module['_lc_sphincs_shake_256s_verify_init'] = wasmExports['lc_sphincs_shake_256s_verify_init'];
+  _lc_sphincs_shake_256s_verify_update = Module['_lc_sphincs_shake_256s_verify_update'] = wasmExports['lc_sphincs_shake_256s_verify_update'];
+  _lc_sphincs_shake_256s_verify_final = Module['_lc_sphincs_shake_256s_verify_final'] = wasmExports['lc_sphincs_shake_256s_verify_final'];
+  _lc_sphincs_shake_256f_fors_sign_c = Module['_lc_sphincs_shake_256f_fors_sign_c'] = wasmExports['lc_sphincs_shake_256f_fors_sign_c'];
+  _lc_sphincs_shake_256f_treehashx1 = Module['_lc_sphincs_shake_256f_treehashx1'] = wasmExports['lc_sphincs_shake_256f_treehashx1'];
+  _lc_sphincs_shake_256f_thash = Module['_lc_sphincs_shake_256f_thash'] = wasmExports['lc_sphincs_shake_256f_thash'];
+  _lc_sphincs_shake_256f_fors_pk_from_sig_c = Module['_lc_sphincs_shake_256f_fors_pk_from_sig_c'] = wasmExports['lc_sphincs_shake_256f_fors_pk_from_sig_c'];
+  _lc_sphincs_shake_256f_compute_root = Module['_lc_sphincs_shake_256f_compute_root'] = wasmExports['lc_sphincs_shake_256f_compute_root'];
+  _lc_sphincs_shake_256f_gen_message_random = Module['_lc_sphincs_shake_256f_gen_message_random'] = wasmExports['lc_sphincs_shake_256f_gen_message_random'];
+  _lc_sphincs_shake_256f_hash_message = Module['_lc_sphincs_shake_256f_hash_message'] = wasmExports['lc_sphincs_shake_256f_hash_message'];
+  _lc_sphincs_shake_256f_bytes_to_ull = Module['_lc_sphincs_shake_256f_bytes_to_ull'] = wasmExports['lc_sphincs_shake_256f_bytes_to_ull'];
+  _lc_sphincs_shake_256f_sphincs_merkle_sign_c = Module['_lc_sphincs_shake_256f_sphincs_merkle_sign_c'] = wasmExports['lc_sphincs_shake_256f_sphincs_merkle_sign_c'];
+  _lc_sphincs_shake_256f_chain_lengths_c = Module['_lc_sphincs_shake_256f_chain_lengths_c'] = wasmExports['lc_sphincs_shake_256f_chain_lengths_c'];
+  _lc_sphincs_shake_256f_wots_gen_leafx1 = Module['_lc_sphincs_shake_256f_wots_gen_leafx1'] = wasmExports['lc_sphincs_shake_256f_wots_gen_leafx1'];
+  _lc_sphincs_shake_256f_sphincs_merkle_gen_root_c = Module['_lc_sphincs_shake_256f_sphincs_merkle_gen_root_c'] = wasmExports['lc_sphincs_shake_256f_sphincs_merkle_gen_root_c'];
+  _lc_sphincs_shake_256f_selftest_keygen = Module['_lc_sphincs_shake_256f_selftest_keygen'] = wasmExports['lc_sphincs_shake_256f_selftest_keygen'];
+  _lc_sphincs_shake_256f_keypair_nocheck = Module['_lc_sphincs_shake_256f_keypair_nocheck'] = wasmExports['lc_sphincs_shake_256f_keypair_nocheck'];
+  _lc_sphincs_shake_256f_selftest_siggen = Module['_lc_sphincs_shake_256f_selftest_siggen'] = wasmExports['lc_sphincs_shake_256f_selftest_siggen'];
+  _lc_sphincs_shake_256f_sign_ctx_nocheck = Module['_lc_sphincs_shake_256f_sign_ctx_nocheck'] = wasmExports['lc_sphincs_shake_256f_sign_ctx_nocheck'];
+  _lc_sphincs_shake_256f_selftest_sigver = Module['_lc_sphincs_shake_256f_selftest_sigver'] = wasmExports['lc_sphincs_shake_256f_selftest_sigver'];
+  _lc_sphincs_shake_256f_verify_ctx_nocheck = Module['_lc_sphincs_shake_256f_verify_ctx_nocheck'] = wasmExports['lc_sphincs_shake_256f_verify_ctx_nocheck'];
+  _lc_sphincs_shake_256f_ctx_alloc = Module['_lc_sphincs_shake_256f_ctx_alloc'] = wasmExports['lc_sphincs_shake_256f_ctx_alloc'];
+  _lc_sphincs_shake_256f_ctx_zero_free = Module['_lc_sphincs_shake_256f_ctx_zero_free'] = wasmExports['lc_sphincs_shake_256f_ctx_zero_free'];
+  _lc_sphincs_shake_256f_thash_ascon = Module['_lc_sphincs_shake_256f_thash_ascon'] = wasmExports['lc_sphincs_shake_256f_thash_ascon'];
+  _lc_sphincs_shake_256f_ull_to_bytes = Module['_lc_sphincs_shake_256f_ull_to_bytes'] = wasmExports['lc_sphincs_shake_256f_ull_to_bytes'];
+  _lc_sphincs_shake_256f_wots_pk_from_sig_c = Module['_lc_sphincs_shake_256f_wots_pk_from_sig_c'] = wasmExports['lc_sphincs_shake_256f_wots_pk_from_sig_c'];
+  _lc_sphincs_shake_256f_keypair_from_seed = Module['_lc_sphincs_shake_256f_keypair_from_seed'] = wasmExports['lc_sphincs_shake_256f_keypair_from_seed'];
+  _lc_sphincs_shake_256f_pk_from_sk = Module['_lc_sphincs_shake_256f_pk_from_sk'] = wasmExports['lc_sphincs_shake_256f_pk_from_sk'];
+  _lc_sphincs_shake_256f_sign = Module['_lc_sphincs_shake_256f_sign'] = wasmExports['lc_sphincs_shake_256f_sign'];
+  _lc_sphincs_shake_256f_verify = Module['_lc_sphincs_shake_256f_verify'] = wasmExports['lc_sphincs_shake_256f_verify'];
+  _lc_sphincs_shake_256f_keypair = Module['_lc_sphincs_shake_256f_keypair'] = wasmExports['lc_sphincs_shake_256f_keypair'];
+  _lc_sphincs_shake_256f_sign_ctx = Module['_lc_sphincs_shake_256f_sign_ctx'] = wasmExports['lc_sphincs_shake_256f_sign_ctx'];
+  _lc_sphincs_shake_256f_sign_init = Module['_lc_sphincs_shake_256f_sign_init'] = wasmExports['lc_sphincs_shake_256f_sign_init'];
+  _lc_sphincs_shake_256f_sign_update = Module['_lc_sphincs_shake_256f_sign_update'] = wasmExports['lc_sphincs_shake_256f_sign_update'];
+  _lc_sphincs_shake_256f_sign_final = Module['_lc_sphincs_shake_256f_sign_final'] = wasmExports['lc_sphincs_shake_256f_sign_final'];
+  _lc_sphincs_shake_256f_verify_ctx = Module['_lc_sphincs_shake_256f_verify_ctx'] = wasmExports['lc_sphincs_shake_256f_verify_ctx'];
+  _lc_sphincs_shake_256f_verify_init = Module['_lc_sphincs_shake_256f_verify_init'] = wasmExports['lc_sphincs_shake_256f_verify_init'];
+  _lc_sphincs_shake_256f_verify_update = Module['_lc_sphincs_shake_256f_verify_update'] = wasmExports['lc_sphincs_shake_256f_verify_update'];
+  _lc_sphincs_shake_256f_verify_final = Module['_lc_sphincs_shake_256f_verify_final'] = wasmExports['lc_sphincs_shake_256f_verify_final'];
+  _lc_sphincs_shake_192s_fors_sign_c = Module['_lc_sphincs_shake_192s_fors_sign_c'] = wasmExports['lc_sphincs_shake_192s_fors_sign_c'];
+  _lc_sphincs_shake_192s_treehashx1 = Module['_lc_sphincs_shake_192s_treehashx1'] = wasmExports['lc_sphincs_shake_192s_treehashx1'];
+  _lc_sphincs_shake_192s_thash = Module['_lc_sphincs_shake_192s_thash'] = wasmExports['lc_sphincs_shake_192s_thash'];
+  _lc_sphincs_shake_192s_fors_pk_from_sig_c = Module['_lc_sphincs_shake_192s_fors_pk_from_sig_c'] = wasmExports['lc_sphincs_shake_192s_fors_pk_from_sig_c'];
+  _lc_sphincs_shake_192s_compute_root = Module['_lc_sphincs_shake_192s_compute_root'] = wasmExports['lc_sphincs_shake_192s_compute_root'];
+  _lc_sphincs_shake_192s_gen_message_random = Module['_lc_sphincs_shake_192s_gen_message_random'] = wasmExports['lc_sphincs_shake_192s_gen_message_random'];
+  _lc_sphincs_shake_192s_hash_message = Module['_lc_sphincs_shake_192s_hash_message'] = wasmExports['lc_sphincs_shake_192s_hash_message'];
+  _lc_sphincs_shake_192s_bytes_to_ull = Module['_lc_sphincs_shake_192s_bytes_to_ull'] = wasmExports['lc_sphincs_shake_192s_bytes_to_ull'];
+  _lc_sphincs_shake_192s_sphincs_merkle_sign_c = Module['_lc_sphincs_shake_192s_sphincs_merkle_sign_c'] = wasmExports['lc_sphincs_shake_192s_sphincs_merkle_sign_c'];
+  _lc_sphincs_shake_192s_chain_lengths_c = Module['_lc_sphincs_shake_192s_chain_lengths_c'] = wasmExports['lc_sphincs_shake_192s_chain_lengths_c'];
+  _lc_sphincs_shake_192s_wots_gen_leafx1 = Module['_lc_sphincs_shake_192s_wots_gen_leafx1'] = wasmExports['lc_sphincs_shake_192s_wots_gen_leafx1'];
+  _lc_sphincs_shake_192s_sphincs_merkle_gen_root_c = Module['_lc_sphincs_shake_192s_sphincs_merkle_gen_root_c'] = wasmExports['lc_sphincs_shake_192s_sphincs_merkle_gen_root_c'];
+  _lc_sphincs_shake_192s_selftest_keygen = Module['_lc_sphincs_shake_192s_selftest_keygen'] = wasmExports['lc_sphincs_shake_192s_selftest_keygen'];
+  _lc_sphincs_shake_192s_keypair_nocheck = Module['_lc_sphincs_shake_192s_keypair_nocheck'] = wasmExports['lc_sphincs_shake_192s_keypair_nocheck'];
+  _lc_sphincs_shake_192s_selftest_siggen = Module['_lc_sphincs_shake_192s_selftest_siggen'] = wasmExports['lc_sphincs_shake_192s_selftest_siggen'];
+  _lc_sphincs_shake_192s_sign_ctx_nocheck = Module['_lc_sphincs_shake_192s_sign_ctx_nocheck'] = wasmExports['lc_sphincs_shake_192s_sign_ctx_nocheck'];
+  _lc_sphincs_shake_192s_selftest_sigver = Module['_lc_sphincs_shake_192s_selftest_sigver'] = wasmExports['lc_sphincs_shake_192s_selftest_sigver'];
+  _lc_sphincs_shake_192s_verify_ctx_nocheck = Module['_lc_sphincs_shake_192s_verify_ctx_nocheck'] = wasmExports['lc_sphincs_shake_192s_verify_ctx_nocheck'];
+  _lc_sphincs_shake_192s_ctx_alloc = Module['_lc_sphincs_shake_192s_ctx_alloc'] = wasmExports['lc_sphincs_shake_192s_ctx_alloc'];
+  _lc_sphincs_shake_192s_ctx_zero_free = Module['_lc_sphincs_shake_192s_ctx_zero_free'] = wasmExports['lc_sphincs_shake_192s_ctx_zero_free'];
+  _lc_sphincs_shake_192s_thash_ascon = Module['_lc_sphincs_shake_192s_thash_ascon'] = wasmExports['lc_sphincs_shake_192s_thash_ascon'];
+  _lc_sphincs_shake_192s_ull_to_bytes = Module['_lc_sphincs_shake_192s_ull_to_bytes'] = wasmExports['lc_sphincs_shake_192s_ull_to_bytes'];
+  _lc_sphincs_shake_192s_wots_pk_from_sig_c = Module['_lc_sphincs_shake_192s_wots_pk_from_sig_c'] = wasmExports['lc_sphincs_shake_192s_wots_pk_from_sig_c'];
+  _lc_sphincs_shake_192s_keypair_from_seed = Module['_lc_sphincs_shake_192s_keypair_from_seed'] = wasmExports['lc_sphincs_shake_192s_keypair_from_seed'];
+  _lc_sphincs_shake_192s_pk_from_sk = Module['_lc_sphincs_shake_192s_pk_from_sk'] = wasmExports['lc_sphincs_shake_192s_pk_from_sk'];
+  _lc_sphincs_shake_192s_sign = Module['_lc_sphincs_shake_192s_sign'] = wasmExports['lc_sphincs_shake_192s_sign'];
+  _lc_sphincs_shake_192s_verify = Module['_lc_sphincs_shake_192s_verify'] = wasmExports['lc_sphincs_shake_192s_verify'];
+  _lc_sphincs_shake_192s_keypair = Module['_lc_sphincs_shake_192s_keypair'] = wasmExports['lc_sphincs_shake_192s_keypair'];
+  _lc_sphincs_shake_192s_sign_ctx = Module['_lc_sphincs_shake_192s_sign_ctx'] = wasmExports['lc_sphincs_shake_192s_sign_ctx'];
+  _lc_sphincs_shake_192s_sign_init = Module['_lc_sphincs_shake_192s_sign_init'] = wasmExports['lc_sphincs_shake_192s_sign_init'];
+  _lc_sphincs_shake_192s_sign_update = Module['_lc_sphincs_shake_192s_sign_update'] = wasmExports['lc_sphincs_shake_192s_sign_update'];
+  _lc_sphincs_shake_192s_sign_final = Module['_lc_sphincs_shake_192s_sign_final'] = wasmExports['lc_sphincs_shake_192s_sign_final'];
+  _lc_sphincs_shake_192s_verify_ctx = Module['_lc_sphincs_shake_192s_verify_ctx'] = wasmExports['lc_sphincs_shake_192s_verify_ctx'];
+  _lc_sphincs_shake_192s_verify_init = Module['_lc_sphincs_shake_192s_verify_init'] = wasmExports['lc_sphincs_shake_192s_verify_init'];
+  _lc_sphincs_shake_192s_verify_update = Module['_lc_sphincs_shake_192s_verify_update'] = wasmExports['lc_sphincs_shake_192s_verify_update'];
+  _lc_sphincs_shake_192s_verify_final = Module['_lc_sphincs_shake_192s_verify_final'] = wasmExports['lc_sphincs_shake_192s_verify_final'];
+  _lc_sphincs_shake_192f_fors_sign_c = Module['_lc_sphincs_shake_192f_fors_sign_c'] = wasmExports['lc_sphincs_shake_192f_fors_sign_c'];
+  _lc_sphincs_shake_192f_treehashx1 = Module['_lc_sphincs_shake_192f_treehashx1'] = wasmExports['lc_sphincs_shake_192f_treehashx1'];
+  _lc_sphincs_shake_192f_thash = Module['_lc_sphincs_shake_192f_thash'] = wasmExports['lc_sphincs_shake_192f_thash'];
+  _lc_sphincs_shake_192f_fors_pk_from_sig_c = Module['_lc_sphincs_shake_192f_fors_pk_from_sig_c'] = wasmExports['lc_sphincs_shake_192f_fors_pk_from_sig_c'];
+  _lc_sphincs_shake_192f_compute_root = Module['_lc_sphincs_shake_192f_compute_root'] = wasmExports['lc_sphincs_shake_192f_compute_root'];
+  _lc_sphincs_shake_192f_gen_message_random = Module['_lc_sphincs_shake_192f_gen_message_random'] = wasmExports['lc_sphincs_shake_192f_gen_message_random'];
+  _lc_sphincs_shake_192f_hash_message = Module['_lc_sphincs_shake_192f_hash_message'] = wasmExports['lc_sphincs_shake_192f_hash_message'];
+  _lc_sphincs_shake_192f_bytes_to_ull = Module['_lc_sphincs_shake_192f_bytes_to_ull'] = wasmExports['lc_sphincs_shake_192f_bytes_to_ull'];
+  _lc_sphincs_shake_192f_sphincs_merkle_sign_c = Module['_lc_sphincs_shake_192f_sphincs_merkle_sign_c'] = wasmExports['lc_sphincs_shake_192f_sphincs_merkle_sign_c'];
+  _lc_sphincs_shake_192f_chain_lengths_c = Module['_lc_sphincs_shake_192f_chain_lengths_c'] = wasmExports['lc_sphincs_shake_192f_chain_lengths_c'];
+  _lc_sphincs_shake_192f_wots_gen_leafx1 = Module['_lc_sphincs_shake_192f_wots_gen_leafx1'] = wasmExports['lc_sphincs_shake_192f_wots_gen_leafx1'];
+  _lc_sphincs_shake_192f_sphincs_merkle_gen_root_c = Module['_lc_sphincs_shake_192f_sphincs_merkle_gen_root_c'] = wasmExports['lc_sphincs_shake_192f_sphincs_merkle_gen_root_c'];
+  _lc_sphincs_shake_192f_selftest_keygen = Module['_lc_sphincs_shake_192f_selftest_keygen'] = wasmExports['lc_sphincs_shake_192f_selftest_keygen'];
+  _lc_sphincs_shake_192f_keypair_nocheck = Module['_lc_sphincs_shake_192f_keypair_nocheck'] = wasmExports['lc_sphincs_shake_192f_keypair_nocheck'];
+  _lc_sphincs_shake_192f_selftest_siggen = Module['_lc_sphincs_shake_192f_selftest_siggen'] = wasmExports['lc_sphincs_shake_192f_selftest_siggen'];
+  _lc_sphincs_shake_192f_sign_ctx_nocheck = Module['_lc_sphincs_shake_192f_sign_ctx_nocheck'] = wasmExports['lc_sphincs_shake_192f_sign_ctx_nocheck'];
+  _lc_sphincs_shake_192f_selftest_sigver = Module['_lc_sphincs_shake_192f_selftest_sigver'] = wasmExports['lc_sphincs_shake_192f_selftest_sigver'];
+  _lc_sphincs_shake_192f_verify_ctx_nocheck = Module['_lc_sphincs_shake_192f_verify_ctx_nocheck'] = wasmExports['lc_sphincs_shake_192f_verify_ctx_nocheck'];
+  _lc_sphincs_shake_192f_ctx_alloc = Module['_lc_sphincs_shake_192f_ctx_alloc'] = wasmExports['lc_sphincs_shake_192f_ctx_alloc'];
+  _lc_sphincs_shake_192f_ctx_zero_free = Module['_lc_sphincs_shake_192f_ctx_zero_free'] = wasmExports['lc_sphincs_shake_192f_ctx_zero_free'];
+  _lc_sphincs_shake_192f_thash_ascon = Module['_lc_sphincs_shake_192f_thash_ascon'] = wasmExports['lc_sphincs_shake_192f_thash_ascon'];
+  _lc_sphincs_shake_192f_ull_to_bytes = Module['_lc_sphincs_shake_192f_ull_to_bytes'] = wasmExports['lc_sphincs_shake_192f_ull_to_bytes'];
+  _lc_sphincs_shake_192f_wots_pk_from_sig_c = Module['_lc_sphincs_shake_192f_wots_pk_from_sig_c'] = wasmExports['lc_sphincs_shake_192f_wots_pk_from_sig_c'];
+  _lc_sphincs_shake_192f_keypair_from_seed = Module['_lc_sphincs_shake_192f_keypair_from_seed'] = wasmExports['lc_sphincs_shake_192f_keypair_from_seed'];
+  _lc_sphincs_shake_192f_pk_from_sk = Module['_lc_sphincs_shake_192f_pk_from_sk'] = wasmExports['lc_sphincs_shake_192f_pk_from_sk'];
+  _lc_sphincs_shake_192f_sign = Module['_lc_sphincs_shake_192f_sign'] = wasmExports['lc_sphincs_shake_192f_sign'];
+  _lc_sphincs_shake_192f_verify = Module['_lc_sphincs_shake_192f_verify'] = wasmExports['lc_sphincs_shake_192f_verify'];
+  _lc_sphincs_shake_192f_keypair = Module['_lc_sphincs_shake_192f_keypair'] = wasmExports['lc_sphincs_shake_192f_keypair'];
+  _lc_sphincs_shake_192f_sign_ctx = Module['_lc_sphincs_shake_192f_sign_ctx'] = wasmExports['lc_sphincs_shake_192f_sign_ctx'];
+  _lc_sphincs_shake_192f_sign_init = Module['_lc_sphincs_shake_192f_sign_init'] = wasmExports['lc_sphincs_shake_192f_sign_init'];
+  _lc_sphincs_shake_192f_sign_update = Module['_lc_sphincs_shake_192f_sign_update'] = wasmExports['lc_sphincs_shake_192f_sign_update'];
+  _lc_sphincs_shake_192f_sign_final = Module['_lc_sphincs_shake_192f_sign_final'] = wasmExports['lc_sphincs_shake_192f_sign_final'];
+  _lc_sphincs_shake_192f_verify_ctx = Module['_lc_sphincs_shake_192f_verify_ctx'] = wasmExports['lc_sphincs_shake_192f_verify_ctx'];
+  _lc_sphincs_shake_192f_verify_init = Module['_lc_sphincs_shake_192f_verify_init'] = wasmExports['lc_sphincs_shake_192f_verify_init'];
+  _lc_sphincs_shake_192f_verify_update = Module['_lc_sphincs_shake_192f_verify_update'] = wasmExports['lc_sphincs_shake_192f_verify_update'];
+  _lc_sphincs_shake_192f_verify_final = Module['_lc_sphincs_shake_192f_verify_final'] = wasmExports['lc_sphincs_shake_192f_verify_final'];
+  _lc_sphincs_shake_128s_fors_sign_c = Module['_lc_sphincs_shake_128s_fors_sign_c'] = wasmExports['lc_sphincs_shake_128s_fors_sign_c'];
+  _lc_sphincs_shake_128s_treehashx1 = Module['_lc_sphincs_shake_128s_treehashx1'] = wasmExports['lc_sphincs_shake_128s_treehashx1'];
+  _lc_sphincs_shake_128s_thash = Module['_lc_sphincs_shake_128s_thash'] = wasmExports['lc_sphincs_shake_128s_thash'];
+  _lc_sphincs_shake_128s_fors_pk_from_sig_c = Module['_lc_sphincs_shake_128s_fors_pk_from_sig_c'] = wasmExports['lc_sphincs_shake_128s_fors_pk_from_sig_c'];
+  _lc_sphincs_shake_128s_compute_root = Module['_lc_sphincs_shake_128s_compute_root'] = wasmExports['lc_sphincs_shake_128s_compute_root'];
+  _lc_sphincs_shake_128s_gen_message_random = Module['_lc_sphincs_shake_128s_gen_message_random'] = wasmExports['lc_sphincs_shake_128s_gen_message_random'];
+  _lc_sphincs_shake_128s_hash_message = Module['_lc_sphincs_shake_128s_hash_message'] = wasmExports['lc_sphincs_shake_128s_hash_message'];
+  _lc_sphincs_shake_128s_bytes_to_ull = Module['_lc_sphincs_shake_128s_bytes_to_ull'] = wasmExports['lc_sphincs_shake_128s_bytes_to_ull'];
+  _lc_sphincs_shake_128s_sphincs_merkle_sign_c = Module['_lc_sphincs_shake_128s_sphincs_merkle_sign_c'] = wasmExports['lc_sphincs_shake_128s_sphincs_merkle_sign_c'];
+  _lc_sphincs_shake_128s_chain_lengths_c = Module['_lc_sphincs_shake_128s_chain_lengths_c'] = wasmExports['lc_sphincs_shake_128s_chain_lengths_c'];
+  _lc_sphincs_shake_128s_wots_gen_leafx1 = Module['_lc_sphincs_shake_128s_wots_gen_leafx1'] = wasmExports['lc_sphincs_shake_128s_wots_gen_leafx1'];
+  _lc_sphincs_shake_128s_sphincs_merkle_gen_root_c = Module['_lc_sphincs_shake_128s_sphincs_merkle_gen_root_c'] = wasmExports['lc_sphincs_shake_128s_sphincs_merkle_gen_root_c'];
+  _lc_sphincs_shake_128s_selftest_keygen = Module['_lc_sphincs_shake_128s_selftest_keygen'] = wasmExports['lc_sphincs_shake_128s_selftest_keygen'];
+  _lc_sphincs_shake_128s_keypair_nocheck = Module['_lc_sphincs_shake_128s_keypair_nocheck'] = wasmExports['lc_sphincs_shake_128s_keypair_nocheck'];
+  _lc_sphincs_shake_128s_selftest_siggen = Module['_lc_sphincs_shake_128s_selftest_siggen'] = wasmExports['lc_sphincs_shake_128s_selftest_siggen'];
+  _lc_sphincs_shake_128s_sign_ctx_nocheck = Module['_lc_sphincs_shake_128s_sign_ctx_nocheck'] = wasmExports['lc_sphincs_shake_128s_sign_ctx_nocheck'];
+  _lc_sphincs_shake_128s_selftest_sigver = Module['_lc_sphincs_shake_128s_selftest_sigver'] = wasmExports['lc_sphincs_shake_128s_selftest_sigver'];
+  _lc_sphincs_shake_128s_verify_ctx_nocheck = Module['_lc_sphincs_shake_128s_verify_ctx_nocheck'] = wasmExports['lc_sphincs_shake_128s_verify_ctx_nocheck'];
+  _lc_sphincs_shake_128s_ctx_alloc = Module['_lc_sphincs_shake_128s_ctx_alloc'] = wasmExports['lc_sphincs_shake_128s_ctx_alloc'];
+  _lc_sphincs_shake_128s_ctx_zero_free = Module['_lc_sphincs_shake_128s_ctx_zero_free'] = wasmExports['lc_sphincs_shake_128s_ctx_zero_free'];
+  _lc_sphincs_shake_128s_thash_ascon = Module['_lc_sphincs_shake_128s_thash_ascon'] = wasmExports['lc_sphincs_shake_128s_thash_ascon'];
+  _lc_sphincs_shake_128s_ull_to_bytes = Module['_lc_sphincs_shake_128s_ull_to_bytes'] = wasmExports['lc_sphincs_shake_128s_ull_to_bytes'];
+  _lc_sphincs_shake_128s_wots_pk_from_sig_c = Module['_lc_sphincs_shake_128s_wots_pk_from_sig_c'] = wasmExports['lc_sphincs_shake_128s_wots_pk_from_sig_c'];
+  _lc_sphincs_shake_128s_keypair_from_seed = Module['_lc_sphincs_shake_128s_keypair_from_seed'] = wasmExports['lc_sphincs_shake_128s_keypair_from_seed'];
+  _lc_sphincs_shake_128s_pk_from_sk = Module['_lc_sphincs_shake_128s_pk_from_sk'] = wasmExports['lc_sphincs_shake_128s_pk_from_sk'];
+  _lc_sphincs_shake_128s_sign = Module['_lc_sphincs_shake_128s_sign'] = wasmExports['lc_sphincs_shake_128s_sign'];
+  _lc_sphincs_shake_128s_verify = Module['_lc_sphincs_shake_128s_verify'] = wasmExports['lc_sphincs_shake_128s_verify'];
+  _lc_sphincs_shake_128s_keypair = Module['_lc_sphincs_shake_128s_keypair'] = wasmExports['lc_sphincs_shake_128s_keypair'];
+  _lc_sphincs_shake_128s_sign_ctx = Module['_lc_sphincs_shake_128s_sign_ctx'] = wasmExports['lc_sphincs_shake_128s_sign_ctx'];
+  _lc_sphincs_shake_128s_sign_init = Module['_lc_sphincs_shake_128s_sign_init'] = wasmExports['lc_sphincs_shake_128s_sign_init'];
+  _lc_sphincs_shake_128s_sign_update = Module['_lc_sphincs_shake_128s_sign_update'] = wasmExports['lc_sphincs_shake_128s_sign_update'];
+  _lc_sphincs_shake_128s_sign_final = Module['_lc_sphincs_shake_128s_sign_final'] = wasmExports['lc_sphincs_shake_128s_sign_final'];
+  _lc_sphincs_shake_128s_verify_ctx = Module['_lc_sphincs_shake_128s_verify_ctx'] = wasmExports['lc_sphincs_shake_128s_verify_ctx'];
+  _lc_sphincs_shake_128s_verify_init = Module['_lc_sphincs_shake_128s_verify_init'] = wasmExports['lc_sphincs_shake_128s_verify_init'];
+  _lc_sphincs_shake_128s_verify_update = Module['_lc_sphincs_shake_128s_verify_update'] = wasmExports['lc_sphincs_shake_128s_verify_update'];
+  _lc_sphincs_shake_128s_verify_final = Module['_lc_sphincs_shake_128s_verify_final'] = wasmExports['lc_sphincs_shake_128s_verify_final'];
+  _lc_sphincs_shake_128f_fors_sign_c = Module['_lc_sphincs_shake_128f_fors_sign_c'] = wasmExports['lc_sphincs_shake_128f_fors_sign_c'];
+  _lc_sphincs_shake_128f_treehashx1 = Module['_lc_sphincs_shake_128f_treehashx1'] = wasmExports['lc_sphincs_shake_128f_treehashx1'];
+  _lc_sphincs_shake_128f_thash = Module['_lc_sphincs_shake_128f_thash'] = wasmExports['lc_sphincs_shake_128f_thash'];
+  _lc_sphincs_shake_128f_fors_pk_from_sig_c = Module['_lc_sphincs_shake_128f_fors_pk_from_sig_c'] = wasmExports['lc_sphincs_shake_128f_fors_pk_from_sig_c'];
+  _lc_sphincs_shake_128f_compute_root = Module['_lc_sphincs_shake_128f_compute_root'] = wasmExports['lc_sphincs_shake_128f_compute_root'];
+  _lc_sphincs_shake_128f_gen_message_random = Module['_lc_sphincs_shake_128f_gen_message_random'] = wasmExports['lc_sphincs_shake_128f_gen_message_random'];
+  _lc_sphincs_shake_128f_hash_message = Module['_lc_sphincs_shake_128f_hash_message'] = wasmExports['lc_sphincs_shake_128f_hash_message'];
+  _lc_sphincs_shake_128f_bytes_to_ull = Module['_lc_sphincs_shake_128f_bytes_to_ull'] = wasmExports['lc_sphincs_shake_128f_bytes_to_ull'];
+  _lc_sphincs_shake_128f_sphincs_merkle_sign_c = Module['_lc_sphincs_shake_128f_sphincs_merkle_sign_c'] = wasmExports['lc_sphincs_shake_128f_sphincs_merkle_sign_c'];
+  _lc_sphincs_shake_128f_chain_lengths_c = Module['_lc_sphincs_shake_128f_chain_lengths_c'] = wasmExports['lc_sphincs_shake_128f_chain_lengths_c'];
+  _lc_sphincs_shake_128f_wots_gen_leafx1 = Module['_lc_sphincs_shake_128f_wots_gen_leafx1'] = wasmExports['lc_sphincs_shake_128f_wots_gen_leafx1'];
+  _lc_sphincs_shake_128f_sphincs_merkle_gen_root_c = Module['_lc_sphincs_shake_128f_sphincs_merkle_gen_root_c'] = wasmExports['lc_sphincs_shake_128f_sphincs_merkle_gen_root_c'];
+  _lc_sphincs_shake_128f_selftest_keygen = Module['_lc_sphincs_shake_128f_selftest_keygen'] = wasmExports['lc_sphincs_shake_128f_selftest_keygen'];
+  _lc_sphincs_shake_128f_keypair_nocheck = Module['_lc_sphincs_shake_128f_keypair_nocheck'] = wasmExports['lc_sphincs_shake_128f_keypair_nocheck'];
+  _lc_sphincs_shake_128f_selftest_siggen = Module['_lc_sphincs_shake_128f_selftest_siggen'] = wasmExports['lc_sphincs_shake_128f_selftest_siggen'];
+  _lc_sphincs_shake_128f_sign_ctx_nocheck = Module['_lc_sphincs_shake_128f_sign_ctx_nocheck'] = wasmExports['lc_sphincs_shake_128f_sign_ctx_nocheck'];
+  _lc_sphincs_shake_128f_selftest_sigver = Module['_lc_sphincs_shake_128f_selftest_sigver'] = wasmExports['lc_sphincs_shake_128f_selftest_sigver'];
+  _lc_sphincs_shake_128f_verify_ctx_nocheck = Module['_lc_sphincs_shake_128f_verify_ctx_nocheck'] = wasmExports['lc_sphincs_shake_128f_verify_ctx_nocheck'];
+  _lc_sphincs_shake_128f_ctx_alloc = Module['_lc_sphincs_shake_128f_ctx_alloc'] = wasmExports['lc_sphincs_shake_128f_ctx_alloc'];
+  _lc_sphincs_shake_128f_ctx_zero_free = Module['_lc_sphincs_shake_128f_ctx_zero_free'] = wasmExports['lc_sphincs_shake_128f_ctx_zero_free'];
+  _lc_sphincs_shake_128f_thash_ascon = Module['_lc_sphincs_shake_128f_thash_ascon'] = wasmExports['lc_sphincs_shake_128f_thash_ascon'];
+  _lc_sphincs_shake_128f_ull_to_bytes = Module['_lc_sphincs_shake_128f_ull_to_bytes'] = wasmExports['lc_sphincs_shake_128f_ull_to_bytes'];
+  _lc_sphincs_shake_128f_wots_pk_from_sig_c = Module['_lc_sphincs_shake_128f_wots_pk_from_sig_c'] = wasmExports['lc_sphincs_shake_128f_wots_pk_from_sig_c'];
+  _lc_sphincs_shake_128f_keypair_from_seed = Module['_lc_sphincs_shake_128f_keypair_from_seed'] = wasmExports['lc_sphincs_shake_128f_keypair_from_seed'];
+  _lc_sphincs_shake_128f_pk_from_sk = Module['_lc_sphincs_shake_128f_pk_from_sk'] = wasmExports['lc_sphincs_shake_128f_pk_from_sk'];
+  _lc_sphincs_shake_128f_sign = Module['_lc_sphincs_shake_128f_sign'] = wasmExports['lc_sphincs_shake_128f_sign'];
+  _lc_sphincs_shake_128f_verify = Module['_lc_sphincs_shake_128f_verify'] = wasmExports['lc_sphincs_shake_128f_verify'];
+  _lc_sphincs_shake_128f_keypair = Module['_lc_sphincs_shake_128f_keypair'] = wasmExports['lc_sphincs_shake_128f_keypair'];
+  _lc_sphincs_shake_128f_sign_ctx = Module['_lc_sphincs_shake_128f_sign_ctx'] = wasmExports['lc_sphincs_shake_128f_sign_ctx'];
+  _lc_sphincs_shake_128f_sign_init = Module['_lc_sphincs_shake_128f_sign_init'] = wasmExports['lc_sphincs_shake_128f_sign_init'];
+  _lc_sphincs_shake_128f_sign_update = Module['_lc_sphincs_shake_128f_sign_update'] = wasmExports['lc_sphincs_shake_128f_sign_update'];
+  _lc_sphincs_shake_128f_sign_final = Module['_lc_sphincs_shake_128f_sign_final'] = wasmExports['lc_sphincs_shake_128f_sign_final'];
+  _lc_sphincs_shake_128f_verify_ctx = Module['_lc_sphincs_shake_128f_verify_ctx'] = wasmExports['lc_sphincs_shake_128f_verify_ctx'];
+  _lc_sphincs_shake_128f_verify_init = Module['_lc_sphincs_shake_128f_verify_init'] = wasmExports['lc_sphincs_shake_128f_verify_init'];
+  _lc_sphincs_shake_128f_verify_update = Module['_lc_sphincs_shake_128f_verify_update'] = wasmExports['lc_sphincs_shake_128f_verify_update'];
+  _lc_sphincs_shake_128f_verify_final = Module['_lc_sphincs_shake_128f_verify_final'] = wasmExports['lc_sphincs_shake_128f_verify_final'];
+  _lc_hc_alloc = Module['_lc_hc_alloc'] = wasmExports['lc_hc_alloc'];
+  _lc_aead_zero = Module['_lc_aead_zero'] = wasmExports['lc_aead_zero'];
+  _lc_hmac_update = Module['_lc_hmac_update'] = wasmExports['lc_hmac_update'];
+  _lc_hmac_macsize = Module['_lc_hmac_macsize'] = wasmExports['lc_hmac_macsize'];
+  _lc_hmac_final = Module['_lc_hmac_final'] = wasmExports['lc_hmac_final'];
+  _lc_hmac_zero = Module['_lc_hmac_zero'] = wasmExports['lc_hmac_zero'];
+  _lc_hmac_init = Module['_lc_hmac_init'] = wasmExports['lc_hmac_init'];
+  _lc_ascon_setkey_int = Module['_lc_ascon_setkey_int'] = wasmExports['lc_ascon_setkey_int'];
+  _lc_sponge_add_bytes = Module['_lc_sponge_add_bytes'] = wasmExports['lc_sponge_add_bytes'];
+  _lc_sponge = Module['_lc_sponge'] = wasmExports['lc_sponge'];
+  _lc_ascon_encrypt = Module['_lc_ascon_encrypt'] = wasmExports['lc_ascon_encrypt'];
+  _lc_sponge_extract_bytes = Module['_lc_sponge_extract_bytes'] = wasmExports['lc_sponge_extract_bytes'];
+  _lc_ascon_decrypt = Module['_lc_ascon_decrypt'] = wasmExports['lc_ascon_decrypt'];
+  _lc_sponge_newstate = Module['_lc_sponge_newstate'] = wasmExports['lc_sponge_newstate'];
+  _lc_ascon_aad_interface = Module['_lc_ascon_aad_interface'] = wasmExports['lc_ascon_aad_interface'];
+  _lc_ascon_enc_update_interface = Module['_lc_ascon_enc_update_interface'] = wasmExports['lc_ascon_enc_update_interface'];
+  _lc_ascon_enc_final_interface = Module['_lc_ascon_enc_final_interface'] = wasmExports['lc_ascon_enc_final_interface'];
+  _lc_ascon_dec_update_interface = Module['_lc_ascon_dec_update_interface'] = wasmExports['lc_ascon_dec_update_interface'];
+  _lc_ascon_dec_final_interface = Module['_lc_ascon_dec_final_interface'] = wasmExports['lc_ascon_dec_final_interface'];
+  _lc_ascon_zero_interface = Module['_lc_ascon_zero_interface'] = wasmExports['lc_ascon_zero_interface'];
+  _lc_al_alloc = Module['_lc_al_alloc'] = wasmExports['lc_al_alloc'];
+  _lc_ak_alloc = Module['_lc_ak_alloc'] = wasmExports['lc_ak_alloc'];
+  _lc_cc_alloc = Module['_lc_cc_alloc'] = wasmExports['lc_cc_alloc'];
+  _lc_cshake_ctx_update = Module['_lc_cshake_ctx_update'] = wasmExports['lc_cshake_ctx_update'];
+  _lc_cshake_ctx_reinit = Module['_lc_cshake_ctx_reinit'] = wasmExports['lc_cshake_ctx_reinit'];
+  _lc_cshake_init = Module['_lc_cshake_init'] = wasmExports['lc_cshake_init'];
+  _lc_cshake_ctx_init = Module['_lc_cshake_ctx_init'] = wasmExports['lc_cshake_ctx_init'];
+  _lc_kc_alloc = Module['_lc_kc_alloc'] = wasmExports['lc_kc_alloc'];
+  _lc_kmac_final_xof = Module['_lc_kmac_final_xof'] = wasmExports['lc_kmac_final_xof'];
+  _lc_kmac_reinit = Module['_lc_kmac_reinit'] = wasmExports['lc_kmac_reinit'];
+  _lc_sh_alloc = Module['_lc_sh_alloc'] = wasmExports['lc_sh_alloc'];
+  _lc_sym_encrypt = Module['_lc_sym_encrypt'] = wasmExports['lc_sym_encrypt'];
+  _lc_sym_decrypt = Module['_lc_sym_decrypt'] = wasmExports['lc_sym_decrypt'];
+  _lc_sym_zero = Module['_lc_sym_zero'] = wasmExports['lc_sym_zero'];
+  _lc_hkdf = Module['_lc_hkdf'] = wasmExports['lc_hkdf'];
+  _lc_sym_init = Module['_lc_sym_init'] = wasmExports['lc_sym_init'];
+  _lc_sym_setkey = Module['_lc_sym_setkey'] = wasmExports['lc_sym_setkey'];
+  _lc_sym_setiv = Module['_lc_sym_setiv'] = wasmExports['lc_sym_setiv'];
+  _lc_kh_alloc = Module['_lc_kh_alloc'] = wasmExports['lc_kh_alloc'];
+  _lc_kmac_xof = Module['_lc_kmac_xof'] = wasmExports['lc_kmac_xof'];
+  _lc_chacha20_poly1305_alloc = Module['_lc_chacha20_poly1305_alloc'] = wasmExports['lc_chacha20_poly1305_alloc'];
+  _lc_poly1305_update = Module['_lc_poly1305_update'] = wasmExports['lc_poly1305_update'];
+  _lc_poly1305_final = Module['_lc_poly1305_final'] = wasmExports['lc_poly1305_final'];
+  _cc20_block = Module['_cc20_block'] = wasmExports['cc20_block'];
+  _lc_poly1305_init = Module['_lc_poly1305_init'] = wasmExports['lc_poly1305_init'];
+  _lc_aes_gcm_alloc = Module['_lc_aes_gcm_alloc'] = wasmExports['lc_aes_gcm_alloc'];
+  _lc_aes_gcm_generate_iv = Module['_lc_aes_gcm_generate_iv'] = wasmExports['lc_aes_gcm_generate_iv'];
+  _lc_aead_setkey_from_ctx = Module['_lc_aead_setkey_from_ctx'] = wasmExports['lc_aead_setkey_from_ctx'];
+  _lc_aead_enc_init = Module['_lc_aead_enc_init'] = wasmExports['lc_aead_enc_init'];
+  _lc_aead_enc_update = Module['_lc_aead_enc_update'] = wasmExports['lc_aead_enc_update'];
+  _lc_aead_enc_final = Module['_lc_aead_enc_final'] = wasmExports['lc_aead_enc_final'];
+  _lc_aead_dec_update = Module['_lc_aead_dec_update'] = wasmExports['lc_aead_dec_update'];
+  _lc_aead_dec_final = Module['_lc_aead_dec_final'] = wasmExports['lc_aead_dec_final'];
+  _lc_aead_alg_status = Module['_lc_aead_alg_status'] = wasmExports['lc_aead_alg_status'];
+  _lc_alg_status = Module['_lc_alg_status'] = wasmExports['lc_alg_status'];
+  _lc_aead_ctx_alg_status = Module['_lc_aead_ctx_alg_status'] = wasmExports['lc_aead_ctx_alg_status'];
+  _lc_bike_sk_type = Module['_lc_bike_sk_type'] = wasmExports['lc_bike_sk_type'];
+  _lc_bike_pk_type = Module['_lc_bike_pk_type'] = wasmExports['lc_bike_pk_type'];
+  _lc_bike_ct_type = Module['_lc_bike_ct_type'] = wasmExports['lc_bike_ct_type'];
+  _lc_bike_ss_type = Module['_lc_bike_ss_type'] = wasmExports['lc_bike_ss_type'];
+  _lc_bike_sk_size = Module['_lc_bike_sk_size'] = wasmExports['lc_bike_sk_size'];
+  _lc_bike_pk_size = Module['_lc_bike_pk_size'] = wasmExports['lc_bike_pk_size'];
+  _lc_bike_ct_size = Module['_lc_bike_ct_size'] = wasmExports['lc_bike_ct_size'];
+  _lc_bike_ss_size = Module['_lc_bike_ss_size'] = wasmExports['lc_bike_ss_size'];
+  _lc_bike_sk_load = Module['_lc_bike_sk_load'] = wasmExports['lc_bike_sk_load'];
+  _lc_bike_pk_load = Module['_lc_bike_pk_load'] = wasmExports['lc_bike_pk_load'];
+  _lc_bike_ct_load = Module['_lc_bike_ct_load'] = wasmExports['lc_bike_ct_load'];
+  _lc_bike_ss_load = Module['_lc_bike_ss_load'] = wasmExports['lc_bike_ss_load'];
+  _lc_bike_sk_ptr = Module['_lc_bike_sk_ptr'] = wasmExports['lc_bike_sk_ptr'];
+  _lc_bike_pk_ptr = Module['_lc_bike_pk_ptr'] = wasmExports['lc_bike_pk_ptr'];
+  _lc_bike_ct_ptr = Module['_lc_bike_ct_ptr'] = wasmExports['lc_bike_ct_ptr'];
+  _lc_bike_ss_ptr = Module['_lc_bike_ss_ptr'] = wasmExports['lc_bike_ss_ptr'];
+  _lc_bike_keypair = Module['_lc_bike_keypair'] = wasmExports['lc_bike_keypair'];
+  _lc_bike_keypair_from_seed = Module['_lc_bike_keypair_from_seed'] = wasmExports['lc_bike_keypair_from_seed'];
+  _lc_bike_enc = Module['_lc_bike_enc'] = wasmExports['lc_bike_enc'];
+  _lc_bike_enc_kdf = Module['_lc_bike_enc_kdf'] = wasmExports['lc_bike_enc_kdf'];
+  _lc_bike_dec = Module['_lc_bike_dec'] = wasmExports['lc_bike_dec'];
+  _lc_bike_dec_kdf = Module['_lc_bike_dec_kdf'] = wasmExports['lc_bike_dec_kdf'];
+  _lc_bike_alg_status = Module['_lc_bike_alg_status'] = wasmExports['lc_bike_alg_status'];
+  _crypto_scalarmult_curve25519_base = Module['_crypto_scalarmult_curve25519_base'] = wasmExports['crypto_scalarmult_curve25519_base'];
+  _lc_x25519_keypair = Module['_lc_x25519_keypair'] = wasmExports['lc_x25519_keypair'];
+  _non_pqc_algs_enabled = Module['_non_pqc_algs_enabled'] = wasmExports['non_pqc_algs_enabled'];
+  _crypto_scalarmult_curve25519 = Module['_crypto_scalarmult_curve25519'] = wasmExports['crypto_scalarmult_curve25519'];
+  _has_small_order = Module['_has_small_order'] = wasmExports['has_small_order'];
+  _lc_x25519_ss = Module['_lc_x25519_ss'] = wasmExports['lc_x25519_ss'];
+  _lc_x25519_alg_status = Module['_lc_x25519_alg_status'] = wasmExports['lc_x25519_alg_status'];
+  _lc_x25519_sk_ptr = Module['_lc_x25519_sk_ptr'] = wasmExports['lc_x25519_sk_ptr'];
+  _lc_x25519_pk_ptr = Module['_lc_x25519_pk_ptr'] = wasmExports['lc_x25519_pk_ptr'];
+  _lc_x25519_ss_ptr = Module['_lc_x25519_ss_ptr'] = wasmExports['lc_x25519_ss_ptr'];
+  _lc_x25519_sk_load = Module['_lc_x25519_sk_load'] = wasmExports['lc_x25519_sk_load'];
+  _lc_x25519_pk_load = Module['_lc_x25519_pk_load'] = wasmExports['lc_x25519_pk_load'];
+  _lc_x25519_ss_load = Module['_lc_x25519_ss_load'] = wasmExports['lc_x25519_ss_load'];
+  _crypto_scalarmult_curve25519_c = Module['_crypto_scalarmult_curve25519_c'] = wasmExports['crypto_scalarmult_curve25519_c'];
+  _fe25519_frombytes = Module['_fe25519_frombytes'] = wasmExports['fe25519_frombytes'];
+  _fe25519_invert = Module['_fe25519_invert'] = wasmExports['fe25519_invert'];
+  _fe25519_tobytes = Module['_fe25519_tobytes'] = wasmExports['fe25519_tobytes'];
+  _ge25519_scalarmult_base = Module['_ge25519_scalarmult_base'] = wasmExports['ge25519_scalarmult_base'];
+  _lc_ed25519_derive_pk = Module['_lc_ed25519_derive_pk'] = wasmExports['lc_ed25519_derive_pk'];
+  _ge25519_p3_tobytes = Module['_ge25519_p3_tobytes'] = wasmExports['ge25519_p3_tobytes'];
+  _lc_ed25519_sign_internal = Module['_lc_ed25519_sign_internal'] = wasmExports['lc_ed25519_sign_internal'];
+  _lc_ed25519_verify_internal = Module['_lc_ed25519_verify_internal'] = wasmExports['lc_ed25519_verify_internal'];
+  _lc_ed25519_keypair = Module['_lc_ed25519_keypair'] = wasmExports['lc_ed25519_keypair'];
+  _composite_signature_domain_separation = Module['_composite_signature_domain_separation'] = wasmExports['composite_signature_domain_separation'];
+  _sc25519_reduce = Module['_sc25519_reduce'] = wasmExports['sc25519_reduce'];
+  _sc25519_muladd = Module['_sc25519_muladd'] = wasmExports['sc25519_muladd'];
+  _lc_ed25519_sign = Module['_lc_ed25519_sign'] = wasmExports['lc_ed25519_sign'];
+  _lc_ed25519ph_sign = Module['_lc_ed25519ph_sign'] = wasmExports['lc_ed25519ph_sign'];
+  _sc25519_is_canonical = Module['_sc25519_is_canonical'] = wasmExports['sc25519_is_canonical'];
+  _ge25519_is_canonical = Module['_ge25519_is_canonical'] = wasmExports['ge25519_is_canonical'];
+  _ge25519_frombytes_negate_vartime = Module['_ge25519_frombytes_negate_vartime'] = wasmExports['ge25519_frombytes_negate_vartime'];
+  _ge25519_has_small_order = Module['_ge25519_has_small_order'] = wasmExports['ge25519_has_small_order'];
+  _ge25519_frombytes = Module['_ge25519_frombytes'] = wasmExports['ge25519_frombytes'];
+  _ge25519_double_scalarmult_vartime = Module['_ge25519_double_scalarmult_vartime'] = wasmExports['ge25519_double_scalarmult_vartime'];
+  _ge25519_p2_to_p3 = Module['_ge25519_p2_to_p3'] = wasmExports['ge25519_p2_to_p3'];
+  _ge25519_p3_sub = Module['_ge25519_p3_sub'] = wasmExports['ge25519_p3_sub'];
+  _lc_ed25519_verify = Module['_lc_ed25519_verify'] = wasmExports['lc_ed25519_verify'];
+  _lc_ed25519ph_verify = Module['_lc_ed25519ph_verify'] = wasmExports['lc_ed25519ph_verify'];
+  _lc_ed25519_alg_status = Module['_lc_ed25519_alg_status'] = wasmExports['lc_ed25519_alg_status'];
+  _lc_ed25519_sk_ptr = Module['_lc_ed25519_sk_ptr'] = wasmExports['lc_ed25519_sk_ptr'];
+  _lc_ed25519_pk_ptr = Module['_lc_ed25519_pk_ptr'] = wasmExports['lc_ed25519_pk_ptr'];
+  _lc_ed25519_sig_ptr = Module['_lc_ed25519_sig_ptr'] = wasmExports['lc_ed25519_sig_ptr'];
+  _lc_ed25519_sk_load = Module['_lc_ed25519_sk_load'] = wasmExports['lc_ed25519_sk_load'];
+  _lc_ed25519_pk_load = Module['_lc_ed25519_pk_load'] = wasmExports['lc_ed25519_pk_load'];
+  _lc_ed25519_sig_load = Module['_lc_ed25519_sig_load'] = wasmExports['lc_ed25519_sig_load'];
+  _lc_ed25519_sig_size = Module['_lc_ed25519_sig_size'] = wasmExports['lc_ed25519_sig_size'];
+  _lc_ed25519_pk_size = Module['_lc_ed25519_pk_size'] = wasmExports['lc_ed25519_pk_size'];
+  _lc_ed25519_sk_size = Module['_lc_ed25519_sk_size'] = wasmExports['lc_ed25519_sk_size'];
+  _ge25519_p1p1_to_p2 = Module['_ge25519_p1p1_to_p2'] = wasmExports['ge25519_p1p1_to_p2'];
+  _ge25519_p1p1_to_p3 = Module['_ge25519_p1p1_to_p3'] = wasmExports['ge25519_p1p1_to_p3'];
+  _ge25519_tobytes = Module['_ge25519_tobytes'] = wasmExports['ge25519_tobytes'];
+  _ge25519_scalarmult = Module['_ge25519_scalarmult'] = wasmExports['ge25519_scalarmult'];
+  _ge25519_p3_add = Module['_ge25519_p3_add'] = wasmExports['ge25519_p3_add'];
+  _ge25519_is_on_curve = Module['_ge25519_is_on_curve'] = wasmExports['ge25519_is_on_curve'];
+  _ge25519_is_on_main_subgroup = Module['_ge25519_is_on_main_subgroup'] = wasmExports['ge25519_is_on_main_subgroup'];
+  _sc25519_mul = Module['_sc25519_mul'] = wasmExports['sc25519_mul'];
+  _sc25519_invert = Module['_sc25519_invert'] = wasmExports['sc25519_invert'];
+  _ge25519_clear_cofactor = Module['_ge25519_clear_cofactor'] = wasmExports['ge25519_clear_cofactor'];
+  _ge25519_from_uniform = Module['_ge25519_from_uniform'] = wasmExports['ge25519_from_uniform'];
+  _ge25519_from_hash = Module['_ge25519_from_hash'] = wasmExports['ge25519_from_hash'];
+  _ristretto255_frombytes = Module['_ristretto255_frombytes'] = wasmExports['ristretto255_frombytes'];
+  _ristretto255_p3_tobytes = Module['_ristretto255_p3_tobytes'] = wasmExports['ristretto255_p3_tobytes'];
+  _ristretto255_from_hash = Module['_ristretto255_from_hash'] = wasmExports['ristretto255_from_hash'];
+  _lc_ed448_keypair = Module['_lc_ed448_keypair'] = wasmExports['lc_ed448_keypair'];
+  _curve448_scalar_decode_long = Module['_curve448_scalar_decode_long'] = wasmExports['curve448_scalar_decode_long'];
+  _curve448_scalar_halve = Module['_curve448_scalar_halve'] = wasmExports['curve448_scalar_halve'];
+  _curve448_precomputed_scalarmul = Module['_curve448_precomputed_scalarmul'] = wasmExports['curve448_precomputed_scalarmul'];
+  _curve448_point_mul_by_ratio_and_encode_like_eddsa = Module['_curve448_point_mul_by_ratio_and_encode_like_eddsa'] = wasmExports['curve448_point_mul_by_ratio_and_encode_like_eddsa'];
+  _curve448_scalar_destroy = Module['_curve448_scalar_destroy'] = wasmExports['curve448_scalar_destroy'];
+  _curve448_point_destroy = Module['_curve448_point_destroy'] = wasmExports['curve448_point_destroy'];
+  _lc_ed448_sign = Module['_lc_ed448_sign'] = wasmExports['lc_ed448_sign'];
+  _lc_ed448_verify = Module['_lc_ed448_verify'] = wasmExports['lc_ed448_verify'];
+  _lc_ed448ph_sign = Module['_lc_ed448ph_sign'] = wasmExports['lc_ed448ph_sign'];
+  _curve448_scalar_mul = Module['_curve448_scalar_mul'] = wasmExports['curve448_scalar_mul'];
+  _curve448_scalar_add = Module['_curve448_scalar_add'] = wasmExports['curve448_scalar_add'];
+  _curve448_scalar_encode = Module['_curve448_scalar_encode'] = wasmExports['curve448_scalar_encode'];
+  _lc_ed448ph_verify = Module['_lc_ed448ph_verify'] = wasmExports['lc_ed448ph_verify'];
+  _curve448_point_decode_like_eddsa_and_mul_by_ratio = Module['_curve448_point_decode_like_eddsa_and_mul_by_ratio'] = wasmExports['curve448_point_decode_like_eddsa_and_mul_by_ratio'];
+  _curve448_scalar_sub = Module['_curve448_scalar_sub'] = wasmExports['curve448_scalar_sub'];
+  _curve448_scalar_decode = Module['_curve448_scalar_decode'] = wasmExports['curve448_scalar_decode'];
+  _curve448_base_double_scalarmul_non_secret = Module['_curve448_base_double_scalarmul_non_secret'] = wasmExports['curve448_base_double_scalarmul_non_secret'];
+  _curve448_point_eq = Module['_curve448_point_eq'] = wasmExports['curve448_point_eq'];
+  _lc_ed448_alg_status = Module['_lc_ed448_alg_status'] = wasmExports['lc_ed448_alg_status'];
+  _lc_ed448_sk_ptr = Module['_lc_ed448_sk_ptr'] = wasmExports['lc_ed448_sk_ptr'];
+  _lc_ed448_pk_ptr = Module['_lc_ed448_pk_ptr'] = wasmExports['lc_ed448_pk_ptr'];
+  _lc_ed448_sig_ptr = Module['_lc_ed448_sig_ptr'] = wasmExports['lc_ed448_sig_ptr'];
+  _lc_ed448_sk_load = Module['_lc_ed448_sk_load'] = wasmExports['lc_ed448_sk_load'];
+  _lc_ed448_pk_load = Module['_lc_ed448_pk_load'] = wasmExports['lc_ed448_pk_load'];
+  _lc_ed448_sig_load = Module['_lc_ed448_sig_load'] = wasmExports['lc_ed448_sig_load'];
+  _lc_ed448_sig_size = Module['_lc_ed448_sig_size'] = wasmExports['lc_ed448_sig_size'];
+  _lc_ed448_pk_size = Module['_lc_ed448_pk_size'] = wasmExports['lc_ed448_pk_size'];
+  _lc_ed448_sk_size = Module['_lc_ed448_sk_size'] = wasmExports['lc_ed448_sk_size'];
+  _x448_derive_public_key_c = Module['_x448_derive_public_key_c'] = wasmExports['x448_derive_public_key_c'];
+  _curve448_point_mul_by_ratio_and_encode_like_x448 = Module['_curve448_point_mul_by_ratio_and_encode_like_x448'] = wasmExports['curve448_point_mul_by_ratio_and_encode_like_x448'];
+  _x448_scalarmult_c = Module['_x448_scalarmult_c'] = wasmExports['x448_scalarmult_c'];
+  _gf_deserialize = Module['_gf_deserialize'] = wasmExports['gf_deserialize'];
+  _gf_mul = Module['_gf_mul'] = wasmExports['gf_mul'];
+  _gf_sqr = Module['_gf_sqr'] = wasmExports['gf_sqr'];
+  _gf_mulw_unsigned = Module['_gf_mulw_unsigned'] = wasmExports['gf_mulw_unsigned'];
+  _gf_invert = Module['_gf_invert'] = wasmExports['gf_invert'];
+  _gf_serialize = Module['_gf_serialize'] = wasmExports['gf_serialize'];
+  _gf_eq = Module['_gf_eq'] = wasmExports['gf_eq'];
+  _x448_derive_public_key = Module['_x448_derive_public_key'] = wasmExports['x448_derive_public_key'];
+  _lc_x448_keypair = Module['_lc_x448_keypair'] = wasmExports['lc_x448_keypair'];
+  _x448_scalarmult = Module['_x448_scalarmult'] = wasmExports['x448_scalarmult'];
+  _lc_x448_ss = Module['_lc_x448_ss'] = wasmExports['lc_x448_ss'];
+  _lc_x448_alg_status = Module['_lc_x448_alg_status'] = wasmExports['lc_x448_alg_status'];
+  _lc_x448_sk_ptr = Module['_lc_x448_sk_ptr'] = wasmExports['lc_x448_sk_ptr'];
+  _lc_x448_pk_ptr = Module['_lc_x448_pk_ptr'] = wasmExports['lc_x448_pk_ptr'];
+  _lc_x448_ss_ptr = Module['_lc_x448_ss_ptr'] = wasmExports['lc_x448_ss_ptr'];
+  _lc_x448_sk_load = Module['_lc_x448_sk_load'] = wasmExports['lc_x448_sk_load'];
+  _lc_x448_pk_load = Module['_lc_x448_pk_load'] = wasmExports['lc_x448_pk_load'];
+  _lc_x448_ss_load = Module['_lc_x448_ss_load'] = wasmExports['lc_x448_ss_load'];
+  _curve448_point_double = Module['_curve448_point_double'] = wasmExports['curve448_point_double'];
+  _curve448_point_valid = Module['_curve448_point_valid'] = wasmExports['curve448_point_valid'];
+  _gf_sub = Module['_gf_sub'] = wasmExports['gf_sub'];
+  _gf_add = Module['_gf_add'] = wasmExports['gf_add'];
+  _gf_lobit = Module['_gf_lobit'] = wasmExports['gf_lobit'];
+  _gf_isr = Module['_gf_isr'] = wasmExports['gf_isr'];
+  _gf_strong_reduce = Module['_gf_strong_reduce'] = wasmExports['gf_strong_reduce'];
+  _gf_hibit = Module['_gf_hibit'] = wasmExports['gf_hibit'];
+  _lc_cc20_drng_alloc = Module['_lc_cc20_drng_alloc'] = wasmExports['lc_cc20_drng_alloc'];
+  _lc_alloc_aligned_secure = Module['_lc_alloc_aligned_secure'] = wasmExports['lc_alloc_aligned_secure'];
+  _lc_kmac256_drng_alloc = Module['_lc_kmac256_drng_alloc'] = wasmExports['lc_kmac256_drng_alloc'];
+  _lc_cshake256_drng_alloc = Module['_lc_cshake256_drng_alloc'] = wasmExports['lc_cshake256_drng_alloc'];
+  _lc_xdrbg_drng_generate = Module['_lc_xdrbg_drng_generate'] = wasmExports['lc_xdrbg_drng_generate'];
+  _lc_xdrbg_drng_seed_nocheck = Module['_lc_xdrbg_drng_seed_nocheck'] = wasmExports['lc_xdrbg_drng_seed_nocheck'];
+  _lc_xdrbg_drng_zero = Module['_lc_xdrbg_drng_zero'] = wasmExports['lc_xdrbg_drng_zero'];
+  _lc_xdrbg256_drng_alloc = Module['_lc_xdrbg256_drng_alloc'] = wasmExports['lc_xdrbg256_drng_alloc'];
+  _lc_xdrbg512_drng_alloc = Module['_lc_xdrbg512_drng_alloc'] = wasmExports['lc_xdrbg512_drng_alloc'];
+  _lc_xdrbg128_drng_alloc = Module['_lc_xdrbg128_drng_alloc'] = wasmExports['lc_xdrbg128_drng_alloc'];
+  _lc_drbg_hash_alloc = Module['_lc_drbg_hash_alloc'] = wasmExports['lc_drbg_hash_alloc'];
+  _lc_drbg_hash_healthcheck_sanity = Module['_lc_drbg_hash_healthcheck_sanity'] = wasmExports['lc_drbg_hash_healthcheck_sanity'];
+  _lc_drbg_hmac_alloc = Module['_lc_drbg_hmac_alloc'] = wasmExports['lc_drbg_hmac_alloc'];
+  _lc_drbg_hmac_healthcheck_sanity = Module['_lc_drbg_hmac_healthcheck_sanity'] = wasmExports['lc_drbg_hmac_healthcheck_sanity'];
+  _lc_drbg_ctr_use_df_alloc = Module['_lc_drbg_ctr_use_df_alloc'] = wasmExports['lc_drbg_ctr_use_df_alloc'];
+  _lc_drbg_ctr_no_df_alloc = Module['_lc_drbg_ctr_no_df_alloc'] = wasmExports['lc_drbg_ctr_no_df_alloc'];
+  _lc_sym_getiv = Module['_lc_sym_getiv'] = wasmExports['lc_sym_getiv'];
+  _lc_rng_zero_free = Module['_lc_rng_zero_free'] = wasmExports['lc_rng_zero_free'];
+  _lc_rng_alg_status = Module['_lc_rng_alg_status'] = wasmExports['lc_rng_alg_status'];
+  _lc_rng_ctx_alg_status = Module['_lc_rng_ctx_alg_status'] = wasmExports['lc_rng_ctx_alg_status'];
+  _lc_rng_set_seeded = Module['_lc_rng_set_seeded'] = wasmExports['lc_rng_set_seeded'];
+  _lc_seeded_rng_zero_state = Module['_lc_seeded_rng_zero_state'] = wasmExports['lc_seeded_rng_zero_state'];
+  _lc_seeded_rng_status = Module['_lc_seeded_rng_status'] = wasmExports['lc_seeded_rng_status'];
+  _clock_gettime = Module['_clock_gettime'] = wasmExports['clock_gettime'];
+  _lc_sha256_init_nocheck = Module['_lc_sha256_init_nocheck'] = wasmExports['lc_sha256_init_nocheck'];
+  _lc_sha256_init = Module['_lc_sha256_init'] = wasmExports['lc_sha256_init'];
+  _lc_hash_nocheck = Module['_lc_hash_nocheck'] = wasmExports['lc_hash_nocheck'];
+  _lc_sha256_update = Module['_lc_sha256_update'] = wasmExports['lc_sha256_update'];
+  _lc_sha256_final = Module['_lc_sha256_final'] = wasmExports['lc_sha256_final'];
+  _lc_sha256_get_digestsize = Module['_lc_sha256_get_digestsize'] = wasmExports['lc_sha256_get_digestsize'];
+  _sha256_fastest_impl = Module['_sha256_fastest_impl'] = wasmExports['sha256_fastest_impl'];
+  _lc_sha384_init_nocheck = Module['_lc_sha384_init_nocheck'] = wasmExports['lc_sha384_init_nocheck'];
+  _lc_sha384_init = Module['_lc_sha384_init'] = wasmExports['lc_sha384_init'];
+  _lc_sha512_init_nocheck = Module['_lc_sha512_init_nocheck'] = wasmExports['lc_sha512_init_nocheck'];
+  _lc_sha512_init = Module['_lc_sha512_init'] = wasmExports['lc_sha512_init'];
+  _lc_sha512_update = Module['_lc_sha512_update'] = wasmExports['lc_sha512_update'];
+  _lc_sha512_final = Module['_lc_sha512_final'] = wasmExports['lc_sha512_final'];
+  _lc_sha384_final = Module['_lc_sha384_final'] = wasmExports['lc_sha384_final'];
+  _lc_sha512_extract_bytes = Module['_lc_sha512_extract_bytes'] = wasmExports['lc_sha512_extract_bytes'];
+  _lc_sha384_get_digestsize = Module['_lc_sha384_get_digestsize'] = wasmExports['lc_sha384_get_digestsize'];
+  _lc_sha512_get_digestsize = Module['_lc_sha512_get_digestsize'] = wasmExports['lc_sha512_get_digestsize'];
+  _sha512_fastest_impl = Module['_sha512_fastest_impl'] = wasmExports['sha512_fastest_impl'];
+  _lc_hash_blocksize = Module['_lc_hash_blocksize'] = wasmExports['lc_hash_blocksize'];
+  _lc_left_encode = Module['_lc_left_encode'] = wasmExports['lc_left_encode'];
+  _lc_cshake_init_nocheck = Module['_lc_cshake_init_nocheck'] = wasmExports['lc_cshake_init_nocheck'];
+  _lc_hash_ctxsize = Module['_lc_hash_ctxsize'] = wasmExports['lc_hash_ctxsize'];
+  _lc_cshake_ctx_final = Module['_lc_cshake_ctx_final'] = wasmExports['lc_cshake_ctx_final'];
+  _lc_cshake_ctx_alloc = Module['_lc_cshake_ctx_alloc'] = wasmExports['lc_cshake_ctx_alloc'];
+  _lc_cshake_ctx_zero_free = Module['_lc_cshake_ctx_zero_free'] = wasmExports['lc_cshake_ctx_zero_free'];
+  _sha3_fastest_impl = Module['_sha3_fastest_impl'] = wasmExports['sha3_fastest_impl'];
+  _sha3_224_init_common = Module['_sha3_224_init_common'] = wasmExports['sha3_224_init_common'];
+  _sha3_224_digestsize = Module['_sha3_224_digestsize'] = wasmExports['sha3_224_digestsize'];
+  _sha3_256_init_common = Module['_sha3_256_init_common'] = wasmExports['sha3_256_init_common'];
+  _sha3_256_digestsize = Module['_sha3_256_digestsize'] = wasmExports['sha3_256_digestsize'];
+  _sha3_384_init_common = Module['_sha3_384_init_common'] = wasmExports['sha3_384_init_common'];
+  _sha3_384_digestsize = Module['_sha3_384_digestsize'] = wasmExports['sha3_384_digestsize'];
+  _sha3_512_init_common = Module['_sha3_512_init_common'] = wasmExports['sha3_512_init_common'];
+  _sha3_512_digestsize = Module['_sha3_512_digestsize'] = wasmExports['sha3_512_digestsize'];
+  _shake_128_init_common = Module['_shake_128_init_common'] = wasmExports['shake_128_init_common'];
+  _shake_256_init_common = Module['_shake_256_init_common'] = wasmExports['shake_256_init_common'];
+  _shake_512_init_common = Module['_shake_512_init_common'] = wasmExports['shake_512_init_common'];
+  _cshake_256_init_common = Module['_cshake_256_init_common'] = wasmExports['cshake_256_init_common'];
+  _cshake_128_init_common = Module['_cshake_128_init_common'] = wasmExports['cshake_128_init_common'];
+  _shake_set_digestsize = Module['_shake_set_digestsize'] = wasmExports['shake_set_digestsize'];
+  _shake_get_digestsize = Module['_shake_get_digestsize'] = wasmExports['shake_get_digestsize'];
+  _sha3_224_selftest_common = Module['_sha3_224_selftest_common'] = wasmExports['sha3_224_selftest_common'];
+  _sha3_256_selftest_common = Module['_sha3_256_selftest_common'] = wasmExports['sha3_256_selftest_common'];
+  _sha3_384_selftest_common = Module['_sha3_384_selftest_common'] = wasmExports['sha3_384_selftest_common'];
+  _sha3_512_selftest_common = Module['_sha3_512_selftest_common'] = wasmExports['sha3_512_selftest_common'];
+  _shake128_selftest_common = Module['_shake128_selftest_common'] = wasmExports['shake128_selftest_common'];
+  _shake256_selftest_common = Module['_shake256_selftest_common'] = wasmExports['shake256_selftest_common'];
+  _shake512_selftest_common = Module['_shake512_selftest_common'] = wasmExports['shake512_selftest_common'];
+  _cshake256_selftest_common = Module['_cshake256_selftest_common'] = wasmExports['cshake256_selftest_common'];
+  _cshake128_selftest_common = Module['_cshake128_selftest_common'] = wasmExports['cshake128_selftest_common'];
+  _lc_xof_nocheck = Module['_lc_xof_nocheck'] = wasmExports['lc_xof_nocheck'];
+  _ascon_256_init = Module['_ascon_256_init'] = wasmExports['ascon_256_init'];
+  _ascon_256_init_nocheck = Module['_ascon_256_init_nocheck'] = wasmExports['ascon_256_init_nocheck'];
+  _ascon_digestsize = Module['_ascon_digestsize'] = wasmExports['ascon_digestsize'];
+  _ascon_128a_init = Module['_ascon_128a_init'] = wasmExports['ascon_128a_init'];
+  _ascon_xof_init = Module['_ascon_xof_init'] = wasmExports['ascon_xof_init'];
+  _ascon_xof_init_nocheck = Module['_ascon_xof_init_nocheck'] = wasmExports['ascon_xof_init_nocheck'];
+  _ascon_xof_set_digestsize = Module['_ascon_xof_set_digestsize'] = wasmExports['ascon_xof_set_digestsize'];
+  _ascon_xof_get_digestsize = Module['_ascon_xof_get_digestsize'] = wasmExports['ascon_xof_get_digestsize'];
+  _ascon_256_selftest_common = Module['_ascon_256_selftest_common'] = wasmExports['ascon_256_selftest_common'];
+  _ascon_xof_selftest_common = Module['_ascon_xof_selftest_common'] = wasmExports['ascon_xof_selftest_common'];
+  _ascon_cxof_init_nocheck = Module['_ascon_cxof_init_nocheck'] = wasmExports['ascon_cxof_init_nocheck'];
+  _ascon_cxof_init = Module['_ascon_cxof_init'] = wasmExports['ascon_cxof_init'];
+  _ascon_cxof_selftest_common = Module['_ascon_cxof_selftest_common'] = wasmExports['ascon_cxof_selftest_common'];
+  _ascon_fastest_impl = Module['_ascon_fastest_impl'] = wasmExports['ascon_fastest_impl'];
+  _lc_poly1305_auth = Module['_lc_poly1305_auth'] = wasmExports['lc_poly1305_auth'];
+  _lc_poly1305_verify = Module['_lc_poly1305_verify'] = wasmExports['lc_poly1305_verify'];
+  _lc_hash_set_ctx = Module['_lc_hash_set_ctx'] = wasmExports['lc_hash_set_ctx'];
+  _lc_hash_alloc = Module['_lc_hash_alloc'] = wasmExports['lc_hash_alloc'];
+  _lc_hash_zero_free = Module['_lc_hash_zero_free'] = wasmExports['lc_hash_zero_free'];
+  _lc_hash_is_fips_eligible = Module['_lc_hash_is_fips_eligible'] = wasmExports['lc_hash_is_fips_eligible'];
+  _lc_hash_alg_status = Module['_lc_hash_alg_status'] = wasmExports['lc_hash_alg_status'];
+  _lc_hash_ctx_alg_status = Module['_lc_hash_ctx_alg_status'] = wasmExports['lc_hash_ctx_alg_status'];
+  _lc_hqc_sk_type = Module['_lc_hqc_sk_type'] = wasmExports['lc_hqc_sk_type'];
+  _lc_hqc_pk_type = Module['_lc_hqc_pk_type'] = wasmExports['lc_hqc_pk_type'];
+  _lc_hqc_ct_type = Module['_lc_hqc_ct_type'] = wasmExports['lc_hqc_ct_type'];
+  _lc_hqc_ss_type = Module['_lc_hqc_ss_type'] = wasmExports['lc_hqc_ss_type'];
+  _lc_hqc_sk_size = Module['_lc_hqc_sk_size'] = wasmExports['lc_hqc_sk_size'];
+  _lc_hqc_pk_size = Module['_lc_hqc_pk_size'] = wasmExports['lc_hqc_pk_size'];
+  _lc_hqc_ct_size = Module['_lc_hqc_ct_size'] = wasmExports['lc_hqc_ct_size'];
+  _lc_hqc_ss_size = Module['_lc_hqc_ss_size'] = wasmExports['lc_hqc_ss_size'];
+  _lc_hqc_sk_load = Module['_lc_hqc_sk_load'] = wasmExports['lc_hqc_sk_load'];
+  _lc_hqc_pk_load = Module['_lc_hqc_pk_load'] = wasmExports['lc_hqc_pk_load'];
+  _lc_hqc_ct_load = Module['_lc_hqc_ct_load'] = wasmExports['lc_hqc_ct_load'];
+  _lc_hqc_ss_load = Module['_lc_hqc_ss_load'] = wasmExports['lc_hqc_ss_load'];
+  _lc_hqc_sk_ptr = Module['_lc_hqc_sk_ptr'] = wasmExports['lc_hqc_sk_ptr'];
+  _lc_hqc_pk_ptr = Module['_lc_hqc_pk_ptr'] = wasmExports['lc_hqc_pk_ptr'];
+  _lc_hqc_ct_ptr = Module['_lc_hqc_ct_ptr'] = wasmExports['lc_hqc_ct_ptr'];
+  _lc_hqc_ss_ptr = Module['_lc_hqc_ss_ptr'] = wasmExports['lc_hqc_ss_ptr'];
+  _lc_hqc_keypair = Module['_lc_hqc_keypair'] = wasmExports['lc_hqc_keypair'];
+  _lc_hqc_keypair_from_seed = Module['_lc_hqc_keypair_from_seed'] = wasmExports['lc_hqc_keypair_from_seed'];
+  _lc_hqc_enc = Module['_lc_hqc_enc'] = wasmExports['lc_hqc_enc'];
+  _lc_hqc_enc_kdf = Module['_lc_hqc_enc_kdf'] = wasmExports['lc_hqc_enc_kdf'];
+  _lc_hqc_dec = Module['_lc_hqc_dec'] = wasmExports['lc_hqc_dec'];
+  _lc_hqc_dec_kdf = Module['_lc_hqc_dec_kdf'] = wasmExports['lc_hqc_dec_kdf'];
+  _lc_hqc_alg_status = Module['_lc_hqc_alg_status'] = wasmExports['lc_hqc_alg_status'];
+  _lc_compare = Module['_lc_compare'] = wasmExports['lc_compare'];
+  _putchar = Module['_putchar'] = wasmExports['putchar'];
+  _lc_disable_selftest = Module['_lc_disable_selftest'] = wasmExports['lc_disable_selftest'];
+  _fips140_mode_enable = Module['_fips140_mode_enable'] = wasmExports['fips140_mode_enable'];
+  _fips140_min_keysize = Module['_fips140_min_keysize'] = wasmExports['fips140_min_keysize'];
+  _lc_init = Module['_lc_init'] = wasmExports['lc_init'];
+  _aes_fastest_impl = Module['_aes_fastest_impl'] = wasmExports['aes_fastest_impl'];
+  _non_pqc_algs_enable = Module['_non_pqc_algs_enable'] = wasmExports['non_pqc_algs_enable'];
+  _lc_status_get_result = Module['_lc_status_get_result'] = wasmExports['lc_status_get_result'];
+  _chacha20_fastest_impl = Module['_chacha20_fastest_impl'] = wasmExports['chacha20_fastest_impl'];
+  _lc_activate_library_internal = Module['_lc_activate_library_internal'] = wasmExports['lc_activate_library_internal'];
+  _lc_rerun_one_selftest = Module['_lc_rerun_one_selftest'] = wasmExports['lc_rerun_one_selftest'];
+  _lc_fips_integrity_checker = Module['_lc_fips_integrity_checker'] = wasmExports['lc_fips_integrity_checker'];
+  _alg_status_unset_result = Module['_alg_status_unset_result'] = wasmExports['alg_status_unset_result'];
+  _lc_rerun_selftests = Module['_lc_rerun_selftests'] = wasmExports['lc_rerun_selftests'];
+  _alg_status_unset_result_all = Module['_alg_status_unset_result_all'] = wasmExports['alg_status_unset_result_all'];
+  _alg_status = Module['_alg_status'] = wasmExports['alg_status'];
+  _lc_lib_alg_status = Module['_lc_lib_alg_status'] = wasmExports['lc_lib_alg_status'];
+  _lc_alg_disable_selftests = Module['_lc_alg_disable_selftests'] = wasmExports['lc_alg_disable_selftests'];
+  _alg_status_set_all_passed_state = Module['_alg_status_set_all_passed_state'] = wasmExports['alg_status_set_all_passed_state'];
+  _alg_status_print = Module['_alg_status_print'] = wasmExports['alg_status_print'];
+  _lc_activate_library_selftest_init = Module['_lc_activate_library_selftest_init'] = wasmExports['lc_activate_library_selftest_init'];
+  _lc_activate_library_selftest_fini = Module['_lc_activate_library_selftest_fini'] = wasmExports['lc_activate_library_selftest_fini'];
+  _lc_uuid_bin2hex = Module['_lc_uuid_bin2hex'] = wasmExports['lc_uuid_bin2hex'];
+  _lc_bin2hex = Module['_lc_bin2hex'] = wasmExports['lc_bin2hex'];
+  _lc_uuid_hex2bin = Module['_lc_uuid_hex2bin'] = wasmExports['lc_uuid_hex2bin'];
+  _lc_hex2bin = Module['_lc_hex2bin'] = wasmExports['lc_hex2bin'];
+  _lc_uuid_random = Module['_lc_uuid_random'] = wasmExports['lc_uuid_random'];
+  _lc_uuid_time = Module['_lc_uuid_time'] = wasmExports['lc_uuid_time'];
+  _lc_status = Module['_lc_status'] = wasmExports['lc_status'];
+  _snprintf = Module['_snprintf'] = wasmExports['snprintf'];
+  _posix_memalign = Module['_posix_memalign'] = wasmExports['posix_memalign'];
+  _lc_alloc_high_aligned = Module['_lc_alloc_high_aligned'] = wasmExports['lc_alloc_high_aligned'];
+  _lc_free_high_aligned = Module['_lc_free_high_aligned'] = wasmExports['lc_free_high_aligned'];
+  _signature_ph_oids = Module['_signature_ph_oids'] = wasmExports['signature_ph_oids'];
+  _lc_cpu_feature_disable = Module['_lc_cpu_feature_disable'] = wasmExports['lc_cpu_feature_disable'];
+  _lc_cpu_feature_enable = Module['_lc_cpu_feature_enable'] = wasmExports['lc_cpu_feature_enable'];
+  _lc_cpu_feature_set = Module['_lc_cpu_feature_set'] = wasmExports['lc_cpu_feature_set'];
+  _lc_hmac_reinit = Module['_lc_hmac_reinit'] = wasmExports['lc_hmac_reinit'];
+  _lc_hkdf_extract_prk = Module['_lc_hkdf_extract_prk'] = wasmExports['lc_hkdf_extract_prk'];
+  _lc_hkdf_expand_prk = Module['_lc_hkdf_expand_prk'] = wasmExports['lc_hkdf_expand_prk'];
+  _lc_hkdf_zero = Module['_lc_hkdf_zero'] = wasmExports['lc_hkdf_zero'];
+  _lc_hkdf_alg_status = Module['_lc_hkdf_alg_status'] = wasmExports['lc_hkdf_alg_status'];
+  _lc_hkdf_rng_alloc = Module['_lc_hkdf_rng_alloc'] = wasmExports['lc_hkdf_rng_alloc'];
+  _lc_kdf_ctr_generate = Module['_lc_kdf_ctr_generate'] = wasmExports['lc_kdf_ctr_generate'];
+  _lc_kdf_ctr_init = Module['_lc_kdf_ctr_init'] = wasmExports['lc_kdf_ctr_init'];
+  _lc_kdf_ctr = Module['_lc_kdf_ctr'] = wasmExports['lc_kdf_ctr'];
+  _lc_kdf_ctr_alg_status = Module['_lc_kdf_ctr_alg_status'] = wasmExports['lc_kdf_ctr_alg_status'];
+  _lc_kdf_ctr_rng_alloc = Module['_lc_kdf_ctr_rng_alloc'] = wasmExports['lc_kdf_ctr_rng_alloc'];
+  _lc_kdf_fb_generate = Module['_lc_kdf_fb_generate'] = wasmExports['lc_kdf_fb_generate'];
+  _lc_kdf_fb_init = Module['_lc_kdf_fb_init'] = wasmExports['lc_kdf_fb_init'];
+  _lc_kdf_fb = Module['_lc_kdf_fb'] = wasmExports['lc_kdf_fb'];
+  _lc_kdf_fb_alg_status = Module['_lc_kdf_fb_alg_status'] = wasmExports['lc_kdf_fb_alg_status'];
+  _lc_kdf_dpi_generate = Module['_lc_kdf_dpi_generate'] = wasmExports['lc_kdf_dpi_generate'];
+  _lc_kdf_dpi_init = Module['_lc_kdf_dpi_init'] = wasmExports['lc_kdf_dpi_init'];
+  _lc_kdf_dpi = Module['_lc_kdf_dpi'] = wasmExports['lc_kdf_dpi'];
+  _lc_kdf_dpi_alg_status = Module['_lc_kdf_dpi_alg_status'] = wasmExports['lc_kdf_dpi_alg_status'];
+  _lc_pbkdf2 = Module['_lc_pbkdf2'] = wasmExports['lc_pbkdf2'];
+  _lc_pbkdf2_alg_status = Module['_lc_pbkdf2_alg_status'] = wasmExports['lc_pbkdf2_alg_status'];
+  _lc_kyber_sk_type = Module['_lc_kyber_sk_type'] = wasmExports['lc_kyber_sk_type'];
+  _lc_kyber_pk_type = Module['_lc_kyber_pk_type'] = wasmExports['lc_kyber_pk_type'];
+  _lc_kyber_ct_type = Module['_lc_kyber_ct_type'] = wasmExports['lc_kyber_ct_type'];
+  _lc_kyber_ss_type = Module['_lc_kyber_ss_type'] = wasmExports['lc_kyber_ss_type'];
+  _lc_kyber_sk_size = Module['_lc_kyber_sk_size'] = wasmExports['lc_kyber_sk_size'];
+  _lc_kyber_pk_size = Module['_lc_kyber_pk_size'] = wasmExports['lc_kyber_pk_size'];
+  _lc_kyber_ct_size = Module['_lc_kyber_ct_size'] = wasmExports['lc_kyber_ct_size'];
+  _lc_kyber_ss_size = Module['_lc_kyber_ss_size'] = wasmExports['lc_kyber_ss_size'];
+  _lc_kyber_sk_load = Module['_lc_kyber_sk_load'] = wasmExports['lc_kyber_sk_load'];
+  _lc_kyber_pk_load = Module['_lc_kyber_pk_load'] = wasmExports['lc_kyber_pk_load'];
+  _lc_kyber_ct_load = Module['_lc_kyber_ct_load'] = wasmExports['lc_kyber_ct_load'];
+  _lc_kyber_ss_load = Module['_lc_kyber_ss_load'] = wasmExports['lc_kyber_ss_load'];
+  _lc_kyber_sk_ptr = Module['_lc_kyber_sk_ptr'] = wasmExports['lc_kyber_sk_ptr'];
+  _lc_kyber_pk_ptr = Module['_lc_kyber_pk_ptr'] = wasmExports['lc_kyber_pk_ptr'];
+  _lc_kyber_ct_ptr = Module['_lc_kyber_ct_ptr'] = wasmExports['lc_kyber_ct_ptr'];
+  _lc_kyber_ss_ptr = Module['_lc_kyber_ss_ptr'] = wasmExports['lc_kyber_ss_ptr'];
+  _lc_kyber_keypair = Module['_lc_kyber_keypair'] = wasmExports['lc_kyber_keypair'];
+  _lc_kyber_keypair_from_seed = Module['_lc_kyber_keypair_from_seed'] = wasmExports['lc_kyber_keypair_from_seed'];
+  _lc_kyber_pk_from_sk = Module['_lc_kyber_pk_from_sk'] = wasmExports['lc_kyber_pk_from_sk'];
+  _lc_kyber_pct = Module['_lc_kyber_pct'] = wasmExports['lc_kyber_pct'];
+  _lc_kyber_enc = Module['_lc_kyber_enc'] = wasmExports['lc_kyber_enc'];
+  _lc_kyber_dec = Module['_lc_kyber_dec'] = wasmExports['lc_kyber_dec'];
+  _lc_kyber_enc_kdf = Module['_lc_kyber_enc_kdf'] = wasmExports['lc_kyber_enc_kdf'];
+  _lc_kyber_dec_kdf = Module['_lc_kyber_dec_kdf'] = wasmExports['lc_kyber_dec_kdf'];
+  _lc_kyber_alg_status = Module['_lc_kyber_alg_status'] = wasmExports['lc_kyber_alg_status'];
+  _lc_kex_uake_initiator_init = Module['_lc_kex_uake_initiator_init'] = wasmExports['lc_kex_uake_initiator_init'];
+  _lc_kex_uake_responder_ss = Module['_lc_kex_uake_responder_ss'] = wasmExports['lc_kex_uake_responder_ss'];
+  _lc_kex_uake_initiator_ss = Module['_lc_kex_uake_initiator_ss'] = wasmExports['lc_kex_uake_initiator_ss'];
+  _lc_kex_ake_initiator_init = Module['_lc_kex_ake_initiator_init'] = wasmExports['lc_kex_ake_initiator_init'];
+  _lc_kex_ake_responder_ss = Module['_lc_kex_ake_responder_ss'] = wasmExports['lc_kex_ake_responder_ss'];
+  _lc_kex_ake_initiator_ss = Module['_lc_kex_ake_initiator_ss'] = wasmExports['lc_kex_ake_initiator_ss'];
+  _lc_kyber_ies_enc = Module['_lc_kyber_ies_enc'] = wasmExports['lc_kyber_ies_enc'];
+  _lc_kyber_ies_enc_init = Module['_lc_kyber_ies_enc_init'] = wasmExports['lc_kyber_ies_enc_init'];
+  _lc_kyber_ies_enc_update = Module['_lc_kyber_ies_enc_update'] = wasmExports['lc_kyber_ies_enc_update'];
+  _lc_kyber_ies_enc_final = Module['_lc_kyber_ies_enc_final'] = wasmExports['lc_kyber_ies_enc_final'];
+  _lc_kyber_ies_dec = Module['_lc_kyber_ies_dec'] = wasmExports['lc_kyber_ies_dec'];
+  _lc_kyber_ies_dec_init = Module['_lc_kyber_ies_dec_init'] = wasmExports['lc_kyber_ies_dec_init'];
+  _lc_kyber_ies_dec_update = Module['_lc_kyber_ies_dec_update'] = wasmExports['lc_kyber_ies_dec_update'];
+  _lc_kyber_ies_dec_final = Module['_lc_kyber_ies_dec_final'] = wasmExports['lc_kyber_ies_dec_final'];
+  _lc_kyber_x25519_sk_type = Module['_lc_kyber_x25519_sk_type'] = wasmExports['lc_kyber_x25519_sk_type'];
+  _lc_kyber_x25519_pk_type = Module['_lc_kyber_x25519_pk_type'] = wasmExports['lc_kyber_x25519_pk_type'];
+  _lc_kyber_x25519_ct_type = Module['_lc_kyber_x25519_ct_type'] = wasmExports['lc_kyber_x25519_ct_type'];
+  _lc_kyber_x25519_ss_type = Module['_lc_kyber_x25519_ss_type'] = wasmExports['lc_kyber_x25519_ss_type'];
+  _lc_kyber_x25519_sk_size = Module['_lc_kyber_x25519_sk_size'] = wasmExports['lc_kyber_x25519_sk_size'];
+  _lc_kyber_x25519_pk_size = Module['_lc_kyber_x25519_pk_size'] = wasmExports['lc_kyber_x25519_pk_size'];
+  _lc_kyber_x25519_ct_size = Module['_lc_kyber_x25519_ct_size'] = wasmExports['lc_kyber_x25519_ct_size'];
+  _lc_kyber_x25519_ss_size = Module['_lc_kyber_x25519_ss_size'] = wasmExports['lc_kyber_x25519_ss_size'];
+  _lc_kyber_x25519_sk_load = Module['_lc_kyber_x25519_sk_load'] = wasmExports['lc_kyber_x25519_sk_load'];
+  _lc_kyber_x25519_pk_load = Module['_lc_kyber_x25519_pk_load'] = wasmExports['lc_kyber_x25519_pk_load'];
+  _lc_kyber_x25519_ct_load = Module['_lc_kyber_x25519_ct_load'] = wasmExports['lc_kyber_x25519_ct_load'];
+  _lc_kyber_x25519_ss_load = Module['_lc_kyber_x25519_ss_load'] = wasmExports['lc_kyber_x25519_ss_load'];
+  _lc_kyber_x25519_sk_ptr = Module['_lc_kyber_x25519_sk_ptr'] = wasmExports['lc_kyber_x25519_sk_ptr'];
+  _lc_kyber_x25519_pk_ptr = Module['_lc_kyber_x25519_pk_ptr'] = wasmExports['lc_kyber_x25519_pk_ptr'];
+  _lc_kyber_x25519_ct_ptr = Module['_lc_kyber_x25519_ct_ptr'] = wasmExports['lc_kyber_x25519_ct_ptr'];
+  _lc_kyber_x25519_ss_ptr = Module['_lc_kyber_x25519_ss_ptr'] = wasmExports['lc_kyber_x25519_ss_ptr'];
+  _lc_kyber_x25519_keypair = Module['_lc_kyber_x25519_keypair'] = wasmExports['lc_kyber_x25519_keypair'];
+  _lc_kyber_x25519_pk_from_sk = Module['_lc_kyber_x25519_pk_from_sk'] = wasmExports['lc_kyber_x25519_pk_from_sk'];
+  _lc_kyber_x25519_enc_kdf = Module['_lc_kyber_x25519_enc_kdf'] = wasmExports['lc_kyber_x25519_enc_kdf'];
+  _lc_kyber_x25519_enc = Module['_lc_kyber_x25519_enc'] = wasmExports['lc_kyber_x25519_enc'];
+  _lc_kyber_x25519_dec_kdf = Module['_lc_kyber_x25519_dec_kdf'] = wasmExports['lc_kyber_x25519_dec_kdf'];
+  _lc_kyber_x25519_dec = Module['_lc_kyber_x25519_dec'] = wasmExports['lc_kyber_x25519_dec'];
+  _lc_kex_x25519_uake_initiator_init = Module['_lc_kex_x25519_uake_initiator_init'] = wasmExports['lc_kex_x25519_uake_initiator_init'];
+  _lc_kex_x25519_uake_responder_ss = Module['_lc_kex_x25519_uake_responder_ss'] = wasmExports['lc_kex_x25519_uake_responder_ss'];
+  _lc_kex_x25519_uake_initiator_ss = Module['_lc_kex_x25519_uake_initiator_ss'] = wasmExports['lc_kex_x25519_uake_initiator_ss'];
+  _lc_kex_x25519_ake_initiator_init = Module['_lc_kex_x25519_ake_initiator_init'] = wasmExports['lc_kex_x25519_ake_initiator_init'];
+  _lc_kex_x25519_ake_responder_ss = Module['_lc_kex_x25519_ake_responder_ss'] = wasmExports['lc_kex_x25519_ake_responder_ss'];
+  _lc_kex_x25519_ake_initiator_ss = Module['_lc_kex_x25519_ake_initiator_ss'] = wasmExports['lc_kex_x25519_ake_initiator_ss'];
+  _lc_kyber_x25519_ies_enc = Module['_lc_kyber_x25519_ies_enc'] = wasmExports['lc_kyber_x25519_ies_enc'];
+  _lc_kyber_x25519_ies_enc_init = Module['_lc_kyber_x25519_ies_enc_init'] = wasmExports['lc_kyber_x25519_ies_enc_init'];
+  _lc_kyber_x25519_ies_enc_update = Module['_lc_kyber_x25519_ies_enc_update'] = wasmExports['lc_kyber_x25519_ies_enc_update'];
+  _lc_kyber_x25519_ies_enc_final = Module['_lc_kyber_x25519_ies_enc_final'] = wasmExports['lc_kyber_x25519_ies_enc_final'];
+  _lc_kyber_x25519_ies_dec = Module['_lc_kyber_x25519_ies_dec'] = wasmExports['lc_kyber_x25519_ies_dec'];
+  _lc_kyber_x25519_ies_dec_init = Module['_lc_kyber_x25519_ies_dec_init'] = wasmExports['lc_kyber_x25519_ies_dec_init'];
+  _lc_kyber_x25519_ies_dec_update = Module['_lc_kyber_x25519_ies_dec_update'] = wasmExports['lc_kyber_x25519_ies_dec_update'];
+  _lc_kyber_x25519_ies_dec_final = Module['_lc_kyber_x25519_ies_dec_final'] = wasmExports['lc_kyber_x25519_ies_dec_final'];
+  _lc_kyber_x448_sk_type = Module['_lc_kyber_x448_sk_type'] = wasmExports['lc_kyber_x448_sk_type'];
+  _lc_kyber_x448_pk_type = Module['_lc_kyber_x448_pk_type'] = wasmExports['lc_kyber_x448_pk_type'];
+  _lc_kyber_x448_ct_type = Module['_lc_kyber_x448_ct_type'] = wasmExports['lc_kyber_x448_ct_type'];
+  _lc_kyber_x448_ss_type = Module['_lc_kyber_x448_ss_type'] = wasmExports['lc_kyber_x448_ss_type'];
+  _lc_kyber_x448_sk_size = Module['_lc_kyber_x448_sk_size'] = wasmExports['lc_kyber_x448_sk_size'];
+  _lc_kyber_x448_pk_size = Module['_lc_kyber_x448_pk_size'] = wasmExports['lc_kyber_x448_pk_size'];
+  _lc_kyber_x448_ct_size = Module['_lc_kyber_x448_ct_size'] = wasmExports['lc_kyber_x448_ct_size'];
+  _lc_kyber_x448_ss_size = Module['_lc_kyber_x448_ss_size'] = wasmExports['lc_kyber_x448_ss_size'];
+  _lc_kyber_x448_sk_load = Module['_lc_kyber_x448_sk_load'] = wasmExports['lc_kyber_x448_sk_load'];
+  _lc_kyber_x448_pk_load = Module['_lc_kyber_x448_pk_load'] = wasmExports['lc_kyber_x448_pk_load'];
+  _lc_kyber_x448_ct_load = Module['_lc_kyber_x448_ct_load'] = wasmExports['lc_kyber_x448_ct_load'];
+  _lc_kyber_x448_ss_load = Module['_lc_kyber_x448_ss_load'] = wasmExports['lc_kyber_x448_ss_load'];
+  _lc_kyber_x448_sk_ptr = Module['_lc_kyber_x448_sk_ptr'] = wasmExports['lc_kyber_x448_sk_ptr'];
+  _lc_kyber_x448_pk_ptr = Module['_lc_kyber_x448_pk_ptr'] = wasmExports['lc_kyber_x448_pk_ptr'];
+  _lc_kyber_x448_ct_ptr = Module['_lc_kyber_x448_ct_ptr'] = wasmExports['lc_kyber_x448_ct_ptr'];
+  _lc_kyber_x448_ss_ptr = Module['_lc_kyber_x448_ss_ptr'] = wasmExports['lc_kyber_x448_ss_ptr'];
+  _lc_kyber_x448_keypair = Module['_lc_kyber_x448_keypair'] = wasmExports['lc_kyber_x448_keypair'];
+  _lc_kyber_x448_pk_from_sk = Module['_lc_kyber_x448_pk_from_sk'] = wasmExports['lc_kyber_x448_pk_from_sk'];
+  _lc_kyber_x448_enc_kdf = Module['_lc_kyber_x448_enc_kdf'] = wasmExports['lc_kyber_x448_enc_kdf'];
+  _lc_kyber_x448_enc = Module['_lc_kyber_x448_enc'] = wasmExports['lc_kyber_x448_enc'];
+  _lc_kyber_x448_dec_kdf = Module['_lc_kyber_x448_dec_kdf'] = wasmExports['lc_kyber_x448_dec_kdf'];
+  _lc_kyber_x448_dec = Module['_lc_kyber_x448_dec'] = wasmExports['lc_kyber_x448_dec'];
+  _lc_kex_x448_uake_initiator_init = Module['_lc_kex_x448_uake_initiator_init'] = wasmExports['lc_kex_x448_uake_initiator_init'];
+  _lc_kex_x448_uake_responder_ss = Module['_lc_kex_x448_uake_responder_ss'] = wasmExports['lc_kex_x448_uake_responder_ss'];
+  _lc_kex_x448_uake_initiator_ss = Module['_lc_kex_x448_uake_initiator_ss'] = wasmExports['lc_kex_x448_uake_initiator_ss'];
+  _lc_kex_x448_ake_initiator_init = Module['_lc_kex_x448_ake_initiator_init'] = wasmExports['lc_kex_x448_ake_initiator_init'];
+  _lc_kex_x448_ake_responder_ss = Module['_lc_kex_x448_ake_responder_ss'] = wasmExports['lc_kex_x448_ake_responder_ss'];
+  _lc_kex_x448_ake_initiator_ss = Module['_lc_kex_x448_ake_initiator_ss'] = wasmExports['lc_kex_x448_ake_initiator_ss'];
+  _lc_kyber_x448_ies_enc = Module['_lc_kyber_x448_ies_enc'] = wasmExports['lc_kyber_x448_ies_enc'];
+  _lc_kyber_x448_ies_enc_init = Module['_lc_kyber_x448_ies_enc_init'] = wasmExports['lc_kyber_x448_ies_enc_init'];
+  _lc_kyber_x448_ies_enc_update = Module['_lc_kyber_x448_ies_enc_update'] = wasmExports['lc_kyber_x448_ies_enc_update'];
+  _lc_kyber_x448_ies_enc_final = Module['_lc_kyber_x448_ies_enc_final'] = wasmExports['lc_kyber_x448_ies_enc_final'];
+  _lc_kyber_x448_ies_dec = Module['_lc_kyber_x448_ies_dec'] = wasmExports['lc_kyber_x448_ies_dec'];
+  _lc_kyber_x448_ies_dec_init = Module['_lc_kyber_x448_ies_dec_init'] = wasmExports['lc_kyber_x448_ies_dec_init'];
+  _lc_kyber_x448_ies_dec_update = Module['_lc_kyber_x448_ies_dec_update'] = wasmExports['lc_kyber_x448_ies_dec_update'];
+  _lc_kyber_x448_ies_dec_final = Module['_lc_kyber_x448_ies_dec_final'] = wasmExports['lc_kyber_x448_ies_dec_final'];
+  _lc_hotp = Module['_lc_hotp'] = wasmExports['lc_hotp'];
+  _lc_totp = Module['_lc_totp'] = wasmExports['lc_totp'];
+  _lc_dilithium_ctx_alloc = Module['_lc_dilithium_ctx_alloc'] = wasmExports['lc_dilithium_ctx_alloc'];
+  _lc_dilithium_ctx_alloc_ahat = Module['_lc_dilithium_ctx_alloc_ahat'] = wasmExports['lc_dilithium_ctx_alloc_ahat'];
+  _lc_dilithium_ctx_zero_free = Module['_lc_dilithium_ctx_zero_free'] = wasmExports['lc_dilithium_ctx_zero_free'];
+  _lc_dilithium_ctx_zero = Module['_lc_dilithium_ctx_zero'] = wasmExports['lc_dilithium_ctx_zero'];
+  _lc_dilithium_ctx_internal = Module['_lc_dilithium_ctx_internal'] = wasmExports['lc_dilithium_ctx_internal'];
+  _lc_dilithium_ctx_hash = Module['_lc_dilithium_ctx_hash'] = wasmExports['lc_dilithium_ctx_hash'];
+  _lc_dilithium_ctx_userctx = Module['_lc_dilithium_ctx_userctx'] = wasmExports['lc_dilithium_ctx_userctx'];
+  _lc_dilithium_ctx_external_mu = Module['_lc_dilithium_ctx_external_mu'] = wasmExports['lc_dilithium_ctx_external_mu'];
+  _lc_dilithium_ctx_drop_ahat = Module['_lc_dilithium_ctx_drop_ahat'] = wasmExports['lc_dilithium_ctx_drop_ahat'];
+  _lc_dilithium_sk_type = Module['_lc_dilithium_sk_type'] = wasmExports['lc_dilithium_sk_type'];
+  _lc_dilithium_pk_type = Module['_lc_dilithium_pk_type'] = wasmExports['lc_dilithium_pk_type'];
+  _lc_dilithium_sig_type = Module['_lc_dilithium_sig_type'] = wasmExports['lc_dilithium_sig_type'];
+  _lc_dilithium_sk_size = Module['_lc_dilithium_sk_size'] = wasmExports['lc_dilithium_sk_size'];
+  _lc_dilithium_pk_size = Module['_lc_dilithium_pk_size'] = wasmExports['lc_dilithium_pk_size'];
+  _lc_dilithium_sig_size = Module['_lc_dilithium_sig_size'] = wasmExports['lc_dilithium_sig_size'];
+  _lc_dilithium_sk_load = Module['_lc_dilithium_sk_load'] = wasmExports['lc_dilithium_sk_load'];
+  _lc_dilithium_pk_load = Module['_lc_dilithium_pk_load'] = wasmExports['lc_dilithium_pk_load'];
+  _lc_dilithium_sig_load = Module['_lc_dilithium_sig_load'] = wasmExports['lc_dilithium_sig_load'];
+  _lc_dilithium_sk_ptr = Module['_lc_dilithium_sk_ptr'] = wasmExports['lc_dilithium_sk_ptr'];
+  _lc_dilithium_pk_ptr = Module['_lc_dilithium_pk_ptr'] = wasmExports['lc_dilithium_pk_ptr'];
+  _lc_dilithium_sig_ptr = Module['_lc_dilithium_sig_ptr'] = wasmExports['lc_dilithium_sig_ptr'];
+  _lc_dilithium_alg_status = Module['_lc_dilithium_alg_status'] = wasmExports['lc_dilithium_alg_status'];
+  _lc_dilithium_ed25519_ctx_alloc = Module['_lc_dilithium_ed25519_ctx_alloc'] = wasmExports['lc_dilithium_ed25519_ctx_alloc'];
+  _lc_dilithium_ed25519_ctx_zero_free = Module['_lc_dilithium_ed25519_ctx_zero_free'] = wasmExports['lc_dilithium_ed25519_ctx_zero_free'];
+  _lc_dilithium_ed25519_ctx_zero = Module['_lc_dilithium_ed25519_ctx_zero'] = wasmExports['lc_dilithium_ed25519_ctx_zero'];
+  _lc_dilithium_ed25519_ctx_hash = Module['_lc_dilithium_ed25519_ctx_hash'] = wasmExports['lc_dilithium_ed25519_ctx_hash'];
+  _lc_dilithium_ed25519_ctx_internal = Module['_lc_dilithium_ed25519_ctx_internal'] = wasmExports['lc_dilithium_ed25519_ctx_internal'];
+  _lc_dilithium_ed25519_ctx_userctx = Module['_lc_dilithium_ed25519_ctx_userctx'] = wasmExports['lc_dilithium_ed25519_ctx_userctx'];
+  _lc_dilithium_ed25519_sk_type = Module['_lc_dilithium_ed25519_sk_type'] = wasmExports['lc_dilithium_ed25519_sk_type'];
+  _lc_dilithium_ed25519_pk_type = Module['_lc_dilithium_ed25519_pk_type'] = wasmExports['lc_dilithium_ed25519_pk_type'];
+  _lc_dilithium_ed25519_sig_type = Module['_lc_dilithium_ed25519_sig_type'] = wasmExports['lc_dilithium_ed25519_sig_type'];
+  _lc_dilithium_ed25519_sk_size = Module['_lc_dilithium_ed25519_sk_size'] = wasmExports['lc_dilithium_ed25519_sk_size'];
+  _lc_dilithium_ed25519_pk_size = Module['_lc_dilithium_ed25519_pk_size'] = wasmExports['lc_dilithium_ed25519_pk_size'];
+  _lc_dilithium_ed25519_sig_size = Module['_lc_dilithium_ed25519_sig_size'] = wasmExports['lc_dilithium_ed25519_sig_size'];
+  _lc_dilithium_ed25519_sk_load = Module['_lc_dilithium_ed25519_sk_load'] = wasmExports['lc_dilithium_ed25519_sk_load'];
+  _lc_dilithium_ed25519_pk_load = Module['_lc_dilithium_ed25519_pk_load'] = wasmExports['lc_dilithium_ed25519_pk_load'];
+  _lc_dilithium_ed25519_sig_load = Module['_lc_dilithium_ed25519_sig_load'] = wasmExports['lc_dilithium_ed25519_sig_load'];
+  _lc_dilithium_ed25519_sk_ptr = Module['_lc_dilithium_ed25519_sk_ptr'] = wasmExports['lc_dilithium_ed25519_sk_ptr'];
+  _lc_dilithium_ed25519_pk_ptr = Module['_lc_dilithium_ed25519_pk_ptr'] = wasmExports['lc_dilithium_ed25519_pk_ptr'];
+  _lc_dilithium_ed25519_sig_ptr = Module['_lc_dilithium_ed25519_sig_ptr'] = wasmExports['lc_dilithium_ed25519_sig_ptr'];
+  _lc_dilithium_ed448_ctx_alloc = Module['_lc_dilithium_ed448_ctx_alloc'] = wasmExports['lc_dilithium_ed448_ctx_alloc'];
+  _lc_dilithium_ed448_ctx_zero_free = Module['_lc_dilithium_ed448_ctx_zero_free'] = wasmExports['lc_dilithium_ed448_ctx_zero_free'];
+  _lc_dilithium_ed448_ctx_zero = Module['_lc_dilithium_ed448_ctx_zero'] = wasmExports['lc_dilithium_ed448_ctx_zero'];
+  _lc_dilithium_ed448_ctx_hash = Module['_lc_dilithium_ed448_ctx_hash'] = wasmExports['lc_dilithium_ed448_ctx_hash'];
+  _lc_dilithium_ed448_ctx_internal = Module['_lc_dilithium_ed448_ctx_internal'] = wasmExports['lc_dilithium_ed448_ctx_internal'];
+  _lc_dilithium_ed448_ctx_userctx = Module['_lc_dilithium_ed448_ctx_userctx'] = wasmExports['lc_dilithium_ed448_ctx_userctx'];
+  _lc_dilithium_ed448_sk_type = Module['_lc_dilithium_ed448_sk_type'] = wasmExports['lc_dilithium_ed448_sk_type'];
+  _lc_dilithium_ed448_pk_type = Module['_lc_dilithium_ed448_pk_type'] = wasmExports['lc_dilithium_ed448_pk_type'];
+  _lc_dilithium_ed448_sig_type = Module['_lc_dilithium_ed448_sig_type'] = wasmExports['lc_dilithium_ed448_sig_type'];
+  _lc_dilithium_ed448_sk_size = Module['_lc_dilithium_ed448_sk_size'] = wasmExports['lc_dilithium_ed448_sk_size'];
+  _lc_dilithium_ed448_pk_size = Module['_lc_dilithium_ed448_pk_size'] = wasmExports['lc_dilithium_ed448_pk_size'];
+  _lc_dilithium_ed448_sig_size = Module['_lc_dilithium_ed448_sig_size'] = wasmExports['lc_dilithium_ed448_sig_size'];
+  _lc_dilithium_ed448_sk_load = Module['_lc_dilithium_ed448_sk_load'] = wasmExports['lc_dilithium_ed448_sk_load'];
+  _lc_dilithium_ed448_pk_load = Module['_lc_dilithium_ed448_pk_load'] = wasmExports['lc_dilithium_ed448_pk_load'];
+  _lc_dilithium_ed448_sig_load = Module['_lc_dilithium_ed448_sig_load'] = wasmExports['lc_dilithium_ed448_sig_load'];
+  _lc_dilithium_ed448_sk_ptr = Module['_lc_dilithium_ed448_sk_ptr'] = wasmExports['lc_dilithium_ed448_sk_ptr'];
+  _lc_dilithium_ed448_pk_ptr = Module['_lc_dilithium_ed448_pk_ptr'] = wasmExports['lc_dilithium_ed448_pk_ptr'];
+  _lc_dilithium_ed448_sig_ptr = Module['_lc_dilithium_ed448_sig_ptr'] = wasmExports['lc_dilithium_ed448_sig_ptr'];
+  _lc_dilithium_keypair = Module['_lc_dilithium_keypair'] = wasmExports['lc_dilithium_keypair'];
+  _lc_dilithium_keypair_from_seed = Module['_lc_dilithium_keypair_from_seed'] = wasmExports['lc_dilithium_keypair_from_seed'];
+  _lc_dilithium_pk_from_sk = Module['_lc_dilithium_pk_from_sk'] = wasmExports['lc_dilithium_pk_from_sk'];
+  _lc_dilithium_pct = Module['_lc_dilithium_pct'] = wasmExports['lc_dilithium_pct'];
+  _lc_dilithium_sign = Module['_lc_dilithium_sign'] = wasmExports['lc_dilithium_sign'];
+  _lc_dilithium_verify = Module['_lc_dilithium_verify'] = wasmExports['lc_dilithium_verify'];
+  _lc_dilithium_ed25519_keypair = Module['_lc_dilithium_ed25519_keypair'] = wasmExports['lc_dilithium_ed25519_keypair'];
+  _lc_dilithium_ed25519_pk_from_sk = Module['_lc_dilithium_ed25519_pk_from_sk'] = wasmExports['lc_dilithium_ed25519_pk_from_sk'];
+  _lc_dilithium_ed448_keypair = Module['_lc_dilithium_ed448_keypair'] = wasmExports['lc_dilithium_ed448_keypair'];
+  _lc_dilithium_ed448_pk_from_sk = Module['_lc_dilithium_ed448_pk_from_sk'] = wasmExports['lc_dilithium_ed448_pk_from_sk'];
+  _lc_dilithium_sign_ctx = Module['_lc_dilithium_sign_ctx'] = wasmExports['lc_dilithium_sign_ctx'];
+  _lc_dilithium_sign_init = Module['_lc_dilithium_sign_init'] = wasmExports['lc_dilithium_sign_init'];
+  _lc_dilithium_sign_update = Module['_lc_dilithium_sign_update'] = wasmExports['lc_dilithium_sign_update'];
+  _lc_dilithium_sign_final = Module['_lc_dilithium_sign_final'] = wasmExports['lc_dilithium_sign_final'];
+  _lc_dilithium_ed25519_sign = Module['_lc_dilithium_ed25519_sign'] = wasmExports['lc_dilithium_ed25519_sign'];
+  _lc_dilithium_ed25519_sign_ctx = Module['_lc_dilithium_ed25519_sign_ctx'] = wasmExports['lc_dilithium_ed25519_sign_ctx'];
+  _lc_dilithium_ed25519_sign_init = Module['_lc_dilithium_ed25519_sign_init'] = wasmExports['lc_dilithium_ed25519_sign_init'];
+  _lc_dilithium_ed25519_sign_update = Module['_lc_dilithium_ed25519_sign_update'] = wasmExports['lc_dilithium_ed25519_sign_update'];
+  _lc_dilithium_ed25519_sign_final = Module['_lc_dilithium_ed25519_sign_final'] = wasmExports['lc_dilithium_ed25519_sign_final'];
+  _lc_dilithium_ed448_sign = Module['_lc_dilithium_ed448_sign'] = wasmExports['lc_dilithium_ed448_sign'];
+  _lc_dilithium_ed448_sign_ctx = Module['_lc_dilithium_ed448_sign_ctx'] = wasmExports['lc_dilithium_ed448_sign_ctx'];
+  _lc_dilithium_ed448_sign_init = Module['_lc_dilithium_ed448_sign_init'] = wasmExports['lc_dilithium_ed448_sign_init'];
+  _lc_dilithium_ed448_sign_update = Module['_lc_dilithium_ed448_sign_update'] = wasmExports['lc_dilithium_ed448_sign_update'];
+  _lc_dilithium_ed448_sign_final = Module['_lc_dilithium_ed448_sign_final'] = wasmExports['lc_dilithium_ed448_sign_final'];
+  _lc_dilithium_verify_ctx = Module['_lc_dilithium_verify_ctx'] = wasmExports['lc_dilithium_verify_ctx'];
+  _lc_dilithium_verify_init = Module['_lc_dilithium_verify_init'] = wasmExports['lc_dilithium_verify_init'];
+  _lc_dilithium_verify_update = Module['_lc_dilithium_verify_update'] = wasmExports['lc_dilithium_verify_update'];
+  _lc_dilithium_verify_final = Module['_lc_dilithium_verify_final'] = wasmExports['lc_dilithium_verify_final'];
+  _lc_dilithium_ed25519_verify = Module['_lc_dilithium_ed25519_verify'] = wasmExports['lc_dilithium_ed25519_verify'];
+  _lc_dilithium_ed25519_verify_ctx = Module['_lc_dilithium_ed25519_verify_ctx'] = wasmExports['lc_dilithium_ed25519_verify_ctx'];
+  _lc_dilithium_ed25519_verify_init = Module['_lc_dilithium_ed25519_verify_init'] = wasmExports['lc_dilithium_ed25519_verify_init'];
+  _lc_dilithium_ed25519_verify_update = Module['_lc_dilithium_ed25519_verify_update'] = wasmExports['lc_dilithium_ed25519_verify_update'];
+  _lc_dilithium_ed25519_verify_final = Module['_lc_dilithium_ed25519_verify_final'] = wasmExports['lc_dilithium_ed25519_verify_final'];
+  _lc_dilithium_ed448_verify = Module['_lc_dilithium_ed448_verify'] = wasmExports['lc_dilithium_ed448_verify'];
+  _lc_dilithium_ed448_verify_ctx = Module['_lc_dilithium_ed448_verify_ctx'] = wasmExports['lc_dilithium_ed448_verify_ctx'];
+  _lc_dilithium_ed448_verify_init = Module['_lc_dilithium_ed448_verify_init'] = wasmExports['lc_dilithium_ed448_verify_init'];
+  _lc_dilithium_ed448_verify_update = Module['_lc_dilithium_ed448_verify_update'] = wasmExports['lc_dilithium_ed448_verify_update'];
+  _lc_dilithium_ed448_verify_final = Module['_lc_dilithium_ed448_verify_final'] = wasmExports['lc_dilithium_ed448_verify_final'];
+  _lc_sphincs_ctx_alloc = Module['_lc_sphincs_ctx_alloc'] = wasmExports['lc_sphincs_ctx_alloc'];
+  _lc_sphincs_ctx_zero_free = Module['_lc_sphincs_ctx_zero_free'] = wasmExports['lc_sphincs_ctx_zero_free'];
+  _lc_sphincs_ctx_zero = Module['_lc_sphincs_ctx_zero'] = wasmExports['lc_sphincs_ctx_zero'];
+  _lc_sphincs_ctx_internal = Module['_lc_sphincs_ctx_internal'] = wasmExports['lc_sphincs_ctx_internal'];
+  _lc_sphincs_ctx_hash = Module['_lc_sphincs_ctx_hash'] = wasmExports['lc_sphincs_ctx_hash'];
+  _lc_sphincs_ctx_userctx = Module['_lc_sphincs_ctx_userctx'] = wasmExports['lc_sphincs_ctx_userctx'];
+  _lc_sphincs_sk_type = Module['_lc_sphincs_sk_type'] = wasmExports['lc_sphincs_sk_type'];
+  _lc_sphincs_pk_type = Module['_lc_sphincs_pk_type'] = wasmExports['lc_sphincs_pk_type'];
+  _lc_sphincs_sig_type = Module['_lc_sphincs_sig_type'] = wasmExports['lc_sphincs_sig_type'];
+  _lc_sphincs_sk_size = Module['_lc_sphincs_sk_size'] = wasmExports['lc_sphincs_sk_size'];
+  _lc_sphincs_pk_size = Module['_lc_sphincs_pk_size'] = wasmExports['lc_sphincs_pk_size'];
+  _lc_sphincs_sig_size = Module['_lc_sphincs_sig_size'] = wasmExports['lc_sphincs_sig_size'];
+  _lc_sphincs_sk_load = Module['_lc_sphincs_sk_load'] = wasmExports['lc_sphincs_sk_load'];
+  _lc_sphincs_sk_set_keytype_fast = Module['_lc_sphincs_sk_set_keytype_fast'] = wasmExports['lc_sphincs_sk_set_keytype_fast'];
+  _lc_sphincs_sk_set_keytype_small = Module['_lc_sphincs_sk_set_keytype_small'] = wasmExports['lc_sphincs_sk_set_keytype_small'];
+  _lc_sphincs_pk_load = Module['_lc_sphincs_pk_load'] = wasmExports['lc_sphincs_pk_load'];
+  _lc_sphincs_pk_set_keytype_fast = Module['_lc_sphincs_pk_set_keytype_fast'] = wasmExports['lc_sphincs_pk_set_keytype_fast'];
+  _lc_sphincs_pk_set_keytype_small = Module['_lc_sphincs_pk_set_keytype_small'] = wasmExports['lc_sphincs_pk_set_keytype_small'];
+  _lc_sphincs_sig_load = Module['_lc_sphincs_sig_load'] = wasmExports['lc_sphincs_sig_load'];
+  _lc_sphincs_sk_ptr = Module['_lc_sphincs_sk_ptr'] = wasmExports['lc_sphincs_sk_ptr'];
+  _lc_sphincs_pk_ptr = Module['_lc_sphincs_pk_ptr'] = wasmExports['lc_sphincs_pk_ptr'];
+  _lc_sphincs_sig_ptr = Module['_lc_sphincs_sig_ptr'] = wasmExports['lc_sphincs_sig_ptr'];
+  _lc_sphincs_alg_status = Module['_lc_sphincs_alg_status'] = wasmExports['lc_sphincs_alg_status'];
+  _lc_sphincs_keypair = Module['_lc_sphincs_keypair'] = wasmExports['lc_sphincs_keypair'];
+  _lc_sphincs_keypair_from_seed = Module['_lc_sphincs_keypair_from_seed'] = wasmExports['lc_sphincs_keypair_from_seed'];
+  _lc_sphincs_pk_from_sk = Module['_lc_sphincs_pk_from_sk'] = wasmExports['lc_sphincs_pk_from_sk'];
+  _lc_sphincs_pct = Module['_lc_sphincs_pct'] = wasmExports['lc_sphincs_pct'];
+  _lc_sphincs_sign = Module['_lc_sphincs_sign'] = wasmExports['lc_sphincs_sign'];
+  _lc_sphincs_verify = Module['_lc_sphincs_verify'] = wasmExports['lc_sphincs_verify'];
+  _lc_sphincs_sign_ctx = Module['_lc_sphincs_sign_ctx'] = wasmExports['lc_sphincs_sign_ctx'];
+  _lc_sphincs_sign_init = Module['_lc_sphincs_sign_init'] = wasmExports['lc_sphincs_sign_init'];
+  _lc_sphincs_sign_update = Module['_lc_sphincs_sign_update'] = wasmExports['lc_sphincs_sign_update'];
+  _lc_sphincs_sign_final = Module['_lc_sphincs_sign_final'] = wasmExports['lc_sphincs_sign_final'];
+  _lc_sphincs_verify_ctx = Module['_lc_sphincs_verify_ctx'] = wasmExports['lc_sphincs_verify_ctx'];
+  _lc_sphincs_verify_init = Module['_lc_sphincs_verify_init'] = wasmExports['lc_sphincs_verify_init'];
+  _lc_sphincs_verify_update = Module['_lc_sphincs_verify_update'] = wasmExports['lc_sphincs_verify_update'];
+  _lc_sphincs_verify_final = Module['_lc_sphincs_verify_final'] = wasmExports['lc_sphincs_verify_final'];
+  _cc20_selftest = Module['_cc20_selftest'] = wasmExports['cc20_selftest'];
+  _cc20_crypt_remaining = Module['_cc20_crypt_remaining'] = wasmExports['cc20_crypt_remaining'];
+  _cc20_init = Module['_cc20_init'] = wasmExports['cc20_init'];
+  _cc20_setkey = Module['_cc20_setkey'] = wasmExports['cc20_setkey'];
+  _cc20_init_iv = Module['_cc20_init_iv'] = wasmExports['cc20_init_iv'];
+  _cc20_check_overflow = Module['_cc20_check_overflow'] = wasmExports['cc20_check_overflow'];
+  _cc20_setiv = Module['_cc20_setiv'] = wasmExports['cc20_setiv'];
+  _cc20_getiv = Module['_cc20_getiv'] = wasmExports['cc20_getiv'];
+  _mode_cbc_selftest = Module['_mode_cbc_selftest'] = wasmExports['mode_cbc_selftest'];
+  _mode_ctr_selftest = Module['_mode_ctr_selftest'] = wasmExports['mode_ctr_selftest'];
+  _mode_kw_selftest = Module['_mode_kw_selftest'] = wasmExports['mode_kw_selftest'];
+  _lc_aes_kw_encrypt = Module['_lc_aes_kw_encrypt'] = wasmExports['lc_aes_kw_encrypt'];
+  _lc_aes_kw_decrypt = Module['_lc_aes_kw_decrypt'] = wasmExports['lc_aes_kw_decrypt'];
+  _mode_xts_selftest = Module['_mode_xts_selftest'] = wasmExports['mode_xts_selftest'];
+  _aes_crypt_iv = Module['_aes_crypt_iv'] = wasmExports['aes_crypt_iv'];
+  _aes_init_iv = Module['_aes_init_iv'] = wasmExports['aes_init_iv'];
+  _aes_setiv = Module['_aes_setiv'] = wasmExports['aes_setiv'];
+  _aes_getiv = Module['_aes_getiv'] = wasmExports['aes_getiv'];
+  _aes_setkey_c = Module['_aes_setkey_c'] = wasmExports['aes_setkey_c'];
+  _aes_encrypt_c = Module['_aes_encrypt_c'] = wasmExports['aes_encrypt_c'];
+  _aes_decrypt_c = Module['_aes_decrypt_c'] = wasmExports['aes_decrypt_c'];
+  _aes_setkey_ct = Module['_aes_setkey_ct'] = wasmExports['aes_setkey_ct'];
+  _aes_encrypt_ct = Module['_aes_encrypt_ct'] = wasmExports['aes_encrypt_ct'];
+  _aes_decrypt_ct = Module['_aes_decrypt_ct'] = wasmExports['aes_decrypt_ct'];
+  _lc_sym_encrypt_iv = Module['_lc_sym_encrypt_iv'] = wasmExports['lc_sym_encrypt_iv'];
+  _lc_sym_decrypt_iv = Module['_lc_sym_decrypt_iv'] = wasmExports['lc_sym_decrypt_iv'];
+  _lc_sym_init_iv = Module['_lc_sym_init_iv'] = wasmExports['lc_sym_init_iv'];
+  _lc_sym_alloc = Module['_lc_sym_alloc'] = wasmExports['lc_sym_alloc'];
+  _lc_sym_zero_free = Module['_lc_sym_zero_free'] = wasmExports['lc_sym_zero_free'];
+  _lc_sym_alg_status = Module['_lc_sym_alg_status'] = wasmExports['lc_sym_alg_status'];
+  _lc_sym_ctx_alg_status = Module['_lc_sym_ctx_alg_status'] = wasmExports['lc_sym_ctx_alg_status'];
+  _lc_pkcs8_note_OID_enc = Module['_lc_pkcs8_note_OID_enc'] = wasmExports['lc_pkcs8_note_OID_enc'];
+  _lc_pkcs8_note_version_enc = Module['_lc_pkcs8_note_version_enc'] = wasmExports['lc_pkcs8_note_version_enc'];
+  _lc_pkcs8_note_algo_enc = Module['_lc_pkcs8_note_algo_enc'] = wasmExports['lc_pkcs8_note_algo_enc'];
+  _lc_pkcs8_note_key_enc = Module['_lc_pkcs8_note_key_enc'] = wasmExports['lc_pkcs8_note_key_enc'];
+  _lc_hmac_setkey = Module['_lc_hmac_setkey'] = wasmExports['lc_hmac_setkey'];
+  _hmac_sha256_selftest = Module['_hmac_sha256_selftest'] = wasmExports['hmac_sha256_selftest'];
+  _hmac_sha512_selftest = Module['_hmac_sha512_selftest'] = wasmExports['hmac_sha512_selftest'];
+  _hmac_sha3_selftest = Module['_hmac_sha3_selftest'] = wasmExports['hmac_sha3_selftest'];
+  _lc_hmac_init_with_hmac_key = Module['_lc_hmac_init_with_hmac_key'] = wasmExports['lc_hmac_init_with_hmac_key'];
+  _lc_hmac_alloc = Module['_lc_hmac_alloc'] = wasmExports['lc_hmac_alloc'];
+  _lc_hmac_zero_free = Module['_lc_hmac_zero_free'] = wasmExports['lc_hmac_zero_free'];
+  _lc_hmac = Module['_lc_hmac'] = wasmExports['lc_hmac'];
+  _lc_hmac_nocheck = Module['_lc_hmac_nocheck'] = wasmExports['lc_hmac_nocheck'];
+  _lc_hmac_alg_status = Module['_lc_hmac_alg_status'] = wasmExports['lc_hmac_alg_status'];
+  _lc_hmac_ctx_alg_status = Module['_lc_hmac_ctx_alg_status'] = wasmExports['lc_hmac_ctx_alg_status'];
+  _lc_kmac_alloc = Module['_lc_kmac_alloc'] = wasmExports['lc_kmac_alloc'];
+  _lc_kmac_zero_free = Module['_lc_kmac_zero_free'] = wasmExports['lc_kmac_zero_free'];
+  _lc_kmac_macsize = Module['_lc_kmac_macsize'] = wasmExports['lc_kmac_macsize'];
+  _lc_kmac_alg_status = Module['_lc_kmac_alg_status'] = wasmExports['lc_kmac_alg_status'];
+  _lc_kmac_ctx_alg_status = Module['_lc_kmac_ctx_alg_status'] = wasmExports['lc_kmac_ctx_alg_status'];
+  _lc_kmac_rng_alloc = Module['_lc_kmac_rng_alloc'] = wasmExports['lc_kmac_rng_alloc'];
+  _hex2bin_alloc = Module['_hex2bin_alloc'] = wasmExports['hex2bin_alloc'];
+  _calloc = Module['_calloc'] = wasmExports['calloc'];
+  _bin2hex_alloc = Module['_bin2hex_alloc'] = wasmExports['bin2hex_alloc'];
+  _bin2print = Module['_bin2print'] = wasmExports['bin2print'];
+  _bin2hex_html = Module['_bin2hex_html'] = wasmExports['bin2hex_html'];
+  _bin2hex_html_from_url = Module['_bin2hex_html_from_url'] = wasmExports['bin2hex_html_from_url'];
+  _bin2hex_html_alloc = Module['_bin2hex_html_alloc'] = wasmExports['bin2hex_html_alloc'];
+  _lc_activate_library = Module['_lc_activate_library'] = wasmExports['lc_activate_library'];
+  _waitid = Module['_waitid'] = wasmExports['waitid'];
+  _times = Module['_times'] = wasmExports['times'];
+  _getdate = Module['_getdate'] = wasmExports['getdate'];
+  _stime = Module['_stime'] = wasmExports['stime'];
+  _clock_getcpuclockid = Module['_clock_getcpuclockid'] = wasmExports['clock_getcpuclockid'];
+  _getpwnam = Module['_getpwnam'] = wasmExports['getpwnam'];
+  _getpwuid = Module['_getpwuid'] = wasmExports['getpwuid'];
+  _getpwnam_r = Module['_getpwnam_r'] = wasmExports['getpwnam_r'];
+  _getpwuid_r = Module['_getpwuid_r'] = wasmExports['getpwuid_r'];
+  _setpwent = Module['_setpwent'] = wasmExports['setpwent'];
+  _endpwent = Module['_endpwent'] = wasmExports['endpwent'];
+  _getpwent = Module['_getpwent'] = wasmExports['getpwent'];
+  _getgrnam = Module['_getgrnam'] = wasmExports['getgrnam'];
+  _getgrgid = Module['_getgrgid'] = wasmExports['getgrgid'];
+  _getgrnam_r = Module['_getgrnam_r'] = wasmExports['getgrnam_r'];
+  _getgrgid_r = Module['_getgrgid_r'] = wasmExports['getgrgid_r'];
+  _getgrent = Module['_getgrent'] = wasmExports['getgrent'];
+  _endgrent = Module['_endgrent'] = wasmExports['endgrent'];
+  _setgrent = Module['_setgrent'] = wasmExports['setgrent'];
+  _flock = Module['_flock'] = wasmExports['flock'];
+  _chroot = Module['_chroot'] = wasmExports['chroot'];
+  _execve = Module['_execve'] = wasmExports['execve'];
+  _fork = Module['_fork'] = wasmExports['fork'];
+  _vfork = Module['_vfork'] = wasmExports['vfork'];
+  _posix_spawn = Module['_posix_spawn'] = wasmExports['posix_spawn'];
+  _popen = Module['_popen'] = wasmExports['popen'];
+  _pclose = Module['_pclose'] = wasmExports['pclose'];
+  _setgroups = Module['_setgroups'] = wasmExports['setgroups'];
+  _sigaltstack = Module['_sigaltstack'] = wasmExports['sigaltstack'];
+  ___dlsym = Module['___dlsym'] = wasmExports['__dlsym'];
+  ____errno_location = Module['____errno_location'] = wasmExports['___errno_location'];
+  ___dl_seterr = Module['___dl_seterr'] = wasmExports['__dl_seterr'];
+  _getloadavg = Module['_getloadavg'] = wasmExports['getloadavg'];
+  ___syscall_uname = Module['___syscall_uname'] = wasmExports['__syscall_uname'];
+  ___syscall_setpgid = Module['___syscall_setpgid'] = wasmExports['__syscall_setpgid'];
+  ___syscall_sync = Module['___syscall_sync'] = wasmExports['__syscall_sync'];
+  ___syscall_getsid = Module['___syscall_getsid'] = wasmExports['__syscall_getsid'];
+  ___syscall_getpgid = Module['___syscall_getpgid'] = wasmExports['__syscall_getpgid'];
+  ___syscall_getpid = Module['___syscall_getpid'] = wasmExports['__syscall_getpid'];
+  ___syscall_getppid = Module['___syscall_getppid'] = wasmExports['__syscall_getppid'];
+  ___syscall_getgroups32 = Module['___syscall_getgroups32'] = wasmExports['__syscall_getgroups32'];
+  ___syscall_setsid = Module['___syscall_setsid'] = wasmExports['__syscall_setsid'];
+  ___syscall_getrusage = Module['___syscall_getrusage'] = wasmExports['__syscall_getrusage'];
+  ___syscall_getpriority = Module['___syscall_getpriority'] = wasmExports['__syscall_getpriority'];
+  ___syscall_setpriority = Module['___syscall_setpriority'] = wasmExports['__syscall_setpriority'];
+  ___syscall_setdomainname = Module['___syscall_setdomainname'] = wasmExports['__syscall_setdomainname'];
+  ___syscall_getuid32 = Module['___syscall_getuid32'] = wasmExports['__syscall_getuid32'];
+  ___syscall_getgid32 = Module['___syscall_getgid32'] = wasmExports['__syscall_getgid32'];
+  ___syscall_geteuid32 = Module['___syscall_geteuid32'] = wasmExports['__syscall_geteuid32'];
+  ___syscall_getegid32 = Module['___syscall_getegid32'] = wasmExports['__syscall_getegid32'];
+  ___syscall_getresuid32 = Module['___syscall_getresuid32'] = wasmExports['__syscall_getresuid32'];
+  ___syscall_getresgid32 = Module['___syscall_getresgid32'] = wasmExports['__syscall_getresgid32'];
+  ___syscall_madvise = Module['___syscall_madvise'] = wasmExports['__syscall_madvise'];
+  ___syscall_mlock = Module['___syscall_mlock'] = wasmExports['__syscall_mlock'];
+  ___syscall_munlock = Module['___syscall_munlock'] = wasmExports['__syscall_munlock'];
+  ___syscall_mprotect = Module['___syscall_mprotect'] = wasmExports['__syscall_mprotect'];
+  ___syscall_mremap = Module['___syscall_mremap'] = wasmExports['__syscall_mremap'];
+  ___syscall_mlockall = Module['___syscall_mlockall'] = wasmExports['__syscall_mlockall'];
+  ___syscall_munlockall = Module['___syscall_munlockall'] = wasmExports['__syscall_munlockall'];
+  ___syscall_prlimit64 = Module['___syscall_prlimit64'] = wasmExports['__syscall_prlimit64'];
+  ___syscall_wait4 = Module['___syscall_wait4'] = wasmExports['__syscall_wait4'];
+  ___syscall_acct = Module['___syscall_acct'] = wasmExports['__syscall_acct'];
+  ___syscall_mincore = Module['___syscall_mincore'] = wasmExports['__syscall_mincore'];
+  ___syscall_recvmmsg = Module['___syscall_recvmmsg'] = wasmExports['__syscall_recvmmsg'];
+  ___syscall_sendmmsg = Module['___syscall_sendmmsg'] = wasmExports['__syscall_sendmmsg'];
+  ___syscall_socketpair = Module['___syscall_socketpair'] = wasmExports['__syscall_socketpair'];
+  ___cxa_finalize = Module['___cxa_finalize'] = wasmExports['__cxa_finalize'];
+  __Exit = Module['__Exit'] = wasmExports['_Exit'];
+  ___emscripten_environ_constructor = Module['___emscripten_environ_constructor'] = wasmExports['__emscripten_environ_constructor'];
+  ___fdopen = Module['___fdopen'] = wasmExports['__fdopen'];
+  _fdopen = Module['_fdopen'] = wasmExports['fdopen'];
+  ___fmodeflags = Module['___fmodeflags'] = wasmExports['__fmodeflags'];
+  ___lockfile = Module['___lockfile'] = wasmExports['__lockfile'];
+  ___unlockfile = Module['___unlockfile'] = wasmExports['__unlockfile'];
+  ___math_divzero = Module['___math_divzero'] = wasmExports['__math_divzero'];
+  ___math_invalid = Module['___math_invalid'] = wasmExports['__math_invalid'];
+  ___month_to_secs = Module['___month_to_secs'] = wasmExports['__month_to_secs'];
+  ___overflow = Module['___overflow'] = wasmExports['__overflow'];
+  ___init_ssp = Module['___init_ssp'] = wasmExports['__init_ssp'];
+  _memcpy = Module['_memcpy'] = wasmExports['memcpy'];
+  ___get_tp = Module['___get_tp'] = wasmExports['__get_tp'];
+  ___stack_chk_fail_local = Module['___stack_chk_fail_local'] = wasmExports['__stack_chk_fail_local'];
+  ___stdio_close = Module['___stdio_close'] = wasmExports['__stdio_close'];
+  ___aio_close = Module['___aio_close'] = wasmExports['__aio_close'];
+  ___stdio_exit = Module['___stdio_exit'] = wasmExports['__stdio_exit'];
+  ___stdio_exit_needed = Module['___stdio_exit_needed'] = wasmExports['__stdio_exit_needed'];
+  ___stdio_read = Module['___stdio_read'] = wasmExports['__stdio_read'];
+  ___stdio_seek = Module['___stdio_seek'] = wasmExports['__stdio_seek'];
+  ___stdio_write = Module['___stdio_write'] = wasmExports['__stdio_write'];
+  ___tm_to_secs = Module['___tm_to_secs'] = wasmExports['__tm_to_secs'];
+  ___towrite = Module['___towrite'] = wasmExports['__towrite'];
+  ___towrite_needs_stdio_exit = Module['___towrite_needs_stdio_exit'] = wasmExports['__towrite_needs_stdio_exit'];
+  ___tm_to_tzname = Module['___tm_to_tzname'] = wasmExports['__tm_to_tzname'];
+  _tzset = Module['_tzset'] = wasmExports['tzset'];
+  ___year_to_secs = Module['___year_to_secs'] = wasmExports['__year_to_secs'];
+  _abort = Module['_abort'] = wasmExports['abort'];
+  ___syscall_ret = Module['___syscall_ret'] = wasmExports['__syscall_ret'];
+  ___clock_gettime = Module['___clock_gettime'] = wasmExports['__clock_gettime'];
+  ___wasi_syscall_ret = Module['___wasi_syscall_ret'] = wasmExports['__wasi_syscall_ret'];
+  ___wasi_timestamp_to_timespec = Module['___wasi_timestamp_to_timespec'] = wasmExports['__wasi_timestamp_to_timespec'];
+  ___clock_nanosleep = Module['___clock_nanosleep'] = wasmExports['__clock_nanosleep'];
+  _clock_nanosleep = Module['_clock_nanosleep'] = wasmExports['clock_nanosleep'];
+  ___dl_invalid_handle = Module['___dl_invalid_handle'] = wasmExports['__dl_invalid_handle'];
+  ___dl_thread_cleanup = Module['___dl_thread_cleanup'] = wasmExports['__dl_thread_cleanup'];
+  ___dl_vseterr = Module['___dl_vseterr'] = wasmExports['__dl_vseterr'];
+  ___libc_free = Module['___libc_free'] = wasmExports['__libc_free'];
+  _vsnprintf = Module['_vsnprintf'] = wasmExports['vsnprintf'];
+  ___libc_malloc = Module['___libc_malloc'] = wasmExports['__libc_malloc'];
+  _emscripten_get_heap_size = Module['_emscripten_get_heap_size'] = wasmExports['emscripten_get_heap_size'];
+  _emscripten_builtin_memcpy = Module['_emscripten_builtin_memcpy'] = wasmExports['emscripten_builtin_memcpy'];
+  __emscripten_memcpy_bulkmem = Module['__emscripten_memcpy_bulkmem'] = wasmExports['_emscripten_memcpy_bulkmem'];
+  ___memset = Module['___memset'] = wasmExports['__memset'];
+  _emscripten_builtin_memset = Module['_emscripten_builtin_memset'] = wasmExports['emscripten_builtin_memset'];
+  _memset = Module['_memset'] = wasmExports['memset'];
+  ___syscall_munmap = Module['___syscall_munmap'] = wasmExports['__syscall_munmap'];
+  ___syscall_msync = Module['___syscall_msync'] = wasmExports['__syscall_msync'];
+  ___syscall_mmap2 = Module['___syscall_mmap2'] = wasmExports['__syscall_mmap2'];
+  _dysize = Module['_dysize'] = wasmExports['dysize'];
+  __emscripten_yield = Module['__emscripten_yield'] = wasmExports['_emscripten_yield'];
+  __emscripten_check_timers = Module['__emscripten_check_timers'] = wasmExports['_emscripten_check_timers'];
+  ___wasi_fd_is_valid = Module['___wasi_fd_is_valid'] = wasmExports['__wasi_fd_is_valid'];
+  ___procfdname = Module['___procfdname'] = wasmExports['__procfdname'];
+  _fflush = Module['_fflush'] = wasmExports['fflush'];
+  ___unlist_locked_file = Module['___unlist_locked_file'] = wasmExports['__unlist_locked_file'];
+  ___ofl_lock = Module['___ofl_lock'] = wasmExports['__ofl_lock'];
+  ___ofl_unlock = Module['___ofl_unlock'] = wasmExports['__ofl_unlock'];
+  _fflush_unlocked = Module['_fflush_unlocked'] = wasmExports['fflush_unlocked'];
+  ___lseek = Module['___lseek'] = wasmExports['__lseek'];
+  ___ofl_add = Module['___ofl_add'] = wasmExports['__ofl_add'];
+  _fprintf = Module['_fprintf'] = wasmExports['fprintf'];
+  _vfprintf = Module['_vfprintf'] = wasmExports['vfprintf'];
+  _vfiprintf = Module['_vfiprintf'] = wasmExports['vfiprintf'];
+  ___small_vfprintf = Module['___small_vfprintf'] = wasmExports['__small_vfprintf'];
+  _frexp = Module['_frexp'] = wasmExports['frexp'];
+  ___fstat = Module['___fstat'] = wasmExports['__fstat'];
+  ___fstatat = Module['___fstatat'] = wasmExports['__fstatat'];
+  _fstatat = Module['_fstatat'] = wasmExports['fstatat'];
+  ___futimesat = Module['___futimesat'] = wasmExports['__futimesat'];
+  _futimesat = Module['_futimesat'] = wasmExports['futimesat'];
+  ___fwritex = Module['___fwritex'] = wasmExports['__fwritex'];
+  _fwrite = Module['_fwrite'] = wasmExports['fwrite'];
+  _fwrite_unlocked = Module['_fwrite_unlocked'] = wasmExports['fwrite_unlocked'];
+  _strdup = Module['_strdup'] = wasmExports['strdup'];
+  ___strchrnul = Module['___strchrnul'] = wasmExports['__strchrnul'];
+  _emscripten_builtin_malloc = Module['_emscripten_builtin_malloc'] = wasmExports['emscripten_builtin_malloc'];
+  _emscripten_stack_get_end = Module['_emscripten_stack_get_end'] = wasmExports['emscripten_stack_get_end'];
+  _emscripten_stack_get_base = Module['_emscripten_stack_get_base'] = wasmExports['emscripten_stack_get_base'];
+  ___nl_langinfo_l = Module['___nl_langinfo_l'] = wasmExports['__nl_langinfo_l'];
+  ___nl_langinfo = Module['___nl_langinfo'] = wasmExports['__nl_langinfo'];
+  _nl_langinfo = Module['_nl_langinfo'] = wasmExports['nl_langinfo'];
+  _nl_langinfo_l = Module['_nl_langinfo_l'] = wasmExports['nl_langinfo_l'];
+  _emscripten_has_threading_support = Module['_emscripten_has_threading_support'] = wasmExports['emscripten_has_threading_support'];
+  _emscripten_num_logical_cores = Module['_emscripten_num_logical_cores'] = wasmExports['emscripten_num_logical_cores'];
+  _emscripten_futex_wait = Module['_emscripten_futex_wait'] = wasmExports['emscripten_futex_wait'];
+  _emscripten_futex_wake = Module['_emscripten_futex_wake'] = wasmExports['emscripten_futex_wake'];
+  _emscripten_is_main_runtime_thread = Module['_emscripten_is_main_runtime_thread'] = wasmExports['emscripten_is_main_runtime_thread'];
+  ___wait = Module['___wait'] = wasmExports['__wait'];
+  ___lock = Module['___lock'] = wasmExports['__lock'];
+  ___unlock = Module['___unlock'] = wasmExports['__unlock'];
+  ___inhibit_ptc = Module['___inhibit_ptc'] = wasmExports['__inhibit_ptc'];
+  ___acquire_ptc = Module['___acquire_ptc'] = wasmExports['__acquire_ptc'];
+  ___release_ptc = Module['___release_ptc'] = wasmExports['__release_ptc'];
+  _emscripten_main_thread_process_queued_calls = Module['_emscripten_main_thread_process_queued_calls'] = wasmExports['emscripten_main_thread_process_queued_calls'];
+  _emscripten_current_thread_process_queued_calls = Module['_emscripten_current_thread_process_queued_calls'] = wasmExports['emscripten_current_thread_process_queued_calls'];
+  ___pthread_mutex_lock = Module['___pthread_mutex_lock'] = wasmExports['__pthread_mutex_lock'];
+  ___pthread_mutex_unlock = Module['___pthread_mutex_unlock'] = wasmExports['__pthread_mutex_unlock'];
+  ___pthread_mutex_trylock = Module['___pthread_mutex_trylock'] = wasmExports['__pthread_mutex_trylock'];
+  ___pthread_mutex_timedlock = Module['___pthread_mutex_timedlock'] = wasmExports['__pthread_mutex_timedlock'];
+  _pthread_mutex_consistent = Module['_pthread_mutex_consistent'] = wasmExports['pthread_mutex_consistent'];
+  _pthread_barrier_init = Module['_pthread_barrier_init'] = wasmExports['pthread_barrier_init'];
+  _pthread_barrier_destroy = Module['_pthread_barrier_destroy'] = wasmExports['pthread_barrier_destroy'];
+  _pthread_barrier_wait = Module['_pthread_barrier_wait'] = wasmExports['pthread_barrier_wait'];
+  ___pthread_create = Module['___pthread_create'] = wasmExports['__pthread_create'];
+  ___pthread_join = Module['___pthread_join'] = wasmExports['__pthread_join'];
+  ___pthread_key_create = Module['___pthread_key_create'] = wasmExports['__pthread_key_create'];
+  ___pthread_key_delete = Module['___pthread_key_delete'] = wasmExports['__pthread_key_delete'];
+  _pthread_getspecific = Module['_pthread_getspecific'] = wasmExports['pthread_getspecific'];
+  _pthread_setspecific = Module['_pthread_setspecific'] = wasmExports['pthread_setspecific'];
+  ___pthread_once = Module['___pthread_once'] = wasmExports['__pthread_once'];
+  _pthread_cond_wait = Module['_pthread_cond_wait'] = wasmExports['pthread_cond_wait'];
+  _pthread_cond_signal = Module['_pthread_cond_signal'] = wasmExports['pthread_cond_signal'];
+  ___private_cond_signal = Module['___private_cond_signal'] = wasmExports['__private_cond_signal'];
+  _pthread_cond_broadcast = Module['_pthread_cond_broadcast'] = wasmExports['pthread_cond_broadcast'];
+  _pthread_cond_init = Module['_pthread_cond_init'] = wasmExports['pthread_cond_init'];
+  _pthread_cond_destroy = Module['_pthread_cond_destroy'] = wasmExports['pthread_cond_destroy'];
+  ___pthread_cond_timedwait = Module['___pthread_cond_timedwait'] = wasmExports['__pthread_cond_timedwait'];
+  _pthread_atfork = Module['_pthread_atfork'] = wasmExports['pthread_atfork'];
+  _pthread_cancel = Module['_pthread_cancel'] = wasmExports['pthread_cancel'];
+  ___pthread_testcancel = Module['___pthread_testcancel'] = wasmExports['__pthread_testcancel'];
+  ___pthread_exit = Module['___pthread_exit'] = wasmExports['__pthread_exit'];
+  ___pthread_detach = Module['___pthread_detach'] = wasmExports['__pthread_detach'];
+  _pthread_equal = Module['_pthread_equal'] = wasmExports['pthread_equal'];
+  _pthread_kill = Module['_pthread_kill'] = wasmExports['pthread_kill'];
+  _pthread_self = Module['_pthread_self'] = wasmExports['pthread_self'];
+  _raise = Module['_raise'] = wasmExports['raise'];
+  _pthread_setcancelstate = Module['_pthread_setcancelstate'] = wasmExports['pthread_setcancelstate'];
+  _pthread_setcanceltype = Module['_pthread_setcanceltype'] = wasmExports['pthread_setcanceltype'];
+  _pthread_rwlock_init = Module['_pthread_rwlock_init'] = wasmExports['pthread_rwlock_init'];
+  _pthread_rwlock_destroy = Module['_pthread_rwlock_destroy'] = wasmExports['pthread_rwlock_destroy'];
+  _pthread_rwlock_rdlock = Module['_pthread_rwlock_rdlock'] = wasmExports['pthread_rwlock_rdlock'];
+  _pthread_rwlock_tryrdlock = Module['_pthread_rwlock_tryrdlock'] = wasmExports['pthread_rwlock_tryrdlock'];
+  _pthread_rwlock_timedrdlock = Module['_pthread_rwlock_timedrdlock'] = wasmExports['pthread_rwlock_timedrdlock'];
+  _pthread_rwlock_wrlock = Module['_pthread_rwlock_wrlock'] = wasmExports['pthread_rwlock_wrlock'];
+  _pthread_rwlock_trywrlock = Module['_pthread_rwlock_trywrlock'] = wasmExports['pthread_rwlock_trywrlock'];
+  _pthread_rwlock_timedwrlock = Module['_pthread_rwlock_timedwrlock'] = wasmExports['pthread_rwlock_timedwrlock'];
+  _pthread_rwlock_unlock = Module['_pthread_rwlock_unlock'] = wasmExports['pthread_rwlock_unlock'];
+  _sem_post = Module['_sem_post'] = wasmExports['sem_post'];
+  _sem_wait = Module['_sem_wait'] = wasmExports['sem_wait'];
+  _sem_trywait = Module['_sem_trywait'] = wasmExports['sem_trywait'];
+  _emscripten_thread_sleep = Module['_emscripten_thread_sleep'] = wasmExports['emscripten_thread_sleep'];
+  _pthread_mutex_timedlock = Module['_pthread_mutex_timedlock'] = wasmExports['pthread_mutex_timedlock'];
+  _emscripten_builtin_pthread_create = Module['_emscripten_builtin_pthread_create'] = wasmExports['emscripten_builtin_pthread_create'];
+  _emscripten_builtin_pthread_join = Module['_emscripten_builtin_pthread_join'] = wasmExports['emscripten_builtin_pthread_join'];
+  _pthread_key_delete = Module['_pthread_key_delete'] = wasmExports['pthread_key_delete'];
+  _pthread_key_create = Module['_pthread_key_create'] = wasmExports['pthread_key_create'];
+  _pthread_once = Module['_pthread_once'] = wasmExports['pthread_once'];
+  _pthread_cond_timedwait = Module['_pthread_cond_timedwait'] = wasmExports['pthread_cond_timedwait'];
+  _pthread_testcancel = Module['_pthread_testcancel'] = wasmExports['pthread_testcancel'];
+  _emscripten_builtin_pthread_exit = Module['_emscripten_builtin_pthread_exit'] = wasmExports['emscripten_builtin_pthread_exit'];
+  _pthread_exit = Module['_pthread_exit'] = wasmExports['pthread_exit'];
+  _emscripten_builtin_pthread_detach = Module['_emscripten_builtin_pthread_detach'] = wasmExports['emscripten_builtin_pthread_detach'];
+  _pthread_detach = Module['_pthread_detach'] = wasmExports['pthread_detach'];
+  _thrd_detach = Module['_thrd_detach'] = wasmExports['thrd_detach'];
+  ___localtime_r = Module['___localtime_r'] = wasmExports['__localtime_r'];
+  ___memrchr = Module['___memrchr'] = wasmExports['__memrchr'];
+  _memrchr = Module['_memrchr'] = wasmExports['memrchr'];
+  _timegm = Module['_timegm'] = wasmExports['timegm'];
+  _mktime = Module['_mktime'] = wasmExports['mktime'];
+  ___gmtime_r = Module['___gmtime_r'] = wasmExports['__gmtime_r'];
+  _gmtime_r = Module['_gmtime_r'] = wasmExports['gmtime_r'];
+  ___mmap = Module['___mmap'] = wasmExports['__mmap'];
+  ___vm_wait = Module['___vm_wait'] = wasmExports['__vm_wait'];
+  _emscripten_builtin_free = Module['_emscripten_builtin_free'] = wasmExports['emscripten_builtin_free'];
+  _emscripten_builtin_memalign = Module['_emscripten_builtin_memalign'] = wasmExports['emscripten_builtin_memalign'];
+  _emscripten_builtin_mmap = Module['_emscripten_builtin_mmap'] = wasmExports['emscripten_builtin_mmap'];
+  ___munmap = Module['___munmap'] = wasmExports['__munmap'];
+  _emscripten_builtin_munmap = Module['_emscripten_builtin_munmap'] = wasmExports['emscripten_builtin_munmap'];
+  _printf = Module['_printf'] = wasmExports['printf'];
+  ___small_printf = Module['___small_printf'] = wasmExports['__small_printf'];
+  _thrd_current = Module['_thrd_current'] = wasmExports['thrd_current'];
+  _emscripten_main_runtime_thread_id = Module['_emscripten_main_runtime_thread_id'] = wasmExports['emscripten_main_runtime_thread_id'];
+  ___sig_is_blocked = Module['___sig_is_blocked'] = wasmExports['__sig_is_blocked'];
+  _pthread_sigmask = Module['_pthread_sigmask'] = wasmExports['pthread_sigmask'];
+  _sigpending = Module['_sigpending'] = wasmExports['sigpending'];
+  _action_abort = Module['_action_abort'] = wasmExports['action_abort'];
+  _action_terminate = Module['_action_terminate'] = wasmExports['action_terminate'];
+  _sigismember = Module['_sigismember'] = wasmExports['sigismember'];
+  _sigorset = Module['_sigorset'] = wasmExports['sigorset'];
+  _sigandset = Module['_sigandset'] = wasmExports['sigandset'];
+  _sigdelset = Module['_sigdelset'] = wasmExports['sigdelset'];
+  _sigaddset = Module['_sigaddset'] = wasmExports['sigaddset'];
+  _scalbn = Module['_scalbn'] = wasmExports['scalbn'];
+  ___sigaction = Module['___sigaction'] = wasmExports['__sigaction'];
+  _sigaction = Module['_sigaction'] = wasmExports['sigaction'];
+  _strchrnul = Module['_strchrnul'] = wasmExports['strchrnul'];
+  ___strftime_fmt_1 = Module['___strftime_fmt_1'] = wasmExports['__strftime_fmt_1'];
+  ___strftime_l = Module['___strftime_l'] = wasmExports['__strftime_l'];
+  _strtoul = Module['_strtoul'] = wasmExports['strtoul'];
+  _strftime_l = Module['_strftime_l'] = wasmExports['strftime_l'];
+  _strnlen = Module['_strnlen'] = wasmExports['strnlen'];
+  _strtoull = Module['_strtoull'] = wasmExports['strtoull'];
+  _strtoll = Module['_strtoll'] = wasmExports['strtoll'];
+  _strtol = Module['_strtol'] = wasmExports['strtol'];
+  _strtoimax = Module['_strtoimax'] = wasmExports['strtoimax'];
+  _strtoumax = Module['_strtoumax'] = wasmExports['strtoumax'];
+  ___strtol_internal = Module['___strtol_internal'] = wasmExports['__strtol_internal'];
+  ___strtoul_internal = Module['___strtoul_internal'] = wasmExports['__strtoul_internal'];
+  ___strtoll_internal = Module['___strtoll_internal'] = wasmExports['__strtoll_internal'];
+  ___strtoull_internal = Module['___strtoull_internal'] = wasmExports['__strtoull_internal'];
+  ___strtoimax_internal = Module['___strtoimax_internal'] = wasmExports['__strtoimax_internal'];
+  ___strtoumax_internal = Module['___strtoumax_internal'] = wasmExports['__strtoumax_internal'];
+  ___uselocale = Module['___uselocale'] = wasmExports['__uselocale'];
+  _uselocale = Module['_uselocale'] = wasmExports['uselocale'];
+  _utimensat = Module['_utimensat'] = wasmExports['utimensat'];
+  ___vfprintf_internal = Module['___vfprintf_internal'] = wasmExports['__vfprintf_internal'];
+  _wctomb = Module['_wctomb'] = wasmExports['wctomb'];
+  ___trunctfdf2 = Module['___trunctfdf2'] = wasmExports['__trunctfdf2'];
+  _vsniprintf = Module['_vsniprintf'] = wasmExports['vsniprintf'];
+  ___small_vsnprintf = Module['___small_vsnprintf'] = wasmExports['__small_vsnprintf'];
+  _wcrtomb = Module['_wcrtomb'] = wasmExports['wcrtomb'];
+  _sbrk = Module['_sbrk'] = wasmExports['sbrk'];
+  _emscripten_builtin_calloc = Module['_emscripten_builtin_calloc'] = wasmExports['emscripten_builtin_calloc'];
+  _emscripten_builtin_realloc = Module['_emscripten_builtin_realloc'] = wasmExports['emscripten_builtin_realloc'];
+  ___libc_calloc = Module['___libc_calloc'] = wasmExports['__libc_calloc'];
+  ___libc_realloc = Module['___libc_realloc'] = wasmExports['__libc_realloc'];
+  _realloc_in_place = Module['_realloc_in_place'] = wasmExports['realloc_in_place'];
+  _memalign = Module['_memalign'] = wasmExports['memalign'];
+  _valloc = Module['_valloc'] = wasmExports['valloc'];
+  _pvalloc = Module['_pvalloc'] = wasmExports['pvalloc'];
+  _mallinfo = Module['_mallinfo'] = wasmExports['mallinfo'];
+  _mallopt = Module['_mallopt'] = wasmExports['mallopt'];
+  _malloc_trim = Module['_malloc_trim'] = wasmExports['malloc_trim'];
+  _malloc_usable_size = Module['_malloc_usable_size'] = wasmExports['malloc_usable_size'];
+  _malloc_footprint = Module['_malloc_footprint'] = wasmExports['malloc_footprint'];
+  _malloc_max_footprint = Module['_malloc_max_footprint'] = wasmExports['malloc_max_footprint'];
+  _malloc_footprint_limit = Module['_malloc_footprint_limit'] = wasmExports['malloc_footprint_limit'];
+  _malloc_set_footprint_limit = Module['_malloc_set_footprint_limit'] = wasmExports['malloc_set_footprint_limit'];
+  _independent_calloc = Module['_independent_calloc'] = wasmExports['independent_calloc'];
+  _independent_comalloc = Module['_independent_comalloc'] = wasmExports['independent_comalloc'];
+  _bulk_free = Module['_bulk_free'] = wasmExports['bulk_free'];
+  _emscripten_get_sbrk_ptr = Module['_emscripten_get_sbrk_ptr'] = wasmExports['emscripten_get_sbrk_ptr'];
+  __sbrk64 = Module['__sbrk64'] = wasmExports['_sbrk64'];
+  _brk = Module['_brk'] = wasmExports['brk'];
+  ___ashlti3 = Module['___ashlti3'] = wasmExports['__ashlti3'];
+  ___lshrti3 = Module['___lshrti3'] = wasmExports['__lshrti3'];
+  _emscripten_stack_init = Module['_emscripten_stack_init'] = wasmExports['emscripten_stack_init'];
+  _emscripten_stack_set_limits = Module['_emscripten_stack_set_limits'] = wasmExports['emscripten_stack_set_limits'];
+  _emscripten_stack_get_free = Module['_emscripten_stack_get_free'] = wasmExports['emscripten_stack_get_free'];
+  __emscripten_stack_restore = Module['__emscripten_stack_restore'] = wasmExports['_emscripten_stack_restore'];
+  __emscripten_stack_alloc = Module['__emscripten_stack_alloc'] = wasmExports['_emscripten_stack_alloc'];
+  _emscripten_stack_get_current = Module['_emscripten_stack_get_current'] = wasmExports['emscripten_stack_get_current'];
+  memory = Module['memory'] = wasmMemory = wasmExports['memory'];
+  ___stack_pointer = Module['___stack_pointer'] = wasmExports['__stack_pointer'];
+  __indirect_function_table = Module['__indirect_function_table'] = wasmTable = wasmExports['__indirect_function_table'];
+  _stderr = Module['_stderr'] = wasmExports['stderr'].value;
+  _stdout = Module['_stdout'] = wasmExports['stdout'].value;
+  _sqlite3_version = Module['_sqlite3_version'] = wasmExports['sqlite3_version'].value;
+  _sqlite3_data_directory = Module['_sqlite3_data_directory'] = wasmExports['sqlite3_data_directory'].value;
+  _sqlite3_temp_directory = Module['_sqlite3_temp_directory'] = wasmExports['sqlite3_temp_directory'].value;
+  ___dso_handle = Module['___dso_handle'] = wasmExports['__dso_handle'].value;
+  _lc_sha3_512 = Module['_lc_sha3_512'] = wasmExports['lc_sha3_512'].value;
+  ___stack_chk_guard = Module['___stack_chk_guard'] = wasmExports['__stack_chk_guard'].value;
+  ___memory_base = Module['___memory_base'] = wasmExports['__memory_base'].value;
+  _lc_static_drng = Module['_lc_static_drng'] = wasmExports['lc_static_drng'].value;
+  _lc_sha3_384 = Module['_lc_sha3_384'] = wasmExports['lc_sha3_384'].value;
+  _lc_seeded_rng = Module['_lc_seeded_rng'] = wasmExports['lc_seeded_rng'].value;
+  _lc_cshake256 = Module['_lc_cshake256'] = wasmExports['lc_cshake256'].value;
+  _lc_shake256 = Module['_lc_shake256'] = wasmExports['lc_shake256'].value;
+  _lc_selftest_shake256_drng = Module['_lc_selftest_shake256_drng'] = wasmExports['lc_selftest_shake256_drng'].value;
+  _lc_sha3_256 = Module['_lc_sha3_256'] = wasmExports['lc_sha3_256'].value;
+  _optimization_blocker_uint64 = Module['_optimization_blocker_uint64'] = wasmExports['optimization_blocker_uint64'].value;
+  _lc_shake128 = Module['_lc_shake128'] = wasmExports['lc_shake128'].value;
+  _kyber_zetas = Module['_kyber_zetas'] = wasmExports['kyber_zetas'].value;
+  _lc_selftest_drng = Module['_lc_selftest_drng'] = wasmExports['lc_selftest_drng'].value;
+  _lc_sha512 = Module['_lc_sha512'] = wasmExports['lc_sha512'].value;
+  ___table_base = Module['___table_base'] = wasmExports['__table_base'].value;
+  _lc_hash_aead = Module['_lc_hash_aead'] = wasmExports['lc_hash_aead'].value;
+  _lc_hash_drbg = Module['_lc_hash_drbg'] = wasmExports['lc_hash_drbg'].value;
+  _lc_ascon_aead = Module['_lc_ascon_aead'] = wasmExports['lc_ascon_aead'].value;
+  _lc_ascon_128a = Module['_lc_ascon_128a'] = wasmExports['lc_ascon_128a'].value;
+  _lc_ascon_keccak_aead = Module['_lc_ascon_keccak_aead'] = wasmExports['lc_ascon_keccak_aead'].value;
+  _lc_cshake_aead = Module['_lc_cshake_aead'] = wasmExports['lc_cshake_aead'].value;
+  _lc_kmac_aead = Module['_lc_kmac_aead'] = wasmExports['lc_kmac_aead'].value;
+  _lc_symhmac_aead = Module['_lc_symhmac_aead'] = wasmExports['lc_symhmac_aead'].value;
+  _lc_aes_cbc = Module['_lc_aes_cbc'] = wasmExports['lc_aes_cbc'].value;
+  _lc_symkmac_aead = Module['_lc_symkmac_aead'] = wasmExports['lc_symkmac_aead'].value;
+  _lc_chacha20_poly1305_aead = Module['_lc_chacha20_poly1305_aead'] = wasmExports['lc_chacha20_poly1305_aead'].value;
+  _lc_chacha20 = Module['_lc_chacha20'] = wasmExports['lc_chacha20'].value;
+  _null_buffer = Module['_null_buffer'] = wasmExports['null_buffer'].value;
+  _lc_aes_gcm_aead = Module['_lc_aes_gcm_aead'] = wasmExports['lc_aes_gcm_aead'].value;
+  _lc_aes = Module['_lc_aes'] = wasmExports['lc_aes'].value;
+  _curve448_precomputed_base = Module['_curve448_precomputed_base'] = wasmExports['curve448_precomputed_base'].value;
+  _curve448_wnaf_base = Module['_curve448_wnaf_base'] = wasmExports['curve448_wnaf_base'].value;
+  _lc_cc20_drng = Module['_lc_cc20_drng'] = wasmExports['lc_cc20_drng'].value;
+  _lc_kmac256_drng = Module['_lc_kmac256_drng'] = wasmExports['lc_kmac256_drng'].value;
+  _lc_cshake256_drng = Module['_lc_cshake256_drng'] = wasmExports['lc_cshake256_drng'].value;
+  _lc_xdrbg256_drng = Module['_lc_xdrbg256_drng'] = wasmExports['lc_xdrbg256_drng'].value;
+  _lc_xdrbg512_drng = Module['_lc_xdrbg512_drng'] = wasmExports['lc_xdrbg512_drng'].value;
+  _lc_shake512 = Module['_lc_shake512'] = wasmExports['lc_shake512'].value;
+  _lc_xdrbg128_drng = Module['_lc_xdrbg128_drng'] = wasmExports['lc_xdrbg128_drng'].value;
+  _lc_ascon_xof = Module['_lc_ascon_xof'] = wasmExports['lc_ascon_xof'].value;
+  _lc_hmac_drbg = Module['_lc_hmac_drbg'] = wasmExports['lc_hmac_drbg'].value;
+  _lc_ctr_drbg = Module['_lc_ctr_drbg'] = wasmExports['lc_ctr_drbg'].value;
+  _lc_aes_ctr = Module['_lc_aes_ctr'] = wasmExports['lc_aes_ctr'].value;
+  _lc_seeded_rng_internal = Module['_lc_seeded_rng_internal'] = wasmExports['lc_seeded_rng_internal'].value;
+  _lc_sha256 = Module['_lc_sha256'] = wasmExports['lc_sha256'].value;
+  _lc_sha256_c = Module['_lc_sha256_c'] = wasmExports['lc_sha256_c'].value;
+  _lc_sha256_shani = Module['_lc_sha256_shani'] = wasmExports['lc_sha256_shani'].value;
+  _lc_sha256_avx2 = Module['_lc_sha256_avx2'] = wasmExports['lc_sha256_avx2'].value;
+  _lc_sha256_arm_ce = Module['_lc_sha256_arm_ce'] = wasmExports['lc_sha256_arm_ce'].value;
+  _lc_sha256_arm_neon = Module['_lc_sha256_arm_neon'] = wasmExports['lc_sha256_arm_neon'].value;
+  _lc_sha256_riscv = Module['_lc_sha256_riscv'] = wasmExports['lc_sha256_riscv'].value;
+  _lc_sha256_riscv_zbb = Module['_lc_sha256_riscv_zbb'] = wasmExports['lc_sha256_riscv_zbb'].value;
+  _lc_sha512_c = Module['_lc_sha512_c'] = wasmExports['lc_sha512_c'].value;
+  _lc_sha384_c = Module['_lc_sha384_c'] = wasmExports['lc_sha384_c'].value;
+  _lc_sha384 = Module['_lc_sha384'] = wasmExports['lc_sha384'].value;
+  _lc_sha512_shani = Module['_lc_sha512_shani'] = wasmExports['lc_sha512_shani'].value;
+  _lc_sha384_shani = Module['_lc_sha384_shani'] = wasmExports['lc_sha384_shani'].value;
+  _lc_sha512_avx2 = Module['_lc_sha512_avx2'] = wasmExports['lc_sha512_avx2'].value;
+  _lc_sha384_avx2 = Module['_lc_sha384_avx2'] = wasmExports['lc_sha384_avx2'].value;
+  _lc_sha512_arm_ce = Module['_lc_sha512_arm_ce'] = wasmExports['lc_sha512_arm_ce'].value;
+  _lc_sha384_arm_ce = Module['_lc_sha384_arm_ce'] = wasmExports['lc_sha384_arm_ce'].value;
+  _lc_sha512_arm_neon = Module['_lc_sha512_arm_neon'] = wasmExports['lc_sha512_arm_neon'].value;
+  _lc_sha384_arm_neon = Module['_lc_sha384_arm_neon'] = wasmExports['lc_sha384_arm_neon'].value;
+  _lc_sha512_riscv = Module['_lc_sha512_riscv'] = wasmExports['lc_sha512_riscv'].value;
+  _lc_sha384_riscv = Module['_lc_sha384_riscv'] = wasmExports['lc_sha384_riscv'].value;
+  _lc_sha512_riscv_zbb = Module['_lc_sha512_riscv_zbb'] = wasmExports['lc_sha512_riscv_zbb'].value;
+  _lc_sha384_riscv_zbb = Module['_lc_sha384_riscv_zbb'] = wasmExports['lc_sha384_riscv_zbb'].value;
+  _lc_sha3_224_arm_asm = Module['_lc_sha3_224_arm_asm'] = wasmExports['lc_sha3_224_arm_asm'].value;
+  _lc_sha3_224_c = Module['_lc_sha3_224_c'] = wasmExports['lc_sha3_224_c'].value;
+  _lc_sha3_256_c = Module['_lc_sha3_256_c'] = wasmExports['lc_sha3_256_c'].value;
+  _lc_sha3_256_arm_asm = Module['_lc_sha3_256_arm_asm'] = wasmExports['lc_sha3_256_arm_asm'].value;
+  _lc_sha3_384_c = Module['_lc_sha3_384_c'] = wasmExports['lc_sha3_384_c'].value;
+  _lc_sha3_384_arm_asm = Module['_lc_sha3_384_arm_asm'] = wasmExports['lc_sha3_384_arm_asm'].value;
+  _lc_sha3_512_c = Module['_lc_sha3_512_c'] = wasmExports['lc_sha3_512_c'].value;
+  _lc_sha3_512_arm_asm = Module['_lc_sha3_512_arm_asm'] = wasmExports['lc_sha3_512_arm_asm'].value;
+  _lc_shake128_c = Module['_lc_shake128_c'] = wasmExports['lc_shake128_c'].value;
+  _lc_shake128_arm_asm = Module['_lc_shake128_arm_asm'] = wasmExports['lc_shake128_arm_asm'].value;
+  _lc_shake256_c = Module['_lc_shake256_c'] = wasmExports['lc_shake256_c'].value;
+  _lc_shake256_arm_asm = Module['_lc_shake256_arm_asm'] = wasmExports['lc_shake256_arm_asm'].value;
+  _lc_shake512_c = Module['_lc_shake512_c'] = wasmExports['lc_shake512_c'].value;
+  _lc_shake512_arm_asm = Module['_lc_shake512_arm_asm'] = wasmExports['lc_shake512_arm_asm'].value;
+  _lc_cshake128_c = Module['_lc_cshake128_c'] = wasmExports['lc_cshake128_c'].value;
+  _lc_cshake128_arm_asm = Module['_lc_cshake128_arm_asm'] = wasmExports['lc_cshake128_arm_asm'].value;
+  _lc_cshake256_c = Module['_lc_cshake256_c'] = wasmExports['lc_cshake256_c'].value;
+  _lc_cshake256_arm_asm = Module['_lc_cshake256_arm_asm'] = wasmExports['lc_cshake256_arm_asm'].value;
+  _lc_sha3_224_arm_ce = Module['_lc_sha3_224_arm_ce'] = wasmExports['lc_sha3_224_arm_ce'].value;
+  _lc_sha3_256_arm_ce = Module['_lc_sha3_256_arm_ce'] = wasmExports['lc_sha3_256_arm_ce'].value;
+  _lc_sha3_384_arm_ce = Module['_lc_sha3_384_arm_ce'] = wasmExports['lc_sha3_384_arm_ce'].value;
+  _lc_sha3_512_arm_ce = Module['_lc_sha3_512_arm_ce'] = wasmExports['lc_sha3_512_arm_ce'].value;
+  _lc_shake128_arm_ce = Module['_lc_shake128_arm_ce'] = wasmExports['lc_shake128_arm_ce'].value;
+  _lc_shake256_arm_ce = Module['_lc_shake256_arm_ce'] = wasmExports['lc_shake256_arm_ce'].value;
+  _lc_shake512_arm_ce = Module['_lc_shake512_arm_ce'] = wasmExports['lc_shake512_arm_ce'].value;
+  _lc_cshake128_arm_ce = Module['_lc_cshake128_arm_ce'] = wasmExports['lc_cshake128_arm_ce'].value;
+  _lc_cshake256_arm_ce = Module['_lc_cshake256_arm_ce'] = wasmExports['lc_cshake256_arm_ce'].value;
+  _lc_sha3_224_arm_neon = Module['_lc_sha3_224_arm_neon'] = wasmExports['lc_sha3_224_arm_neon'].value;
+  _lc_sha3_256_arm_neon = Module['_lc_sha3_256_arm_neon'] = wasmExports['lc_sha3_256_arm_neon'].value;
+  _lc_sha3_384_arm_neon = Module['_lc_sha3_384_arm_neon'] = wasmExports['lc_sha3_384_arm_neon'].value;
+  _lc_sha3_512_arm_neon = Module['_lc_sha3_512_arm_neon'] = wasmExports['lc_sha3_512_arm_neon'].value;
+  _lc_shake128_arm_neon = Module['_lc_shake128_arm_neon'] = wasmExports['lc_shake128_arm_neon'].value;
+  _lc_shake256_arm_neon = Module['_lc_shake256_arm_neon'] = wasmExports['lc_shake256_arm_neon'].value;
+  _lc_shake512_arm_neon = Module['_lc_shake512_arm_neon'] = wasmExports['lc_shake512_arm_neon'].value;
+  _lc_cshake128_arm_neon = Module['_lc_cshake128_arm_neon'] = wasmExports['lc_cshake128_arm_neon'].value;
+  _lc_cshake256_arm_neon = Module['_lc_cshake256_arm_neon'] = wasmExports['lc_cshake256_arm_neon'].value;
+  _lc_sha3_224_avx512 = Module['_lc_sha3_224_avx512'] = wasmExports['lc_sha3_224_avx512'].value;
+  _lc_sha3_256_avx512 = Module['_lc_sha3_256_avx512'] = wasmExports['lc_sha3_256_avx512'].value;
+  _lc_sha3_384_avx512 = Module['_lc_sha3_384_avx512'] = wasmExports['lc_sha3_384_avx512'].value;
+  _lc_sha3_512_avx512 = Module['_lc_sha3_512_avx512'] = wasmExports['lc_sha3_512_avx512'].value;
+  _lc_shake128_avx512 = Module['_lc_shake128_avx512'] = wasmExports['lc_shake128_avx512'].value;
+  _lc_shake256_avx512 = Module['_lc_shake256_avx512'] = wasmExports['lc_shake256_avx512'].value;
+  _lc_shake512_avx512 = Module['_lc_shake512_avx512'] = wasmExports['lc_shake512_avx512'].value;
+  _lc_cshake128_avx512 = Module['_lc_cshake128_avx512'] = wasmExports['lc_cshake128_avx512'].value;
+  _lc_cshake256_avx512 = Module['_lc_cshake256_avx512'] = wasmExports['lc_cshake256_avx512'].value;
+  _lc_sha3_224_avx2 = Module['_lc_sha3_224_avx2'] = wasmExports['lc_sha3_224_avx2'].value;
+  _lc_sha3_256_avx2 = Module['_lc_sha3_256_avx2'] = wasmExports['lc_sha3_256_avx2'].value;
+  _lc_sha3_384_avx2 = Module['_lc_sha3_384_avx2'] = wasmExports['lc_sha3_384_avx2'].value;
+  _lc_sha3_512_avx2 = Module['_lc_sha3_512_avx2'] = wasmExports['lc_sha3_512_avx2'].value;
+  _lc_shake128_avx2 = Module['_lc_shake128_avx2'] = wasmExports['lc_shake128_avx2'].value;
+  _lc_shake256_avx2 = Module['_lc_shake256_avx2'] = wasmExports['lc_shake256_avx2'].value;
+  _lc_shake512_avx2 = Module['_lc_shake512_avx2'] = wasmExports['lc_shake512_avx2'].value;
+  _lc_cshake128_avx2 = Module['_lc_cshake128_avx2'] = wasmExports['lc_cshake128_avx2'].value;
+  _lc_cshake256_avx2 = Module['_lc_cshake256_avx2'] = wasmExports['lc_cshake256_avx2'].value;
+  _lc_sha3_224_riscv_asm = Module['_lc_sha3_224_riscv_asm'] = wasmExports['lc_sha3_224_riscv_asm'].value;
+  _lc_sha3_256_riscv_asm = Module['_lc_sha3_256_riscv_asm'] = wasmExports['lc_sha3_256_riscv_asm'].value;
+  _lc_sha3_384_riscv_asm = Module['_lc_sha3_384_riscv_asm'] = wasmExports['lc_sha3_384_riscv_asm'].value;
+  _lc_sha3_512_riscv_asm = Module['_lc_sha3_512_riscv_asm'] = wasmExports['lc_sha3_512_riscv_asm'].value;
+  _lc_shake128_riscv_asm = Module['_lc_shake128_riscv_asm'] = wasmExports['lc_shake128_riscv_asm'].value;
+  _lc_shake256_riscv_asm = Module['_lc_shake256_riscv_asm'] = wasmExports['lc_shake256_riscv_asm'].value;
+  _lc_shake512_riscv_asm = Module['_lc_shake512_riscv_asm'] = wasmExports['lc_shake512_riscv_asm'].value;
+  _lc_cshake128_riscv_asm = Module['_lc_cshake128_riscv_asm'] = wasmExports['lc_cshake128_riscv_asm'].value;
+  _lc_cshake256_riscv_asm = Module['_lc_cshake256_riscv_asm'] = wasmExports['lc_cshake256_riscv_asm'].value;
+  _lc_sha3_224_riscv_asm_zbb = Module['_lc_sha3_224_riscv_asm_zbb'] = wasmExports['lc_sha3_224_riscv_asm_zbb'].value;
+  _lc_sha3_256_riscv_asm_zbb = Module['_lc_sha3_256_riscv_asm_zbb'] = wasmExports['lc_sha3_256_riscv_asm_zbb'].value;
+  _lc_sha3_384_riscv_asm_zbb = Module['_lc_sha3_384_riscv_asm_zbb'] = wasmExports['lc_sha3_384_riscv_asm_zbb'].value;
+  _lc_sha3_512_riscv_asm_zbb = Module['_lc_sha3_512_riscv_asm_zbb'] = wasmExports['lc_sha3_512_riscv_asm_zbb'].value;
+  _lc_shake128_riscv_asm_zbb = Module['_lc_shake128_riscv_asm_zbb'] = wasmExports['lc_shake128_riscv_asm_zbb'].value;
+  _lc_shake256_riscv_asm_zbb = Module['_lc_shake256_riscv_asm_zbb'] = wasmExports['lc_shake256_riscv_asm_zbb'].value;
+  _lc_shake512_riscv_asm_zbb = Module['_lc_shake512_riscv_asm_zbb'] = wasmExports['lc_shake512_riscv_asm_zbb'].value;
+  _lc_cshake128_riscv_asm_zbb = Module['_lc_cshake128_riscv_asm_zbb'] = wasmExports['lc_cshake128_riscv_asm_zbb'].value;
+  _lc_cshake256_riscv_asm_zbb = Module['_lc_cshake256_riscv_asm_zbb'] = wasmExports['lc_cshake256_riscv_asm_zbb'].value;
+  _lc_sha3_224 = Module['_lc_sha3_224'] = wasmExports['lc_sha3_224'].value;
+  _lc_cshake128 = Module['_lc_cshake128'] = wasmExports['lc_cshake128'].value;
+  _lc_ascon_256_c = Module['_lc_ascon_256_c'] = wasmExports['lc_ascon_256_c'].value;
+  _lc_ascon_128a_c = Module['_lc_ascon_128a_c'] = wasmExports['lc_ascon_128a_c'].value;
+  _lc_ascon_xof_c = Module['_lc_ascon_xof_c'] = wasmExports['lc_ascon_xof_c'].value;
+  _lc_ascon_256 = Module['_lc_ascon_256'] = wasmExports['lc_ascon_256'].value;
+  _lc_ascon_256_avx512 = Module['_lc_ascon_256_avx512'] = wasmExports['lc_ascon_256_avx512'].value;
+  _lc_ascon_128a_avx512 = Module['_lc_ascon_128a_avx512'] = wasmExports['lc_ascon_128a_avx512'].value;
+  _lc_ascon_xof_avx512 = Module['_lc_ascon_xof_avx512'] = wasmExports['lc_ascon_xof_avx512'].value;
+  _lc_ascon_256_arm_neon = Module['_lc_ascon_256_arm_neon'] = wasmExports['lc_ascon_256_arm_neon'].value;
+  _lc_ascon_128a_arm_neon = Module['_lc_ascon_128a_arm_neon'] = wasmExports['lc_ascon_128a_arm_neon'].value;
+  _lc_ascon_xof_arm_neon = Module['_lc_ascon_xof_arm_neon'] = wasmExports['lc_ascon_xof_arm_neon'].value;
+  _lc_aes_sbox = Module['_lc_aes_sbox'] = wasmExports['lc_aes_sbox'].value;
+  _lc_aes_ct = Module['_lc_aes_ct'] = wasmExports['lc_aes_ct'].value;
+  _lc_aes_c = Module['_lc_aes_c'] = wasmExports['lc_aes_c'].value;
+  _lc_aes_aesni = Module['_lc_aes_aesni'] = wasmExports['lc_aes_aesni'].value;
+  _lc_aes_armce = Module['_lc_aes_armce'] = wasmExports['lc_aes_armce'].value;
+  _lc_aes_riscv64 = Module['_lc_aes_riscv64'] = wasmExports['lc_aes_riscv64'].value;
+  _lc_chacha20_neon = Module['_lc_chacha20_neon'] = wasmExports['lc_chacha20_neon'].value;
+  _lc_chacha20_avx512 = Module['_lc_chacha20_avx512'] = wasmExports['lc_chacha20_avx512'].value;
+  _lc_chacha20_avx2 = Module['_lc_chacha20_avx2'] = wasmExports['lc_chacha20_avx2'].value;
+  _lc_chacha20_riscv64_v_zbb = Module['_lc_chacha20_riscv64_v_zbb'] = wasmExports['lc_chacha20_riscv64_v_zbb'].value;
+  _lc_chacha20_c = Module['_lc_chacha20_c'] = wasmExports['lc_chacha20_c'].value;
+  _lc_x509_composite_sig_prefix = Module['_lc_x509_composite_sig_prefix'] = wasmExports['lc_x509_composite_sig_prefix'].value;
+  _lc_hkdf_rng = Module['_lc_hkdf_rng'] = wasmExports['lc_hkdf_rng'].value;
+  _lc_kdf_ctr_rng = Module['_lc_kdf_ctr_rng'] = wasmExports['lc_kdf_ctr_rng'].value;
+  _dilithium_zetas = Module['_dilithium_zetas'] = wasmExports['dilithium_zetas'].value;
+  _lc_aes_cbc_c = Module['_lc_aes_cbc_c'] = wasmExports['lc_aes_cbc_c'].value;
+  _lc_mode_cbc_c = Module['_lc_mode_cbc_c'] = wasmExports['lc_mode_cbc_c'].value;
+  _lc_aes_cbc_aesni = Module['_lc_aes_cbc_aesni'] = wasmExports['lc_aes_cbc_aesni'].value;
+  _lc_aes_cbc_armce = Module['_lc_aes_cbc_armce'] = wasmExports['lc_aes_cbc_armce'].value;
+  _lc_aes_cbc_riscv64 = Module['_lc_aes_cbc_riscv64'] = wasmExports['lc_aes_cbc_riscv64'].value;
+  _lc_aes_ctr_c = Module['_lc_aes_ctr_c'] = wasmExports['lc_aes_ctr_c'].value;
+  _lc_mode_ctr_c = Module['_lc_mode_ctr_c'] = wasmExports['lc_mode_ctr_c'].value;
+  _lc_aes_ctr_aesni = Module['_lc_aes_ctr_aesni'] = wasmExports['lc_aes_ctr_aesni'].value;
+  _lc_aes_ctr_armce = Module['_lc_aes_ctr_armce'] = wasmExports['lc_aes_ctr_armce'].value;
+  _lc_aes_ctr_riscv64 = Module['_lc_aes_ctr_riscv64'] = wasmExports['lc_aes_ctr_riscv64'].value;
+  _lc_aes_kw_c = Module['_lc_aes_kw_c'] = wasmExports['lc_aes_kw_c'].value;
+  _lc_mode_kw_c = Module['_lc_mode_kw_c'] = wasmExports['lc_mode_kw_c'].value;
+  _lc_aes_kw = Module['_lc_aes_kw'] = wasmExports['lc_aes_kw'].value;
+  _lc_aes_kw_aesni = Module['_lc_aes_kw_aesni'] = wasmExports['lc_aes_kw_aesni'].value;
+  _lc_aes_kw_armce = Module['_lc_aes_kw_armce'] = wasmExports['lc_aes_kw_armce'].value;
+  _lc_aes_kw_riscv64 = Module['_lc_aes_kw_riscv64'] = wasmExports['lc_aes_kw_riscv64'].value;
+  _lc_aes_xts_c = Module['_lc_aes_xts_c'] = wasmExports['lc_aes_xts_c'].value;
+  _lc_mode_xts_c = Module['_lc_mode_xts_c'] = wasmExports['lc_mode_xts_c'].value;
+  _lc_aes_xts = Module['_lc_aes_xts'] = wasmExports['lc_aes_xts'].value;
+  _lc_aes_xts_aesni = Module['_lc_aes_xts_aesni'] = wasmExports['lc_aes_xts_aesni'].value;
+  _lc_aes_xts_armce = Module['_lc_aes_xts_armce'] = wasmExports['lc_aes_xts_armce'].value;
+  _lc_aes_xts_riscv64 = Module['_lc_aes_xts_riscv64'] = wasmExports['lc_aes_xts_riscv64'].value;
+  _lc_kmac_rng = Module['_lc_kmac_rng'] = wasmExports['lc_kmac_rng'].value;
+  ___environ = Module['___environ'] = wasmExports['__environ'].value;
+  ____environ = Module['____environ'] = wasmExports['___environ'].value;
+  __environ = Module['__environ'] = wasmExports['_environ'].value;
+  _environ = Module['_environ'] = wasmExports['environ'].value;
+  ___stdin_used = Module['___stdin_used'] = wasmExports['__stdin_used'].value;
+  ___stdout_used = Module['___stdout_used'] = wasmExports['__stdout_used'].value;
+  ___stderr_used = Module['___stderr_used'] = wasmExports['__stderr_used'].value;
+  ___tzname = Module['___tzname'] = wasmExports['__tzname'].value;
+  _timezone = Module['_timezone'] = wasmExports['timezone'].value;
+  _daylight = Module['_daylight'] = wasmExports['daylight'].value;
+  ___timezone = Module['___timezone'] = wasmExports['__timezone'].value;
+  ___daylight = Module['___daylight'] = wasmExports['__daylight'].value;
+  _tzname = Module['_tzname'] = wasmExports['tzname'].value;
+  ___default_stacksize = Module['___default_stacksize'] = wasmExports['__default_stacksize'].value;
+  ___default_guardsize = Module['___default_guardsize'] = wasmExports['__default_guardsize'].value;
+  ___libc = Module['___libc'] = wasmExports['__libc'].value;
+  ___hwcap = Module['___hwcap'] = wasmExports['__hwcap'].value;
+  ___log_data = Module['___log_data'] = wasmExports['__log_data'].value;
+  ___stdio_ofl_lockptr = Module['___stdio_ofl_lockptr'] = wasmExports['__stdio_ofl_lockptr'].value;
+  ___stdout_FILE = Module['___stdout_FILE'] = wasmExports['__stdout_FILE'].value;
+  ___stack_high = Module['___stack_high'] = wasmExports['__stack_high'].value;
+  ___stack_low = Module['___stack_low'] = wasmExports['__stack_low'].value;
+  ___sig_pending = Module['___sig_pending'] = wasmExports['__sig_pending'].value;
+  ___sig_actions = Module['___sig_actions'] = wasmExports['__sig_actions'].value;
+  ___stderr_FILE = Module['___stderr_FILE'] = wasmExports['__stderr_FILE'].value;
+  ___tls_locale = Module['___tls_locale'] = wasmExports['__tls_locale'].value;
+  ___heap_base = Module['___heap_base'] = wasmExports['__heap_base'].value;
+  ___data_end = Module['___data_end'] = wasmExports['__data_end'].value;
+  ___rodata_start = Module['___rodata_start'] = wasmExports['__rodata_start'].value;
+  ___rodata_end = Module['___rodata_end'] = wasmExports['__rodata_end'].value;
+  ___global_base = Module['___global_base'] = wasmExports['__global_base'].value;
+  ___heap_end = Module['___heap_end'] = wasmExports['__heap_end'].value;
+  ___wasm_first_page_end = Module['___wasm_first_page_end'] = wasmExports['__wasm_first_page_end'].value;
+  ___tls_base = Module['___tls_base'] = wasmExports['__tls_base'].value;
+}
+
+var wasmImports = {
+  /** @export */
+  __assert_fail: ___assert_fail,
+  /** @export */
+  __call_sighandler: ___call_sighandler,
+  /** @export */
+  __syscall_chmod: ___syscall_chmod,
+  /** @export */
+  __syscall_faccessat: ___syscall_faccessat,
+  /** @export */
+  __syscall_fchmod: ___syscall_fchmod,
+  /** @export */
+  __syscall_fchown32: ___syscall_fchown32,
+  /** @export */
+  __syscall_fcntl64: ___syscall_fcntl64,
+  /** @export */
+  __syscall_fstat64: ___syscall_fstat64,
+  /** @export */
+  __syscall_ftruncate64: ___syscall_ftruncate64,
+  /** @export */
+  __syscall_getcwd: ___syscall_getcwd,
+  /** @export */
+  __syscall_ioctl: ___syscall_ioctl,
+  /** @export */
+  __syscall_lstat64: ___syscall_lstat64,
+  /** @export */
+  __syscall_mkdirat: ___syscall_mkdirat,
+  /** @export */
+  __syscall_newfstatat: ___syscall_newfstatat,
+  /** @export */
+  __syscall_openat: ___syscall_openat,
+  /** @export */
+  __syscall_readlinkat: ___syscall_readlinkat,
+  /** @export */
+  __syscall_rmdir: ___syscall_rmdir,
+  /** @export */
+  __syscall_stat64: ___syscall_stat64,
+  /** @export */
+  __syscall_unlinkat: ___syscall_unlinkat,
+  /** @export */
+  __syscall_utimensat: ___syscall_utimensat,
+  /** @export */
+  _abort_js: __abort_js,
+  /** @export */
+  _emscripten_runtime_keepalive_clear: __emscripten_runtime_keepalive_clear,
+  /** @export */
+  _gmtime_js: __gmtime_js,
+  /** @export */
+  _localtime_js: __localtime_js,
+  /** @export */
+  _mktime_js: __mktime_js,
+  /** @export */
+  _mmap_js: __mmap_js,
+  /** @export */
+  _msync_js: __msync_js,
+  /** @export */
+  _munmap_js: __munmap_js,
+  /** @export */
+  _timegm_js: __timegm_js,
+  /** @export */
+  _tzset_js: __tzset_js,
+  /** @export */
+  clock_time_get: _clock_time_get,
+  /** @export */
+  emscripten_date_now: _emscripten_date_now,
+  /** @export */
+  emscripten_get_heap_max: _emscripten_get_heap_max,
+  /** @export */
+  emscripten_get_now: _emscripten_get_now,
+  /** @export */
+  emscripten_resize_heap: _emscripten_resize_heap,
+  /** @export */
+  environ_get: _environ_get,
+  /** @export */
+  environ_sizes_get: _environ_sizes_get,
+  /** @export */
+  exit: _exit,
+  /** @export */
+  fd_close: _fd_close,
+  /** @export */
+  fd_fdstat_get: _fd_fdstat_get,
+  /** @export */
+  fd_read: _fd_read,
+  /** @export */
+  fd_seek: _fd_seek,
+  /** @export */
+  fd_sync: _fd_sync,
+  /** @export */
+  fd_write: _fd_write,
+  /** @export */
+  proc_exit: _proc_exit,
+  /** @export */
+  random_get: _random_get
+};
+
+
+// include: postamble.js
+// === Auto-generated postamble setup entry stuff ===
+
+async function run() {
+
+  preRun();
+
+  if (runDependencies) {
+    await resolveRunDependencies();
+  }
+
+  var setStatus = Module['setStatus'];
+  if (setStatus) {
+    setStatus('Running...');
+    // Yield to the event loop to allow the browser to paint "Running..."
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    // Then we want to clear the status text, but only after the rest of this function runs.
+    setTimeout(setStatus, 1, '');
+  }
+
+  if (ABORT) return;
+
+  initRuntime();
+
+  Module['onRuntimeInitialized']?.();
+
+  postRun();
+}
+
+var wasmExports;
+
+// In modularize mode the generated code is within a factory function so we
+// can use await here (since it's not top-level-await).
+wasmExports = await createWasm();
+await run();
+
+// end include: postamble.js
+
+// include: postamble_modularize.js
+// In MODULARIZE mode we wrap the generated code in a factory function
+// and return either the Module itself, or a promise of the module.
+
+// end include: postamble_modularize.js
+
+
+
+    return Module;
+  };
+})();
+
+// Export using a UMD style export, or ES6 exports if selected
+if (typeof exports === 'object' && typeof module === 'object') {
+  module.exports = Sqlite3Wasm;
+  // This default export looks redundant, but it allows TS to import this
+  // commonjs style module.
+  module.exports.default = Sqlite3Wasm;
+} else if (typeof define === 'function' && define['amd'])
+  define([], () => Sqlite3Wasm);
+
