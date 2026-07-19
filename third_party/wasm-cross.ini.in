@@ -1,0 +1,25 @@
+# Meson cross-compilation file for building the vendored leancrypto
+# submodule (third_party/leancrypto) for WebAssembly via Emscripten.
+# See wasm/README.md and tool/build-wasm.sh, which generates the real
+# wasm-cross.ini from this template by substituting the @EMCC@/@EMAR@/
+# @EMRANLIB@ placeholders with the actual resolved toolchain paths
+# (either from $PATH or the system emscripten package, e.g.
+# /usr/lib/emscripten on Arch/CachyOS) -- do not edit the generated
+# file directly, edit this template instead.
+
+[binaries]
+c      = '@EMCC@'
+ar     = '@EMAR@'
+ranlib = '@EMRANLIB@'
+
+[properties]
+# Meson must not try to run compiled binaries (e.g. for compiler sanity
+# checks) during configuration -- they are wasm32 binaries that cannot
+# execute on the build host.
+needs_exe_wrapper = true
+
+[host_machine]
+system     = 'emscripten'
+cpu_family = 'wasm32'
+cpu        = 'wasm32'
+endian     = 'little'

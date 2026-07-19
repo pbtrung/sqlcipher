@@ -39,3 +39,9 @@ xcuserdata/*
 /libsqlcipher.la
 /.DS_Store
 /third_party/leancrypto/build
+/third_party/leancrypto/build-wasm
+/third_party/wasm-cross.ini
+/wasm/.gen
+/wasm/.emcc-wrapper.sh
+/wasm/sqlite3-wasm.js
+/wasm/sqlite3-wasm.wasm

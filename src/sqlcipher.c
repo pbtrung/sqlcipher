@@ -420,6 +420,18 @@ static void sqlcipher_fini(void) {
   #else
     static void (*const sqlcipher_fini_func)(void) __attribute__((used, section("__DATA,__mod_term_func"))) = sqlcipher_fini;
   #endif
+#elif defined(__EMSCRIPTEN__)
+  /* Emscripten/WASM's object format has no real ELF .fini_array section
+  ** semantics -- placing a function pointer directly into a
+  ** section(".fini_array") variable (the generic Linux/ELF path below)
+  ** crashes the LLVM wasm32 backend outright ("error in backend:
+  ** .fini_array sections are unsupported"), confirmed while building
+  ** wasm/sqlite3-wasm.js (see tool/build-wasm.sh). __attribute__((destructor))
+  ** is properly supported under Emscripten (it's how Emscripten runs its
+  ** own C/C++ runtime teardown), so use that instead, same as the ASan
+  ** case on Apple platforms above. */
+  static void sqlcipher_cleanup_destructor(void) __attribute__((destructor));
+  static void sqlcipher_cleanup_destructor(void) { sqlcipher_fini(); }
 #else
 static void (*const sqlcipher_fini_func)(void) __attribute__((used, section(".fini_array"))) = sqlcipher_fini;
 #endif
