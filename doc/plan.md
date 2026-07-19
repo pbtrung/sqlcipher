@@ -154,14 +154,69 @@ leancrypto migration and is independent of which crypto provider is used
 -- it is not fixed here, and is recorded in `doc/crypto.md`'s "Known
 limitations" so it isn't mistaken for a crypto regression in the future.
 
-## Notes on WASM (future work, out of scope now)
+## WASM build (built as a follow-up; see wasm/README.md for the full writeup)
 
-leancrypto's Meson build has a `disable-asm` option that compiles only
-portable C (no architecture-specific assembly), which is the natural
-starting point for a future Emscripten cross-build via a custom Meson
-cross-file. This has not been validated as part of this work (scope is
-Linux-only); it is recorded here so a future WASM port has a documented
-starting hypothesis rather than starting from zero.
+The hypothesis recorded here originally ("leancrypto's `disable-asm` option
+is the natural starting point for a future Emscripten cross-build") was
+followed through and built: `tool/build-wasm.sh` compiles the SQLCipher
+amalgamation and the *entire* vendored leancrypto submodule into a single
+WASM module (`wasm/sqlcipher.{js,wasm}`), exporting both SQLite/
+SQLCipher's `sqlite3_*` API and leancrypto's own `lc_*` API (via
+`-Wl,--whole-archive`/`-s EXPORT_ALL=1`), following the scope and structure
+of the reference [secbits/leancrypto](https://github.com/pbtrung/secbits/tree/main/leancrypto)
+WASM build. Verified end to end under Node.js (`wasm/test-roundtrip.mjs`):
+database round-trip, wrong/undersized key rejection, and leancrypto's raw
+AEAD/HKDF API all work correctly compiled to WASM.
+
+Two real, previously-unknown portability issues surfaced and were fixed
+along the way (neither specific to this project's narrow native-build
+option set — both are general facts about compiling this code for WASM):
+
+1. **A per-page-salt RNG gap.** `src/crypto_leancrypto.c`'s
+   `sqlcipher_leancrypto_random()` called the raw `getrandom(2)` Linux
+   syscall directly (see the "Post-implementation hardening" section
+   above for why), which does not exist under Emscripten. Fixed with an
+   `#ifdef __EMSCRIPTEN__` branch using Emscripten's `getentropy()` libc
+   shim instead (backed by the browser's `crypto.getRandomValues()`/
+   Node's `crypto.randomFillSync()`), chunked to ≤256 bytes per POSIX's
+   cap — the native Linux `getrandom()` path is untouched.
+   `src/crypto_leancrypto_rng_wasm.c` was also vendored (adapted from the
+   reference build's own `seeded_rng_wasm.c`), supplying the low-level
+   entropy symbols leancrypto's own `drng/src/seeded_rng.c` expects on
+   platforms with no OS-specific backend -- defensively, since this
+   project's leancrypto configuration (both native and, originally, WASM)
+   never compiled `seeded_rng.c` in at all (no DRNG option was enabled);
+   see point 3 below for why the WASM build's options changed.
+2. **A genuine, pre-existing WASM-compilation bug in `src/sqlcipher.c`**,
+   unrelated to leancrypto or this migration: its non-Windows/non-Apple
+   cleanup-registration path placed a function pointer directly into a
+   `section(".fini_array")` variable, which crashes the LLVM wasm32
+   backend outright ("`.fini_array` sections are unsupported") since
+   Emscripten's object format has no real ELF `.fini_array` semantics.
+   Fixed with an `__EMSCRIPTEN__` branch using
+   `__attribute__((destructor))` instead (already the pattern used for
+   the ASan-on-Apple case in the same `#if` chain).
+3. **leancrypto's own `meson.build`, unmodified, does not cross-compile
+   cleanly for wasm32 as-is**: it unconditionally probes
+   `cc.has_argument('-flto')`/`'-ffat-lto-objects'` and adds them if the
+   probe returns true, which it incorrectly does for `emcc` (these flags
+   fail at actual wasm32 compile time: "unsupported option ... for
+   target wasm32-unknown-emscripten"). Fixed by generating a thin
+   compiler-wrapper script around `emcc` that filters those flags (plus
+   `-fcf-protection=*`/`-mbranch-protection=*`) before invoking the real
+   `emcc` -- entirely in `tool/build-wasm.sh`'s own tooling, so the
+   pinned, vendored submodule's `meson.build` stays untouched. Separately,
+   reusing the *native* build's narrow Ascon-Keccak/SHA3/HKDF-only Meson
+   option set for WASM failed to link (`undefined symbol: lc_rng_zero`
+   from HKDF's RNG-support code, `undefined symbol: lc_aes` from the
+   generic symmetric-cipher dispatcher -- both real symbols only compiled
+   in when some DRNG/AES option is enabled, and `-Wl,--whole-archive`
+   pulls in every object regardless of whether this project's own code
+   calls it). Resolved by keeping leancrypto's *default* (mostly
+   "enabled") option set for the WASM build specifically, which both
+   supplies those symbols for free and gives the requested full leancrypto
+   API surface as a side effect -- see `tool/build-wasm.sh` and
+   `wasm/README.md` for the exact option list.
 
 ## Verification
 

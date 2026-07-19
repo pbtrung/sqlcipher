@@ -43,5 +43,5 @@ xcuserdata/*
 /third_party/wasm-cross.ini
 /wasm/.gen
 /wasm/.emcc-wrapper.sh
-/wasm/sqlite3-wasm.js
-/wasm/sqlite3-wasm.wasm
+/wasm/sqlcipher.js
+/wasm/sqlcipher.wasm

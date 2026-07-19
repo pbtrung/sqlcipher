@@ -161,10 +161,12 @@ a hard authentication failure.
   add the page number to the AD (and to the HKDF `info` strings) to close
   this gap without changing the on-disk field layout.
 - No migration path from AES-256 SQLCipher databases.
-- Linux-only; no Windows/macOS build path is provided or supported.
-- No WASM/Emscripten build has been validated for the vendored leancrypto
-  submodule (see `doc/plan.md` for notes on a possible future path via
-  Meson cross-files).
+- Linux-only for the native build; no Windows/macOS build path is provided
+  or supported. There is also an Emscripten/WASM build (`tool/build-wasm.sh`,
+  see `wasm/README.md`) that compiles the same codec + leancrypto to a
+  WASM module and has been verified end to end under Node.js; it has no
+  persistent storage backend (Emscripten's in-memory MEMFS only) and has
+  not been tested in an actual browser.
 - **Rare, pre-existing FTS5 test flakiness under heavy statement-journal
   churn, unrelated to this migration.** `ext/fts5/test/fts5aa.test`'s test
   14.2 (200 iterations of `BEGIN; CREATE TABLE; ROLLBACK;` inside a live

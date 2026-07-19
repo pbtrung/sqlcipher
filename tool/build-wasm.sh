@@ -200,7 +200,7 @@ cp "$GEN_DIR/build/sqlite3.h" "$GEN_DIR/sqlite3.h"
 #    src/crypto_leancrypto_rng_wasm.c is included here defensively, in case
 #    whole-archive pulls in any object with an unresolved reference to it.
 # ---------------------------------------------------------------------------
-echo "==> Linking wasm/sqlite3-wasm.js + .wasm"
+echo "==> Linking wasm/sqlcipher.js + .wasm"
 
 "$EMCC_WRAPPER" \
 	-O2 -g \
@@ -232,6 +232,6 @@ echo "==> Linking wasm/sqlite3-wasm.js + .wasm"
 	-Wl,--no-gc-sections \
 	-s ALLOW_MEMORY_GROWTH=1 \
 	-s EXPORTED_RUNTIME_METHODS='["ccall","cwrap","getValue","setValue","UTF8ToString","stringToUTF8","lengthBytesUTF8"]' \
-	-o "$OUT_DIR/sqlite3-wasm.js"
+	-o "$OUT_DIR/sqlcipher.js"
 
-echo "Done: $OUT_DIR/sqlite3-wasm.js  $OUT_DIR/sqlite3-wasm.wasm"
+echo "Done: $OUT_DIR/sqlcipher.js  $OUT_DIR/sqlcipher.wasm"

@@ -1,13 +1,13 @@
 // SQLCipher WASM round-trip verification, run under Node.js.
 //
-// Exercises both APIs exported from wasm/sqlite3-wasm.js (built by
+// Exercises both APIs exported from wasm/sqlcipher.js (built by
 // tool/build-wasm.sh): the SQLite/SQLCipher C API (sqlite3_open/key/exec/
 // prepare/step/...) and leancrypto's own raw AEAD/HKDF API (via the
 // wasm/leancrypto_wasm_api.c wrappers). See wasm/README.md.
 //
 // Usage: node wasm/test-roundtrip.mjs
 
-import Sqlite3Wasm from './sqlite3-wasm.js';
+import Sqlite3Wasm from './sqlcipher.js';
 
 const SQLITE_OK = 0;
 const SQLITE_ROW = 100;
