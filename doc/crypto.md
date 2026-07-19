@@ -60,34 +60,36 @@ for that page.
 
 ```
 ciphertext (var)    page_size - reserve_size bytes
+magic (2 bytes)     0x54 0x58 ("TX")
+version (2 bytes)   major.minor, e.g. 0x01 0x00 = v1.0
 salt (64 bytes)     random per page, fresh on every write, HKDF input salt
 tag (64 bytes)      Ascon-Keccak authentication tag
 ```
 
-`salt` and `tag` live in the page's *reserve* region (the same trailing bytes
-SQLite already reserves per page for the codec, exactly as IV+HMAC did in the
-previous AES design) — `reserve_size = salt(64) + tag(64) = 128` bytes, with
+`magic`, `version`, `salt`, and `tag` all live in the page's *reserve* region
+(the same trailing bytes SQLite already reserves per page for the codec,
+exactly as IV+HMAC did in the previous AES design) —
+`reserve_size = magic(2) + version(2) + salt(64) + tag(64) = 132` bytes, with
 no block-size rounding (Ascon-Keccak has no block-alignment requirement).
 This layout is identical for **every** page, including page 1 — there is no
-special per-database salt storage and no plaintext prefix at the start of the
-file (see "Why there is no on-disk plaintext header" below).
+special per-database salt storage and no *leading* plaintext prefix at the
+start of the file (see "Why there is no on-disk plaintext header" below;
+that section is about avoiding a prefix at the *start* of page 1 specifically
+— it does not apply to the reserve region, which was always fully opaque to
+SQLite's own page-1 parsing regardless of what the codec puts there).
+
+`magic` and `version` are written fresh from the fixed `CIPHER_MAGIC_0/1`/
+`CIPHER_VERSION_MAJOR/MINOR` compile-time constants on every encrypt, and
+read back and checked against those same constants on every decrypt (a page
+whose on-disk magic/version don't match is rejected outright, before an AEAD
+call is even attempted) — the same way `salt` is generated fresh on encrypt
+and read back on decrypt.
 
 Additional Data (AD) passed to the AEAD call:
 
 ```
 AD = magic (2) || version (2) || salt (64)   -> 68 bytes total
 ```
-
-`magic` (`0x54 0x58`, "TX") and `version` (major.minor, e.g. `0x01 0x00` =
-v1.0) are **fixed protocol constants baked into the code, not stored on
-disk anywhere**. Both the encrypting and decrypting side already agree on
-them out-of-band (by virtue of running this exact codec version), the same
-way the choice of Ascon-Keccak-512 itself isn't stored per-page either — so
-they only ever appear as constant AAD material, never as on-disk bytes. This
-is a deliberate correction from an earlier version of this document/design,
-which called for a 68-byte on-disk `magic||version||salt` plaintext prefix
-on page 1; that turned out to be incompatible with SQLite's own page-1
-layout (see below) and was dropped before implementation was completed.
 
 ### Why there is no on-disk plaintext header
 
@@ -112,11 +114,12 @@ Because this design derives a fresh, independent key and nonce for **every**
 page from an already-high-entropy master key (see below) rather than
 deriving a single database-wide key from a database-wide salt, there is no
 cryptographic bootstrapping problem that requires any salt to be readable
-before decryption can begin: page 1's own salt and tag live in page 1's own
-reserve region exactly like any other page's, which is already stored in the
-clear (as it must be, to make decryption possible at all) without requiring
-a separate plaintext prefix. Page 1 is therefore encrypted uniformly with
-every other page, with no special-cased plaintext region, no reconstructed
+before decryption can begin: page 1's own magic, version, salt, and tag live
+in page 1's own reserve region exactly like any other page's, which is
+already stored in the clear (as it must be, to make decryption possible at
+all) without requiring a separate leading plaintext prefix. Page 1 is
+therefore encrypted uniformly with every other page, with no special-cased
+plaintext region, no reconstructed
 "fake" header fields, and no data loss.
 
 ## Per-page key/nonce derivation

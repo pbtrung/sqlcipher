@@ -137,14 +137,14 @@ file delete -force test.db
 # ------------------------------------------------------------------------
 # 4. per-page salt uniqueness
 # ------------------------------------------------------------------------
-# reserve_sz = salt(64) + tag(64) = 128 bytes (see doc/crypto.md); the salt
-# lives in the first 64 bytes of that reserve region, at file offset
-# (pgno-1)*page_sz + (page_sz - reserve_sz).
+# reserve_sz = magic(2) + version(2) + salt(64) + tag(64) = 132 bytes (see
+# doc/crypto.md); the salt lives right after the 4-byte magic||version field,
+# at file offset (pgno-1)*page_sz + (page_sz - reserve_sz) + 4.
 set ::PAGE_SZ 4096
-set ::RESERVE_SZ 128
+set ::RESERVE_SZ 132
 set ::SALT_SZ 64
 proc page_salt_offset {pgno} {
-  return [expr {($pgno - 1) * $::PAGE_SZ + ($::PAGE_SZ - $::RESERVE_SZ)}]
+  return [expr {($pgno - 1) * $::PAGE_SZ + ($::PAGE_SZ - $::RESERVE_SZ) + 4}]
 }
 
 do_test leancrypto-different-pages-have-different-salts {

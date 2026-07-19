@@ -1169,10 +1169,11 @@ static void sqlcipher_cipher_ctx_free(codec_ctx* ctx, cipher_ctx **iCtx) {
   sqlcipher_free(c_ctx, sizeof(cipher_ctx));
 }
 
-/* reserve = salt(64) + tag(64) = 128 bytes; no block-size rounding, Ascon-Keccak has no
-** block-alignment requirement. See doc/crypto.md "Per-page blob format". */
+/* reserve = magic(2) + version(2) + salt(64) + tag(64) = 132 bytes; no block-size
+** rounding, Ascon-Keccak has no block-alignment requirement. See doc/crypto.md
+** "Per-page blob format". */
 static int sqlcipher_codec_ctx_reserve_setup(codec_ctx *ctx) {
-  ctx->reserve_sz = ctx->salt_sz + ctx->tag_sz;
+  ctx->reserve_sz = 4 + ctx->salt_sz + ctx->tag_sz;
 
   sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_reserve_setup: salt_sz=%d tag_sz=%d reserve=%d",
                 ctx->salt_sz, ctx->tag_sz, ctx->reserve_sz);
@@ -1347,11 +1348,12 @@ static void sqlcipher_codec_ctx_set_error(codec_ctx *ctx, int error) {
 }
 
 /* Read page 1's current on-disk salt (the salt_sz bytes of its reserve region, at file
-** offset page_sz - reserve_sz) directly off disk, for PRAGMA cipher_salt reporting only.
-** Page 1 is not special-cased any more -- its salt lives in its own reserve region exactly
-** like every other page's (see doc/crypto.md "Per-page blob format"), so there is no
-** separate cached/persistent copy of it on codec_ctx: this simply reads it back out of the
-** file on demand. If the file doesn't exist yet or is shorter than one page, a fresh random
+** offset page_sz - reserve_sz + 4, immediately after the 4-byte magic||version field --
+** see doc/crypto.md "Per-page blob format") directly off disk, for PRAGMA cipher_salt
+** reporting only. Page 1 is not special-cased any more -- its salt lives in its own
+** reserve region exactly like every other page's, so there is no separate cached/
+** persistent copy of it on codec_ctx: this simply reads it back out of the file on
+** demand. If the file doesn't exist yet or is shorter than one page, a fresh random
 ** salt is generated purely for reporting purposes; it has no bearing on the real salt that
 ** will be used once page 1 is actually written, since sqlcipher_page_cipher always
 ** generates its own fresh random salt on every encrypt regardless of what this reports. */
@@ -1362,7 +1364,7 @@ static int sqlcipher_codec_ctx_get_page1_salt(codec_ctx *ctx, unsigned char *sal
   if(fd != NULL && fd->pMethods != 0) sqlite3OsFileSize(fd, &file_sz);
 
   if(fd == NULL || fd->pMethods == 0 || file_sz < ctx->page_sz ||
-     sqlite3OsRead(fd, salt, ctx->salt_sz, ctx->page_sz - ctx->reserve_sz) != SQLITE_OK) {
+     sqlite3OsRead(fd, salt, ctx->salt_sz, ctx->page_sz - ctx->reserve_sz + 4) != SQLITE_OK) {
     sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_get_page1_salt: unable to read salt from page 1, generating random value for reporting purposes only");
     if(ctx->provider->random(ctx->provider_ctx, salt, ctx->salt_sz) != SQLITE_OK) {
       sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_get_page1_salt: error retrieving random bytes from provider");
@@ -1495,14 +1497,15 @@ static const char SQLCIPHER_HKDF_NONCE_INFO[] = "sqlcipher-leancrypto-nonce-v1";
  *
  * Every page (including page 1) is stored identically, with no special-cased plaintext
  * region:
- *   [ ciphertext (page_sz - reserve_sz bytes) ][ salt (salt_sz bytes) ][ tag (tag_sz bytes) ]
- * AAD = magic(2) || version(2) || salt(salt_sz), where magic/version are the fixed
- * CIPHER_MAGIC_0/1 and CIPHER_VERSION_MAJOR/MINOR compile-time constants (never stored on
- * disk) and salt is this page's own on-disk salt.
+ *   [ ciphertext (page_sz - reserve_sz bytes) ][ magic(2) ][ version(2) ][ salt(salt_sz) ][ tag(tag_sz) ]
+ * AAD = magic(2) || version(2) || salt(salt_sz). magic/version are always the fixed
+ * CIPHER_MAGIC_0/1 and CIPHER_VERSION_MAJOR/MINOR compile-time constants on write, and are
+ * read back off disk (and checked against those same constants) on read -- see doc/crypto.md
+ * "Per-page blob format".
  */
 static int sqlcipher_page_cipher(codec_ctx *ctx, int for_ctx, Pgno pgno, int mode, int page_sz, unsigned char *in, unsigned char *out) {
   cipher_ctx *c_ctx = for_ctx ? ctx->write_ctx : ctx->read_ctx;
-  unsigned char *salt_in, *salt_out, *tag_in, *tag_out, *out_start;
+  unsigned char *magic_in, *magic_out, *salt_in, *salt_out, *tag_in, *tag_out, *out_start;
   unsigned char aad[4 + CIPHER_MAX_KEY_SZ];
   unsigned char page_key[CIPHER_MAX_KEY_SZ];
   unsigned char page_nonce[CIPHER_MAX_KEY_SZ];
@@ -1510,13 +1513,16 @@ static int sqlcipher_page_cipher(codec_ctx *ctx, int for_ctx, Pgno pgno, int mod
 
   /* calculate some required positions into various buffers */
   size = page_sz - ctx->reserve_sz; /* adjust size to useable size and memset reserve at end of page */
-  salt_out = out + size;
-  salt_in = in + size;
+  magic_out = out + size;
+  magic_in = in + size;
 
-  /* the tag is written immediately after the salt. note these pointers are only valid
-     after the salt has been established (below) */
-  tag_in = in + size + ctx->salt_sz;
-  tag_out = out + size + ctx->salt_sz;
+  /* the salt is written immediately after magic||version, and the tag immediately after
+     the salt. note these pointers are only valid after magic||version and the salt have
+     been established (below) */
+  salt_out = out + size + 4;
+  salt_in = in + size + 4;
+  tag_in = in + size + 4 + ctx->salt_sz;
+  tag_out = out + size + 4 + ctx->salt_sz;
   out_start = out; /* note the original position of the output buffer pointer, as out will be rewritten during encryption */
 
   sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "%s: pgno=%d, mode=%d, size=%d", __func__, pgno, mode, size);
@@ -1529,18 +1535,27 @@ static int sqlcipher_page_cipher(codec_ctx *ctx, int for_ctx, Pgno pgno, int mod
   }
 
   if(mode == SQLCIPHER_ENCRYPT) {
+    /* magic||version are always the same fixed constants; write them fresh on every
+       encrypt, same as any other page metadata */
+    magic_out[0] = CIPHER_MAGIC_0;
+    magic_out[1] = CIPHER_MAGIC_1;
+    magic_out[2] = CIPHER_VERSION_MAJOR;
+    magic_out[3] = CIPHER_VERSION_MINOR;
     /* generate a fresh random salt for this page, used both as the HKDF salt and stored
        on disk so it can be recovered on decrypt */
     if(ctx->provider->random(ctx->provider_ctx, salt_out, ctx->salt_sz) != SQLITE_OK) goto error;
   } else { /* SQLCIPHER_DECRYPT */
+    if(magic_in[0] != CIPHER_MAGIC_0 || magic_in[1] != CIPHER_MAGIC_1 ||
+       magic_in[2] != CIPHER_VERSION_MAJOR || magic_in[3] != CIPHER_VERSION_MINOR) {
+      sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: unrecognized magic/version bytes for pgno=%d", __func__, pgno);
+      goto error;
+    }
+    memcpy(magic_out, magic_in, 4); /* copy magic||version from the input to output buffer */
     memcpy(salt_out, salt_in, ctx->salt_sz); /* copy the salt from the input to output buffer */
   }
 
   /* AAD = magic(2) || version(2) || salt(salt_sz), see doc/crypto.md */
-  aad[0] = CIPHER_MAGIC_0;
-  aad[1] = CIPHER_MAGIC_1;
-  aad[2] = CIPHER_VERSION_MAJOR;
-  aad[3] = CIPHER_VERSION_MINOR;
+  memcpy(aad, magic_out, 4);
   memcpy(aad + 4, salt_out, ctx->salt_sz);
   aad_sz = 4 + ctx->salt_sz;
 
