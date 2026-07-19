@@ -136,6 +136,16 @@ proc sqlcipher_short_key {} {
 #
 if {[info command sqlite_orig]==""} {
   rename sqlite3 sqlite_orig
+  # NOTE: this proc body is copied verbatim (via [info body sqlite3]) into
+  # the throwaway child-process Tcl scripts that lock_common.tcl's
+  # write_main_loop()/launch_testfixture() generate for multi-process
+  # locking/concurrency tests (see fts5multiclient.test and similar). Those
+  # child scripts do NOT source tester.tcl and so have no sqlcipher_test_key
+  # proc available -- calling it here would work fine in this interpreter
+  # but throw "invalid command name" in the copied child copy. The default
+  # key is therefore inlined as a self-contained literal (the same value
+  # sqlcipher_test_key 1 would produce) rather than a proc call, exactly
+  # like the historic hardcoded "xyzzy" passphrase this replaced.
   proc sqlite3 {args} {
     if {[llength $args]>=2 && [string index [lindex $args 0] 0]!="-"} {
       # This command is opening a new database connection.
@@ -144,7 +154,7 @@ if {[info command sqlite_orig]==""} {
         set args [concat $args $::G(perm:sqlite3_args)]
       }
       if {[sqlite_orig -has-codec] && ![info exists ::do_not_use_codec]} {
-        lappend args -key [sqlcipher_test_key]
+        lappend args -key x'[string repeat 01 256]'
       }
 
       set res [uplevel 1 sqlite_orig $args]

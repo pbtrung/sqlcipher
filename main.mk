@@ -550,6 +550,9 @@ LEANCRYPTO_LIB = $(LEANCRYPTO_BUILD_DIR)/libleancrypto.a
 # because crypto_leancrypto.c is compiled as its own translation unit -- see
 # the LIBOBJS1 comment above -- so it never sees sqlcipher.c's preprocessor
 # state and needs the macro passed on its own compile command line.
+# drng/api is needed only because kdf/api/lc_hkdf.h transitively includes
+# lc_rng.h -- crypto_leancrypto.c does not call into leancrypto's RNG
+# itself (see random() below).
 LEANCRYPTO_CFLAGS = \
   -DSQLCIPHER_CRYPTO_LEANCRYPTO \
   -I$(LEANCRYPTO_DIR)/aead/api -I$(LEANCRYPTO_DIR)/hash/api \
@@ -560,7 +563,9 @@ LEANCRYPTO_CFLAGS = \
 
 # Only the subsystems actually used (Ascon-Keccak AEAD, SHA3, HKDF) are
 # enabled. PQC algorithms, the GPLv2-licensed X.509/PKCS7/PKCS8 parsers,
-# apps, and tests are disabled to keep the vendored tree minimal and
+# apps, tests, and the drng/entropy subsystem (per-page salts come from
+# SQLite's own sqlite3_randomness() -- see src/crypto_leancrypto.c's
+# random() for why) are disabled to keep the vendored tree minimal and
 # fully permissively-licensed. HMAC is enabled because leancrypto's own
 # HKDF implementation is the standard HMAC-based RFC 5869 construction
 # (parameterized here with SHA3-512) and calls into the generic HMAC
@@ -570,13 +575,7 @@ LEANCRYPTO_CFLAGS = \
 # Ascon-Keccak's own implementation calls into) when at least one of
 # {hash_crypt, symhmac/symkmac, chacha20poly1305, aes_gcm} is also
 # enabled; chacha20poly1305 is the smallest such option and is otherwise
-# unused by this project. xdrbg is enabled because it is the only way to
-# get leancrypto's real OS-entropy-backed lc_seeded_rng compiled in (used
-# by src/crypto_leancrypto.c's random()); with no DRNG algorithm enabled
-# at all, leancrypto only builds a non-random, test-only static RNG
-# stub. xdrbg was chosen over the other DRNG options (AES/HMAC-based
-# DRBGs) because it stays within the SHA3/Keccak family already in use
-# here and needs no extra symmetric-cipher code.
+# unused by this project.
 LEANCRYPTO_MESON_OPTS = \
   --default-library=static \
   -Ddisable-asm=true \
@@ -586,7 +585,7 @@ LEANCRYPTO_MESON_OPTS = \
   -Ddrbg_hash=disabled -Ddrbg_hmac=disabled -Ddrbg_ctr=disabled \
   -Dhash_crypt=disabled -Dhmac=enabled -Dhkdf=enabled \
   -Dkdf_ctr=disabled -Dkdf_fb=disabled -Dkdf_dpi=disabled -Dpbkdf2=disabled \
-  -Dkmac=disabled -Dkmac_drng=disabled -Dcshake_drng=disabled -Dxdrbg=enabled \
+  -Dkmac=disabled -Dkmac_drng=disabled -Dcshake_drng=disabled -Dxdrbg=disabled \
   -Dhotp=disabled -Dtotp=disabled \
   -Ddilithium_87=disabled -Ddilithium_65=disabled -Ddilithium_44=disabled \
   -Ddilithium_ed25519=disabled -Ddilithium_ed448=disabled \

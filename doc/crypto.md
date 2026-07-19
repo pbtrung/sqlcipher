@@ -161,6 +161,19 @@ a hard authentication failure.
 - No WASM/Emscripten build has been validated for the vendored leancrypto
   submodule (see `doc/plan.md` for notes on a possible future path via
   Meson cross-files).
+- **Rare, pre-existing FTS5 test flakiness under heavy statement-journal
+  churn, unrelated to this migration.** `ext/fts5/test/fts5aa.test`'s test
+  14.2 (200 iterations of `BEGIN; CREATE TABLE; ROLLBACK;` inside a live
+  FTS5 MATCH cursor, with a tiny FTS5-internal `pgsz`) fails with "database
+  disk image is malformed" roughly 1 time in 15-60 runs. This was
+  investigated in depth (see `doc/plan.md`) and confirmed, by running the
+  identical test 60+ times against the unmodified pre-migration AES-256/
+  OpenSSL baseline, to fail at a similar (in one comparison, higher) rate
+  there too — it is a latent SQLite/pager/FTS5 interaction issue that
+  predates this migration and is independent of which crypto provider is
+  in use. It is not fixed as part of this work; flagged here for anyone
+  investigating similar-looking failures in the future so they don't
+  mistake it for a crypto regression.
 
 ## Build
 

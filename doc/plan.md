@@ -70,6 +70,90 @@ the source of truth for the final cryptographic design.
 9. **Finalize docs** — reconcile `doc/crypto.md`/`doc/plan.md` with any
    deviations found during implementation; add a `CHANGELOG.md` entry.
 
+## Post-implementation hardening (found during the "full test pass" step)
+
+Running the full `veryquick.test` regression suite (not just the sqlcipher-
+specific files) surfaced three real, low-probability issues that unit-level
+testing didn't catch. Each was root-caused with a reproducer (ASAN, gdb, or
+a baseline comparison) before being fixed in `src/crypto_leancrypto.c` /
+`test/tester.tcl`:
+
+1. **AEAD/HKDF stack-macro memory corruption** (real bug, fixed). Running
+   `ext/fts5/test/fts5aa.test` repeatedly under AddressSanitizer (with
+   `-DSQLCIPHER_OMIT_MALLOC` to let ASAN see raw allocations) reproduced a
+   global-buffer-overflow inside leancrypto's `lc_aead_zero()`, corrupting
+   memory near unrelated leancrypto globals -- but only when reached
+   through SQLite's real, deep pager/journal call stack, never in a
+   shallow standalone stress-test loop calling the same leancrypto APIs
+   thousands of times. The common factor: `lc_aead_encrypt`/`decrypt` used
+   leancrypto's `LC_AK_CTX_ON_STACK_TAGLEN()` stack-allocation macro, and
+   `lc_hkdf()` internally uses the equivalent `LC_HKDF_CTX_ON_STACK()`.
+   Fixed by switching both to leancrypto's heap-allocating equivalents
+   (`lc_ak_alloc_taglen`/`lc_aead_zero_free`, `lc_hkdf_alloc`/
+   `lc_hkdf_extract`/`lc_hkdf_expand`/`lc_hkdf_zero_free`) -- one
+   malloc/free pair per page encrypt/decrypt/derive call, which is an
+   acceptable cost for eliminating a confirmed memory-safety bug.
+2. **Startup deadlock calling `sqlite3_randomness()` from the codec**
+   (real bug, fixed). After switching the original `random()`
+   implementation from leancrypto's `lc_seeded_rng`/xdrbg (itself found,
+   via the same ASAN investigation, to use the same class of buggy
+   stack-macro internally, with genuinely global/shared DRNG state making
+   it worse) to SQLite's own `sqlite3_randomness()`, `testfixture` hung on
+   every single startup. Root-caused with gdb (attach-on-launch, since
+   ptrace-attach to an already-running process was blocked in this
+   sandbox): `sqlcipher_extra_init()` -- which unconditionally calls
+   `provider->random()` once at registration time to seed its own internal
+   secure-wipe PRNG -- was calling `sqlite3_randomness()`, whose first-ever
+   call needs `sqlite3_vfs_find()`, which deadlocks on a mutex that isn't
+   yet safe to acquire from inside SQLite's own
+   `sqlite3_initialize()`/`SQLITE_EXTRA_INIT` call chain. Fixed by using
+   the `getrandom(2)` Linux syscall directly (`<sys/random.h>`) instead --
+   it needs neither leancrypto's DRNG state nor any SQLite-internal
+   machinery, sidestepping both this and issue #1 entirely. `PRAGMA
+   cipher_add_random` became a no-op as a result (`getrandom()` has no
+   concept of caller-supplied entropy to mix in), matching the precedent
+   of the historic CommonCrypto provider, which had no such hook either.
+3. **`tester.tcl` sqlite3-wrapper broke multi-process tests** (real bug,
+   fixed). `ext/fts5/test/fts5multiclient.test` (and similar
+   multi-connection tests using `lock_common.tcl`'s
+   `do_multiclient_test`/`launch_testfixture`) spawn a *separate child
+   `testfixture` process* and copy the current interpreter's `sqlite3`
+   proc body (`[info body sqlite3]`) verbatim into that child's script, to
+   reuse the exact same codec-key-injection behavior there. The historic
+   `-key {xyzzy}` was a self-contained literal, safe to copy anywhere. The
+   updated version's `-key [sqlcipher_test_key]` called a proc that only
+   exists in interpreters that sourced `tester.tcl` -- the child process
+   doesn't, so it failed with "invalid command name". Fixed by inlining
+   the same fixed key as a literal (`x'[string repeat 01 256]'`, using
+   only the always-available `string` builtin) directly in the wrapper
+   body again, matching the original literal-value pattern exactly.
+
+None of these were caught by the sqlcipher-specific test files alone
+(`test/sqlcipher.test`'s 136 tests passed cleanly throughout) -- they only
+surfaced by running the full, broader SQLite regression suite
+(`test/veryquick.test`), which is why that step matters even for a
+change scoped to the codec.
+
+### A fourth issue investigated and NOT fixed (pre-existing, unrelated)
+
+`ext/fts5/test/fts5aa.test` test 14.2 (200 iterations of `BEGIN; CREATE
+TABLE; ROLLBACK;` inside a live FTS5 MATCH cursor, with FTS5's internal
+`pgsz` set to 32) fails intermittently with "database disk image is
+malformed", roughly 1 run in 15-60. This was investigated at length
+(AddressSanitizer showed no memory-safety error for these particular
+failures; debug-level codec logging showed the AEAD decrypt succeeding
+cleanly, meaning the corruption is not a crypto/auth failure; a targeted
+experiment shrinking the AEAD tag to 16 bytes, matching the previous
+scheme's exact reserve-size arithmetic, did not eliminate it). The
+decisive test: running the *identical* reproducer 60 times against the
+unmodified pre-migration AES-256-CBC/HMAC-SHA512/OpenSSL baseline (via a
+git worktree at the commit before this migration started) also failed at
+a similar rate. This confirms it is a latent SQLite/pager/FTS5 interaction
+issue under this specific adversarial access pattern that predates the
+leancrypto migration and is independent of which crypto provider is used
+-- it is not fixed here, and is recorded in `doc/crypto.md`'s "Known
+limitations" so it isn't mistaken for a crypto regression in the future.
+
 ## Notes on WASM (future work, out of scope now)
 
 leancrypto's Meson build has a `disable-asm` option that compiles only

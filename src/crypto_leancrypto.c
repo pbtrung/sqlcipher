@@ -43,7 +43,8 @@
 #include "sqlcipher.h"
 #include "lc_ascon_keccak.h" /* amalgamator: dontcache */
 #include "lc_hkdf.h" /* amalgamator: dontcache */
-#include "lc_rng.h" /* amalgamator: dontcache */
+#include <errno.h> /* amalgamator: dontcache */
+#include <sys/random.h> /* amalgamator: dontcache */
 
 #define LEANCRYPTO_KEY_SZ 64
 #define LEANCRYPTO_NONCE_SZ 64
@@ -69,27 +70,72 @@ static int sqlcipher_leancrypto_fips_status(void *ctx) {
   return 0;
 }
 
-/* generate a defined number of random bytes using leancrypto's seeded,
-** OS-entropy-backed DRNG (lc_seeded_rng); reseeding is handled
-** automatically and transparently by leancrypto. */
+/* generate a defined number of random bytes for per-page salts, via the
+** getrandom(2) Linux syscall directly (this build is Linux-only, see
+** doc/crypto.md).
+**
+** Two other sources were tried and rejected before this one:
+**
+** - leancrypto's own lc_rng_generate(lc_seeded_rng, ...) (xdrbg): found,
+**   via a reproducible AddressSanitizer global-buffer-overflow only
+**   reachable deep inside SQLite's real pager/journal call stack (never in
+**   a shallow standalone stress test), to corrupt memory near leancrypto's
+**   own xdrbg256 global state -- its internal xdrbg implementation uses
+**   the same class of stack-allocation macro that lc_aead_zero()/lc_hkdf()
+**   were also found to misbehave with (see
+**   sqlcipher_leancrypto_aead_encrypt/decrypt and sqlcipher_leancrypto_hkdf
+**   above), compounded by xdrbg's DRNG state being global/shared rather
+**   than per-call.
+** - SQLite's own sqlite3_randomness(): deadlocks the very first time it's
+**   called if that first call happens from within sqlcipher_extra_init()
+**   (which this codec's core unconditionally does once at registration, to
+**   seed its own internal secure-wipe PRNG -- see the
+**   default_provider->random() calls in sqlcipher_extra_init()). That
+**   first call needs sqlite3_vfs_find(), which needs a mutex that isn't
+**   yet safe to acquire from inside SQLite's own sqlite3_initialize() ->
+**   SQLITE_EXTRA_INIT call chain -- confirmed via gdb: the hang is
+**   sqlite3_vfs_find() -> sqlite3_mutex_enter() blocking forever.
+**
+** getrandom() needs no leancrypto state and no SQLite VFS/mutex machinery,
+** sidestepping both issues entirely; nothing about the per-page salt
+** requires it to come from either leancrypto or SQLite's own PRNG. See
+** doc/crypto.md and doc/plan.md for the full investigation notes. */
 static int sqlcipher_leancrypto_random(void *ctx, void *buffer, int length) {
-  if(lc_rng_generate(lc_seeded_rng, NULL, 0, (unsigned char *)buffer, (size_t)length) != 0) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_PROVIDER, "sqlcipher_leancrypto_random: lc_rng_generate() failed");
-    return SQLITE_ERROR;
+  unsigned char *out = (unsigned char *)buffer;
+  int remaining = length;
+
+  while(remaining > 0) {
+    ssize_t rc = getrandom(out, (size_t)remaining, 0);
+    if(rc < 0) {
+      if(errno == EINTR) continue;
+      sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_PROVIDER, "sqlcipher_leancrypto_random: getrandom() failed, errno=%d", errno);
+      return SQLITE_ERROR;
+    }
+    out += rc;
+    remaining -= (int)rc;
   }
   return SQLITE_OK;
 }
 
-/* mix caller-supplied entropy into the seeded DRNG's state */
+/* getrandom(2) draws directly from the kernel CSPRNG and has no concept of
+** caller-supplied additional entropy to mix in, so PRAGMA cipher_add_random
+** is a no-op for this provider, matching the precedent of the historic
+** CommonCrypto provider (which also had no add-entropy hook). */
 static int sqlcipher_leancrypto_add_random(void *ctx, const void *buffer, int length) {
-  if(lc_rng_seed(lc_seeded_rng, (const unsigned char *)buffer, (size_t)length, NULL, 0) != 0) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_PROVIDER, "sqlcipher_leancrypto_add_random: lc_rng_seed() failed");
-    return SQLITE_ERROR;
-  }
   return SQLITE_OK;
 }
 
-/* HKDF-SHA3-512 (RFC 5869 extract-then-expand) in a single call */
+/* HKDF-SHA3-512 (RFC 5869 extract-then-expand).
+**
+** Note: this uses leancrypto's heap-allocating lc_hkdf_alloc()/
+** lc_hkdf_zero_free() plus the separate extract/expand calls, rather than
+** the one-shot lc_hkdf() convenience function. lc_hkdf() is internally
+** implemented via the LC_HKDF_CTX_ON_STACK() stack-allocation macro, the
+** same family of macro that lc_aead_zero() was found (via a reproducible
+** AddressSanitizer global-buffer-overflow, only when called from deep
+** inside SQLite's real call stack) to misbehave with -- see
+** sqlcipher_leancrypto_aead_encrypt/decrypt above and the migration's
+** test-pass notes. Heap allocation avoids the same class of risk here. */
 static int sqlcipher_leancrypto_hkdf(
   void *ctx,
   const unsigned char *ikm, int ikm_sz,
@@ -97,14 +143,39 @@ static int sqlcipher_leancrypto_hkdf(
   const unsigned char *info, int info_sz,
   int key_sz, unsigned char *key
 ) {
-  if(lc_hkdf(lc_sha3_512, ikm, (size_t)ikm_sz, salt, (size_t)salt_sz,
-             info, (size_t)info_sz, key, (size_t)key_sz) != 0) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_PROVIDER, "sqlcipher_leancrypto_hkdf: lc_hkdf() failed");
+  struct lc_hkdf_ctx *hkdf_ctx = NULL;
+  int rc;
+
+  if((rc = lc_hkdf_alloc(lc_sha3_512, &hkdf_ctx)) < 0) {
+    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_PROVIDER, "sqlcipher_leancrypto_hkdf: lc_hkdf_alloc() returned %d", rc);
+    return SQLITE_ERROR;
+  }
+
+  rc = lc_hkdf_extract(hkdf_ctx, ikm, (size_t)ikm_sz, salt, (size_t)salt_sz);
+  if(rc == 0) {
+    rc = lc_hkdf_expand(hkdf_ctx, info, (size_t)info_sz, key, (size_t)key_sz);
+  }
+  lc_hkdf_zero_free(hkdf_ctx);
+
+  if(rc != 0) {
+    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_PROVIDER, "sqlcipher_leancrypto_hkdf: extract/expand returned %d", rc);
     return SQLITE_ERROR;
   }
   return SQLITE_OK;
 }
 
+/*
+** Note: these use leancrypto's heap-allocating lc_ak_alloc_taglen()/
+** lc_aead_zero_free() rather than the LC_AK_CTX_ON_STACK_TAGLEN() stack-
+** allocation macro. The stack macro was found, via a reproducible
+** AddressSanitizer global-buffer-overflow inside lc_aead_zero() (corrupting
+** memory near unrelated leancrypto globals), to misbehave when invoked from
+** deep inside SQLite's real call stack (pager/journal/VDBE frames) even
+** though a shallow standalone stress-test loop never reproduced it -- see
+** the migration's test-pass notes. Heap allocation avoids whatever stack
+** layout/alignment assumption the macro was violating, at the cost of one
+** malloc/free pair per page encrypt/decrypt call.
+*/
 static int sqlcipher_leancrypto_aead_encrypt(
   void *ctx,
   const unsigned char *key, int key_sz,
@@ -115,16 +186,21 @@ static int sqlcipher_leancrypto_aead_encrypt(
   unsigned char *tag, int tag_sz
 ) {
   int rc;
-  LC_AK_CTX_ON_STACK_TAGLEN(aead_ctx, lc_sha3_512, (uint8_t)tag_sz);
+  struct lc_aead_ctx *aead_ctx = NULL;
+
+  if((rc = lc_ak_alloc_taglen(lc_sha3_512, (uint8_t)tag_sz, &aead_ctx)) < 0) {
+    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_PROVIDER, "sqlcipher_leancrypto_aead_encrypt: lc_ak_alloc_taglen() returned %d", rc);
+    return SQLITE_ERROR;
+  }
 
   if((rc = lc_aead_setkey(aead_ctx, key, (size_t)key_sz, nonce, (size_t)nonce_sz)) < 0) {
     sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_PROVIDER, "sqlcipher_leancrypto_aead_encrypt: lc_aead_setkey() returned %d", rc);
-    lc_aead_zero(aead_ctx);
+    lc_aead_zero_free(aead_ctx);
     return SQLITE_ERROR;
   }
 
   rc = lc_aead_encrypt(aead_ctx, in, out, (size_t)in_sz, aad, (size_t)aad_sz, tag, (size_t)tag_sz);
-  lc_aead_zero(aead_ctx);
+  lc_aead_zero_free(aead_ctx);
   if(rc < 0) {
     sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_PROVIDER, "sqlcipher_leancrypto_aead_encrypt: lc_aead_encrypt() returned %d", rc);
     return SQLITE_ERROR;
@@ -142,16 +218,21 @@ static int sqlcipher_leancrypto_aead_decrypt(
   const unsigned char *tag, int tag_sz
 ) {
   int rc;
-  LC_AK_CTX_ON_STACK_TAGLEN(aead_ctx, lc_sha3_512, (uint8_t)tag_sz);
+  struct lc_aead_ctx *aead_ctx = NULL;
+
+  if((rc = lc_ak_alloc_taglen(lc_sha3_512, (uint8_t)tag_sz, &aead_ctx)) < 0) {
+    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_PROVIDER, "sqlcipher_leancrypto_aead_decrypt: lc_ak_alloc_taglen() returned %d", rc);
+    return SQLITE_ERROR;
+  }
 
   if((rc = lc_aead_setkey(aead_ctx, key, (size_t)key_sz, nonce, (size_t)nonce_sz)) < 0) {
     sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_PROVIDER, "sqlcipher_leancrypto_aead_decrypt: lc_aead_setkey() returned %d", rc);
-    lc_aead_zero(aead_ctx);
+    lc_aead_zero_free(aead_ctx);
     return SQLITE_ERROR;
   }
 
   rc = lc_aead_decrypt(aead_ctx, in, out, (size_t)in_sz, aad, (size_t)aad_sz, tag, (size_t)tag_sz);
-  lc_aead_zero(aead_ctx);
+  lc_aead_zero_free(aead_ctx);
   if(rc < 0) {
     /* -EBADMSG (authentication failure) is the expected/common case for a
     ** wrong key or corrupted/tampered page; log at a lower severity than
