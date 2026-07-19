@@ -214,7 +214,7 @@ cp "$GEN_DIR/build/sqlite3.h" "$GEN_DIR/sqlite3.h"
 echo "==> Linking wasm/sqlcipher.js + .wasm"
 
 "$EMCC_WRAPPER" \
-	-O2 -g \
+	-O2 --emit-symbol-map \
 	-DSQLITE_HAS_CODEC \
 	-DSQLITE_EXTRA_INIT=sqlcipher_extra_init \
 	-DSQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown \
