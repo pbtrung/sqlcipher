@@ -524,7 +524,8 @@ SQLCIPHER_OBJ = \
 SQLCIPHER_SRC = \
   $(TOP)/src/sqlcipher.h \
   $(TOP)/src/sqlcipher.c \
-  $(TOP)/src/crypto_leancrypto.c
+  $(TOP)/src/crypto_leancrypto.c \
+  $(TOP)/src/crypto_leancrypto_rng_wasm.c
 
 sqlcipher.o: $(TOP)/src/sqlcipher.c $(DEPS_OBJ_COMMON)
 	$(T.cc.sqlite) $(CFLAGS.libsqlite3) -c $(TOP)/src/sqlcipher.c

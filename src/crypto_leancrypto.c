@@ -44,7 +44,11 @@
 #include "lc_ascon_keccak.h" /* amalgamator: dontcache */
 #include "lc_hkdf.h" /* amalgamator: dontcache */
 #include <errno.h> /* amalgamator: dontcache */
+#ifdef __EMSCRIPTEN__
+#include <unistd.h> /* amalgamator: dontcache */
+#else
 #include <sys/random.h> /* amalgamator: dontcache */
+#endif
 
 #define LEANCRYPTO_KEY_SZ 64
 #define LEANCRYPTO_NONCE_SZ 64
@@ -99,7 +103,33 @@ static int sqlcipher_leancrypto_fips_status(void *ctx) {
 ** getrandom() needs no leancrypto state and no SQLite VFS/mutex machinery,
 ** sidestepping both issues entirely; nothing about the per-page salt
 ** requires it to come from either leancrypto or SQLite's own PRNG. See
-** doc/crypto.md and doc/plan.md for the full investigation notes. */
+** doc/crypto.md and doc/plan.md for the full investigation notes.
+**
+** Under Emscripten/WASM (see wasm/README.md) there is no getrandom(2)
+** syscall at all, so this uses Emscripten's built-in getentropy() libc
+** shim instead (itself backed by the browser's crypto.getRandomValues()
+** or Node's crypto.randomFillSync()) -- the same entropy source used by
+** the reference secbits/leancrypto seeded_rng_wasm.c this project's own
+** src/crypto_leancrypto_rng_wasm.c is adapted from. getentropy() is
+** capped at 256 bytes per POSIX, hence the chunking loop. The native
+** Linux getrandom() path above is untouched by this. */
+#ifdef __EMSCRIPTEN__
+static int sqlcipher_leancrypto_random(void *ctx, void *buffer, int length) {
+  unsigned char *out = (unsigned char *)buffer;
+  int remaining = length;
+
+  while(remaining > 0) {
+    int chunk = remaining > 256 ? 256 : remaining;
+    if(getentropy(out, (size_t)chunk) != 0) {
+      sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_PROVIDER, "sqlcipher_leancrypto_random: getentropy() failed, errno=%d", errno);
+      return SQLITE_ERROR;
+    }
+    out += chunk;
+    remaining -= chunk;
+  }
+  return SQLITE_OK;
+}
+#else
 static int sqlcipher_leancrypto_random(void *ctx, void *buffer, int length) {
   unsigned char *out = (unsigned char *)buffer;
   int remaining = length;
@@ -116,6 +146,7 @@ static int sqlcipher_leancrypto_random(void *ctx, void *buffer, int length) {
   }
   return SQLITE_OK;
 }
+#endif
 
 /* getrandom(2) draws directly from the kernel CSPRNG and has no concept of
 ** caller-supplied additional entropy to mix in, so PRAGMA cipher_add_random
