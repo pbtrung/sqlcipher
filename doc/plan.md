@@ -218,6 +218,49 @@ option set — both are general facts about compiling this code for WASM):
    API surface as a side effect -- see `tool/build-wasm.sh` and
    `wasm/README.md` for the exact option list.
 
+## Performance investigation (built as a follow-up; see doc/crypto.md's "Performance" section)
+
+Prompted by SQLCipher Commercial's own "up to 4x faster than Community"
+marketing claim: is there an equivalent lever available here? Investigated
+before writing any code, by benchmarking first:
+
+- That commercial claim is specifically about AES-NI, a fixed-function x86
+  instruction that makes hardware AES dramatically faster than software AES.
+  This project doesn't use AES (see "Algorithms" in `doc/crypto.md`), so the
+  claim doesn't transfer directly -- there is no "AES-NI for Keccak" on
+  mainstream x86_64/ARM CPUs.
+- leancrypto does ship hand-written AVX2/AVX512 (x86_64) and NEON/ASIMD/ARM
+  Crypto Extensions (ARM) implementations of the Keccak-p[1600] permutation
+  -- the primitive shared by both SHA3-512 (HKDF) and Ascon-Keccak (the
+  page AEAD) -- gated behind a `disable-asm` Meson option this project had
+  set to `true`. Confirmed it does correct **runtime** CPUID/auxval
+  dispatch with a portable-C fallback (`cpufeatures_x86.c`,
+  `sha3_selector.c`'s `LC_CONSTRUCTOR`), so enabling it is safe on any host.
+- Benchmarked before flipping the flag: a direct microbenchmark of
+  `lc_aead_encrypt`/`decrypt` over 4096-byte pages showed only a ~6-7%
+  throughput improvement from AVX2 on this dev machine, not a multiplier.
+  Root cause: leancrypto's AVX2/AVX512 Keccak gets its biggest wins from
+  4-way-parallel *batch* hashing (hashing 4 independent inputs at once),
+  which doesn't apply to SQLCipher's codec -- pages are encrypted/decrypted
+  one at a time, not batched. Also checked whether per-page AEAD/HKDF
+  context allocation (this project heap-allocates rather than using
+  leancrypto's on-stack context macros, see "Post-implementation hardening"
+  above) was hiding a bigger win by comparing timings with the context
+  allocated once and reused across iterations -- it wasn't; the underlying
+  permutation cost, not allocation, dominates either way.
+- Enabled it anyway (`main.mk`'s `LEANCRYPTO_MESON_OPTS`) since the ~6-7%
+  win is real and free with zero correctness risk, verified against
+  `test/sqlcipher*.test` (all pass). Documented the honest comparison
+  in `doc/crypto.md` rather than imply a "4x"-style result this crypto
+  suite's design can't produce.
+- Applied the WASM-appropriate equivalent (`-msimd128`, since leancrypto's
+  x86_64/ARM asm can't target `wasm32` at all) to `tool/build-wasm.sh`'s
+  emcc wrapper. Measured no real improvement there (LLVM's auto-vectorizer
+  doesn't effectively vectorize Keccak's bit-interleaved portable C
+  implementation without explicit SIMD intrinsics) -- kept anyway since
+  it's zero-cost/zero-risk, but documented as a non-improvement rather than
+  a win, in `wasm/README.md`.
+
 ## Verification
 
 - `make testfixture` builds cleanly with no OpenSSL/LibTomCrypt/CommonCrypto
