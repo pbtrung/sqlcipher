@@ -577,9 +577,23 @@ LEANCRYPTO_CFLAGS = \
 # {hash_crypt, symhmac/symkmac, chacha20poly1305, aes_gcm} is also
 # enabled; chacha20poly1305 is the smallest such option and is otherwise
 # unused by this project.
+# disable-asm=false enables leancrypto's hand-written AVX2/AVX512 (x86_64)
+# and NEON/ASIMD (ARM) Keccak-p[1600] permutation implementations, selected
+# at *runtime* via CPUID/auxval feature detection (see
+# third_party/leancrypto/internal/src/cpufeatures_x86.c and
+# hash/src/sha3_selector.c's LC_CONSTRUCTOR) -- falls back to the portable C
+# implementation automatically on any CPU lacking these extensions, so this
+# is safe on every x86_64/ARM host, not just ones with the newer ISA. Since
+# both SHA3-512 (used by HKDF) and Ascon-Keccak (the AEAD; it is
+# parameterized by, and calls straight into, the same lc_hash SHA3-512
+# object) share this one permutation, enabling it accelerates both. See
+# doc/crypto.md's "Performance" section for measured numbers and why this
+# does *not* reproduce SQLCipher Commercial's "~4x faster" AES-NI claim --
+# that claim is specific to hardware-accelerated AES, which this codec does
+# not use.
 LEANCRYPTO_MESON_OPTS = \
   --default-library=static \
-  -Ddisable-asm=true \
+  -Ddisable-asm=false \
   -Dsha2-256=enabled -Dsha2-512=disabled -Dsha3=enabled \
   -Dascon=disabled -Dascon_keccak=enabled \
   -Dchacha20=enabled -Dchacha20poly1305=enabled -Dchacha20_drng=disabled \

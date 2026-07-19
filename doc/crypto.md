@@ -195,3 +195,57 @@ generated via a direct `getrandom(2)` syscall rather than leancrypto's own
 RNG — see `doc/plan.md`'s "Post-implementation hardening" section for why)
 is disabled at `meson setup` time. There is no dependency on a
 system-installed leancrypto package.
+
+## Performance
+
+leancrypto is built with `-Ddisable-asm=false` (`LEANCRYPTO_MESON_OPTS` in
+`main.mk`), enabling its hand-written AVX2/AVX512 (x86_64) and NEON/ASIMD/
+ARM Crypto Extensions (ARM) implementations of the Keccak-p[1600]
+permutation — the core primitive shared by both SHA3-512 (used by HKDF) and
+Ascon-Keccak (the AEAD; it is parameterized by, and calls directly into, the
+same `lc_hash` SHA3-512 object, so accelerating one accelerates both). The
+implementation is selected at **runtime** via CPUID (x86_64) / auxval (ARM)
+feature detection (`third_party/leancrypto/internal/src/cpufeatures_x86.c`,
+`hash/src/sha3_selector.c`'s `LC_CONSTRUCTOR`), falling back to the portable
+C implementation automatically on any CPU lacking these extensions — this is
+safe to ship unconditionally, not just on newer hardware.
+
+**This is a real but modest improvement, not a "4x" one — and it is worth
+being explicit about why.** SQLCipher Commercial's own "up to 4x faster than
+Community" performance claim is specifically about AES-NI: a fixed-function
+x86 instruction that makes *hardware* AES dramatically faster than any
+software AES implementation. This project does not use AES at all (see
+"Algorithms" above), and there is no equivalent fixed-function instruction
+for Keccak-p[1600] on mainstream x86_64/ARM CPUs (unlike AES-NI or SHA-NI).
+leancrypto's AVX2/AVX512 Keccak code is real hand-vectorized assembly, but
+its biggest wins are realized in 4-way-parallel *batch* hashing (hashing 4
+independent inputs at once, e.g. `shake_4x_avx2.c`) — which does not apply
+to SQLCipher's codec, since pages are encrypted/decrypted one at a time. A
+direct, repeatable microbenchmark of `lc_aead_encrypt`/`lc_aead_decrypt`
+over 4096-byte pages (20,000 iterations, context reused across iterations to
+exclude allocation overhead), run on this development machine (Intel Core
+Ultra 7 165H, AVX2 present, no AVX512), gives:
+
+| | portable C (`disable-asm=true`) | AVX2 (`disable-asm=false`) |
+|---|---|---|
+| AEAD encrypt | 211.6 MB/s (19.36 µs/page) | 225.4 MB/s (18.18 µs/page) |
+| AEAD decrypt | 180.4 MB/s (22.71 µs/page) | 193.6 MB/s (21.16 µs/page) |
+| HKDF-SHA3-512 | 4.41 µs/op | 4.31 µs/op |
+
+— roughly a 5-7% throughput improvement for the AEAD (the actual per-page
+codec hot path), and no measurable change for HKDF (its inputs are small
+enough that permutation count, not permutation speed, is not the bottleneck
+either way). Enabling it is a safe, free win with a correct portable-C
+fallback; it is documented here honestly rather than alongside an
+inapplicable "4x" comparison. There is no dependency on batch/parallel page
+processing in this codec that would let the AVX2 4-way Keccak path be used
+directly; doing so would require restructuring the pager's per-page codec
+call into a batched multi-page interface, which is a much larger, riskier
+architectural change and is not undertaken here.
+
+This does not apply to the Emscripten/WASM build (`wasm/README.md`):
+leancrypto's asm files are x86_64/ARM GNU-assembler syntax and cannot target
+`wasm32` at all (`disable-asm` stays `true` there for that reason, not a
+missed optimization), so its performance lever is instead the compiler's
+`-msimd128`/WASM-SIMD auto-vectorization of the same portable C code — see
+`wasm/README.md` for the equivalent measurement.
