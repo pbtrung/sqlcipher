@@ -519,25 +519,17 @@ clean: clean-sanity-check
 # BEGIN SQLCIPHER
 SQLCIPHER_OBJ = \
   sqlcipher.o \
-  crypto_openssl.o \
-  crypto_libtomcrypt.o \
-  crypto_cc.o
+  crypto_leancrypto.o
 
 SQLCIPHER_SRC = \
   $(TOP)/src/sqlcipher.h \
   $(TOP)/src/sqlcipher.c \
-  $(TOP)/src/crypto_libtomcrypt.c \
-  $(TOP)/src/crypto_openssl.c \
-  $(TOP)/src/crypto_cc.c
+  $(TOP)/src/crypto_leancrypto.c
 
 sqlcipher.o: $(TOP)/src/sqlcipher.c $(DEPS_OBJ_COMMON)
 	$(T.cc.sqlite) $(CFLAGS.libsqlite3) -c $(TOP)/src/sqlcipher.c
-crypto_openssl.o:  $(TOP)/src/crypto_openssl.c $(DEPS_OBJ_COMMON)
-	$(T.cc.sqlite) $(CFLAGS.libsqlite3) -c $(TOP)/src/crypto_openssl.c
-crypto_libtomcrypt.o:  $(TOP)/src/crypto_libtomcrypt.c $(DEPS_OBJ_COMMON)
-	$(T.cc.sqlite) $(CFLAGS.libsqlite3) -c $(TOP)/src/crypto_libtomcrypt.c
-crypto_cc.o: $(TOP)/src/crypto_cc.c $(DEPS_OBJ_COMMON)
-	$(T.cc.sqlite) $(CFLAGS.libsqlite3) -c $(TOP)/src/crypto_cc.c
+crypto_leancrypto.o: $(TOP)/src/crypto_leancrypto.c $(DEPS_OBJ_COMMON) $(LEANCRYPTO_LIB)
+	$(T.cc.sqlite) $(CFLAGS.libsqlite3) -c $(TOP)/src/crypto_leancrypto.c
 
 #
 # leancrypto (https://github.com/smuellerDD/leancrypto), vendored as a
@@ -552,7 +544,14 @@ LEANCRYPTO_LIB = $(LEANCRYPTO_BUILD_DIR)/libleancrypto.a
 # -I flags for the leancrypto public headers used directly by
 # src/crypto_leancrypto.c, plus the two generated (configure_file)
 # headers that only exist under the Meson build directory.
+#
+# -DSQLCIPHER_CRYPTO_LEANCRYPTO must be defined here (rather than relying on
+# sqlcipher.c's own unconditional-default #define, as with the old providers)
+# because crypto_leancrypto.c is compiled as its own translation unit -- see
+# the LIBOBJS1 comment above -- so it never sees sqlcipher.c's preprocessor
+# state and needs the macro passed on its own compile command line.
 LEANCRYPTO_CFLAGS = \
+  -DSQLCIPHER_CRYPTO_LEANCRYPTO \
   -I$(LEANCRYPTO_DIR)/aead/api -I$(LEANCRYPTO_DIR)/hash/api \
   -I$(LEANCRYPTO_DIR)/kdf/api -I$(LEANCRYPTO_DIR)/internal/api \
   -I$(LEANCRYPTO_DIR)/sym/api -I$(LEANCRYPTO_DIR)/hmac/api \
@@ -571,7 +570,13 @@ LEANCRYPTO_CFLAGS = \
 # Ascon-Keccak's own implementation calls into) when at least one of
 # {hash_crypt, symhmac/symkmac, chacha20poly1305, aes_gcm} is also
 # enabled; chacha20poly1305 is the smallest such option and is otherwise
-# unused by this project.
+# unused by this project. xdrbg is enabled because it is the only way to
+# get leancrypto's real OS-entropy-backed lc_seeded_rng compiled in (used
+# by src/crypto_leancrypto.c's random()); with no DRNG algorithm enabled
+# at all, leancrypto only builds a non-random, test-only static RNG
+# stub. xdrbg was chosen over the other DRNG options (AES/HMAC-based
+# DRBGs) because it stays within the SHA3/Keccak family already in use
+# here and needs no extra symmetric-cipher code.
 LEANCRYPTO_MESON_OPTS = \
   --default-library=static \
   -Ddisable-asm=true \
@@ -581,7 +586,7 @@ LEANCRYPTO_MESON_OPTS = \
   -Ddrbg_hash=disabled -Ddrbg_hmac=disabled -Ddrbg_ctr=disabled \
   -Dhash_crypt=disabled -Dhmac=enabled -Dhkdf=enabled \
   -Dkdf_ctr=disabled -Dkdf_fb=disabled -Dkdf_dpi=disabled -Dpbkdf2=disabled \
-  -Dkmac=disabled -Dkmac_drng=disabled -Dcshake_drng=disabled -Dxdrbg=disabled \
+  -Dkmac=disabled -Dkmac_drng=disabled -Dcshake_drng=disabled -Dxdrbg=enabled \
   -Dhotp=disabled -Dtotp=disabled \
   -Ddilithium_87=disabled -Ddilithium_65=disabled -Ddilithium_44=disabled \
   -Ddilithium_ed25519=disabled -Ddilithium_ed448=disabled \
@@ -615,7 +620,13 @@ $(LEANCRYPTO_LIB): $(LEANCRYPTO_DIR)/meson.build
 # and the various tool/fuzzer binaries.
 $(MAKE_SANITY_CHECK): $(LEANCRYPTO_LIB)
 T.cc.sqlite += $(LEANCRYPTO_CFLAGS)
-LDFLAGS.libsqlite3 += $(LEANCRYPTO_LIB)
+# crypto_leancrypto.o (the sqlcipher_provider glue, compiled as its own translation unit --
+# see the LIBOBJS1 comment above) must be linked alongside the sqlite3.c amalgamation
+# whenever LDFLAGS.libsqlite3 is used for an amalgamation-based link (e.g. sqlite3$(T.exe),
+# testfixture$(T.exe)); non-amalgamation builds already get it via $(SQLCIPHER_OBJ) in
+# LIBOBJS0. Targets linking against sqlite3.c directly must also depend on
+# crypto_leancrypto.o explicitly so make builds it first.
+LDFLAGS.libsqlite3 += crypto_leancrypto.o $(LEANCRYPTO_LIB)
 
 leancrypto-clean:
 	rm -rf $(LEANCRYPTO_BUILD_DIR)
@@ -656,7 +667,14 @@ LIBOBJS = $(LIBOBJS0)
 #
 # Object files for the amalgamation.
 #
-LIBOBJS1 = sqlite3.o
+# crypto_leancrypto.o is always compiled and linked as its own
+# translation unit, even in amalgamation builds: leancrypto's headers
+# define common-name macros (e.g. fallthrough, noinline) that collide
+# with SQLite's own macros of the same name if pulled into the single
+# giant sqlite3.c translation unit, so crypto_leancrypto.c is
+# deliberately left out of tool/mksqlite3c.tcl's concatenation list.
+#
+LIBOBJS1 = sqlite3.o crypto_leancrypto.o
 
 #
 # Determine the real value of LIBOBJ based on whether the amalgamation
@@ -1903,7 +1921,7 @@ TESTFIXTURE_SRC1 = sqlite3.c
 TESTFIXTURE_SRC = $(TESTSRC) tclsqlite-ex.c
 TESTFIXTURE_SRC += $(TESTFIXTURE_SRC$(USE_AMALGAMATION))
 
-testfixture$(T.exe):	$(T.tcl.env.sh) has_tclsh85 $(TESTFIXTURE_SRC) $(LEANCRYPTO_LIB)
+testfixture$(T.exe):	$(T.tcl.env.sh) has_tclsh85 $(TESTFIXTURE_SRC) crypto_leancrypto.o $(LEANCRYPTO_LIB)
 	$(T.link.tcl) -DSQLITE_NO_SYNC=1 $(TESTFIXTURE_FLAGS) \
 		-o $@ $(TESTFIXTURE_SRC) \
 		$$TCL_LIB_SPEC $$TCL_INCLUDE_SPEC $$TCL_LIBS \
@@ -2268,7 +2286,7 @@ sqlite3-shell-static.flags.0 =
 # runtime performance hit, which is fine for use in the shell but is
 # not appropriate for the canonical library build.
 #
-sqlite3$(T.exe):	shell.c sqlite3.c
+sqlite3$(T.exe):	shell.c sqlite3.c crypto_leancrypto.o
 	$(T.link) -o $@ \
 		shell.c sqlite3.c \
 		$(sqlite3-shell-static.flags.$(STATIC_CLI_SHELL)) \

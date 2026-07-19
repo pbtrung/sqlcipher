@@ -83,14 +83,24 @@ void sqlite3pager_error(Pager*, int);
 void sqlite3pager_reset(Pager *pPager);
 /* end extensions defined in pager.c */
 
-#if !defined (SQLCIPHER_CRYPTO_CC) \
-   && !defined (SQLCIPHER_CRYPTO_LIBTOMCRYPT) \
-   && !defined (SQLCIPHER_CRYPTO_OPENSSL) \
-   && !defined (SQLCIPHER_CRYPTO_CUSTOM)
-#define SQLCIPHER_CRYPTO_OPENSSL
+/* leancrypto (Ascon-Keccak-512 AEAD + HKDF-SHA3-512) is the only supported crypto
+** provider in this build; see doc/crypto.md for the full design. */
+#if !defined (SQLCIPHER_CRYPTO_LEANCRYPTO)
+#define SQLCIPHER_CRYPTO_LEANCRYPTO
 #endif
 
-#define FILE_HEADER_SZ 16
+/* magic bytes ("TX") and version identifying this codec's on-disk blob format. These are
+** fixed, compile-time constants that are NEVER read from or written to disk anywhere --
+** they are only ever used as constant Additional Data (AAD) material for every page's AEAD
+** call (magic(2) || version(2) || salt(64), see sqlcipher_page_cipher). Both the encrypting
+** and decrypting side agree on them out-of-band, simply by virtue of running this exact
+** codec version, the same way the choice of Ascon-Keccak-512 itself isn't stored per-page
+** either. See doc/crypto.md "Per-page blob format" and "Why there is no on-disk plaintext
+** header". */
+#define CIPHER_MAGIC_0 0x54
+#define CIPHER_MAGIC_1 0x58
+#define CIPHER_VERSION_MAJOR 0x01
+#define CIPHER_VERSION_MINOR 0x00
 
 #define CIPHER_XSTR(s) CIPHER_STR(s)
 #define CIPHER_STR(s) #s
@@ -107,8 +117,11 @@ void sqlite3pager_reset(Pager *pPager);
 #define CIPHER_WRITE_CTX 1
 #define CIPHER_READWRITE_CTX 2
 
-#ifndef PBKDF2_ITER
-#define PBKDF2_ITER 256000
+/* minimum length, in bytes, of the raw master key supplied via PRAGMA key / sqlite3_key_v2.
+** There is no passphrase-based key derivation any more (no PBKDF2), so this is a length-only
+** sanity check performed at key-set time; see doc/crypto.md "Key provisioning". */
+#ifndef CIPHER_MIN_KEY_SZ
+#define CIPHER_MIN_KEY_SZ 256
 #endif
 
 #define SQLCIPHER_FLAG_GET(FLAG,BIT) ((FLAG & BIT) != 0)
@@ -116,38 +129,13 @@ void sqlite3pager_reset(Pager *pPager);
 #define SQLCIPHER_FLAG_UNSET(FLAG,BIT) FLAG &= ~BIT
 
 /* possible flags for codec_ctx->flags */
-#define CIPHER_FLAG_HMAC          (1 << 0)
-#define CIPHER_FLAG_LE_PGNO       (1 << 1)
-#define CIPHER_FLAG_BE_PGNO       (1 << 2)
 #define CIPHER_FLAG_KEY_USED      (1 << 3)
-#define CIPHER_FLAG_HAS_KDF_SALT  (1 << 4)
-
 
 #ifndef DEFAULT_CIPHER_FLAGS
-#define DEFAULT_CIPHER_FLAGS (CIPHER_FLAG_HMAC | CIPHER_FLAG_LE_PGNO)
+#define DEFAULT_CIPHER_FLAGS 0
 #endif
 
-
-/* by default, sqlcipher will use a reduced number of iterations to generate
-   the HMAC key / or transform a raw cipher key 
-   */
-#ifndef FAST_PBKDF2_ITER
-#define FAST_PBKDF2_ITER 2
-#endif
-
-/* this if a fixed random array that will be xor'd with the database salt to ensure that the
-   salt passed to the HMAC key derivation function is not the same as that used to derive
-   the encryption key. This can be overridden at compile time but it will make the resulting
-   binary incompatible with the default builds when using HMAC. A future version of SQLcipher
-   will likely allow this to be defined at runtime via pragma */ 
-#ifndef HMAC_SALT_MASK
-#define HMAC_SALT_MASK 0x3a
-#endif
-
-#ifndef CIPHER_MAX_IV_SZ
-#define CIPHER_MAX_IV_SZ 16
-#endif
-
+/* key, nonce, and tag are all fixed at 64 bytes for the leancrypto provider (Ascon-Keccak-512) */
 #ifndef CIPHER_MAX_KEY_SZ
 #define CIPHER_MAX_KEY_SZ 64
 #endif
@@ -159,30 +147,27 @@ void sqlite3pager_reset(Pager *pPager);
 typedef struct {
   int derive_key;
   int pass_sz;
+  int key_sz;  /* length, in bytes, of the raw master key currently stored in key[]. Unlike
+               ** the AEAD provider's fixed 64-byte key/nonce/tag sizes (codec_ctx.key_sz),
+               ** this is the length of the user-supplied master key itself (>= CIPHER_MIN_KEY_SZ,
+               ** used as HKDF input key material -- see doc/crypto.md). */
   unsigned char *key;
-  unsigned char *hmac_key;
   unsigned char *pass;
 } cipher_ctx;
 
 
 typedef struct {
   int store_pass;
-  int kdf_iter;
-  int fast_kdf_iter;
-  int kdf_salt_sz;
+  int salt_sz;    /* size of the per-page HKDF salt; equal to key_sz/nonce_sz/tag_sz (64)
+                  ** for leancrypto */
   int key_sz;
-  int iv_sz;
-  int block_sz;
+  int nonce_sz;
+  int tag_sz;
   int page_sz;
-  int reserve_sz;
-  int hmac_sz;
-  int plaintext_header_sz;
-  int hmac_algorithm;
-  int kdf_algorithm;
+  int reserve_sz; /* salt_sz + tag_sz, no block-size rounding (Ascon-Keccak has no block
+                  ** alignment requirement) */
   int error;
   unsigned int flags;
-  unsigned char *kdf_salt;
-  unsigned char *hmac_kdf_salt;
   unsigned char *buffer;
   Btree *pBt;
   cipher_ctx *read_ctx;
@@ -289,12 +274,7 @@ static int sqlcipher_get_test_fail() {
 #endif
 
 static volatile unsigned int default_flags = DEFAULT_CIPHER_FLAGS;
-static volatile unsigned char hmac_salt_mask = HMAC_SALT_MASK;
-static volatile int default_kdf_iter = PBKDF2_ITER;
 static volatile int default_page_size = 4096;
-static volatile int default_plaintext_header_size = 0;
-static volatile int default_hmac_algorithm = SQLCIPHER_HMAC_SHA512;
-static volatile int default_kdf_algorithm = SQLCIPHER_PBKDF2_HMAC_SHA512;
 static volatile int sqlcipher_mem_security_on = 0;
 static volatile int sqlcipher_mem_executed = 0;
 static volatile int sqlcipher_mem_initialized = 0;
@@ -451,19 +431,8 @@ static int sqlcipher_export_init(sqlite3* db, char** errmsg, const struct sqlite
   return SQLITE_OK;
 }
 
-#if defined (SQLCIPHER_CRYPTO_CC)
-#define SQLCIPHER_PROVIDER_SETUP sqlcipher_cc_setup 
-#elif defined (SQLCIPHER_CRYPTO_LIBTOMCRYPT)
-#define SQLCIPHER_PROVIDER_SETUP sqlcipher_ltc_setup 
-#elif defined (SQLCIPHER_CRYPTO_OPENSSL)
-#define SQLCIPHER_PROVIDER_SETUP sqlcipher_openssl_setup 
-#elif defined (SQLCIPHER_CRYPTO_OSSL3)
-#define SQLCIPHER_PROVIDER_SETUP sqlcipher_ossl3_setup 
-#elif defined (SQLCIPHER_CRYPTO_CUSTOM)
-#define SQLCIPHER_PROVIDER_SETUP SQLCIPHER_CRYPTO_CUSTOM
-#else
-#error "NO DEFAULT SQLCIPHER CRYPTO PROVIDER DEFINED"
-#endif
+/* leancrypto is the sole crypto provider; see src/crypto_leancrypto.c */
+#define SQLCIPHER_PROVIDER_SETUP sqlcipher_leancrypto_setup
 
 
 /* The extra_init function is called by sqlite3_init automaticay by virtue of
@@ -1173,20 +1142,18 @@ char* sqlcipher_version(void) {
   * returns SQLITE_OK if initialization was successful
   * returns SQLITE_NOMEM if an error occured allocating memory
   */
+/**
+  * Initialize new cipher_ctx struct. Unlike the historic fixed-size cipher key, the raw
+  * master key supported by this provider is variable-length (>= CIPHER_MIN_KEY_SZ bytes),
+  * so the key buffer itself is allocated lazily once its length is known -- see
+  * sqlcipher_cipher_ctx_key_derive.
+  */
 static int sqlcipher_cipher_ctx_init(codec_ctx *ctx, cipher_ctx **iCtx) {
   cipher_ctx *c_ctx;
   sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_MEMORY, "sqlcipher_cipher_ctx_init: allocating context");
   *iCtx = (cipher_ctx *) sqlcipher_malloc(sizeof(cipher_ctx));
   c_ctx = *iCtx;
   if(c_ctx == NULL) return SQLITE_NOMEM;
-
-  sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_MEMORY, "sqlcipher_cipher_ctx_init: allocating key");
-  c_ctx->key = (unsigned char *) sqlcipher_malloc(ctx->key_sz);
-
-  sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_MEMORY, "sqlcipher_cipher_ctx_init: allocating hmac_key");
-  c_ctx->hmac_key = (unsigned char *) sqlcipher_malloc(ctx->key_sz);
-
-  if(!c_ctx->key || !c_ctx->hmac_key) return SQLITE_NOMEM;
 
   return SQLITE_OK;
 }
@@ -1197,31 +1164,18 @@ static int sqlcipher_cipher_ctx_init(codec_ctx *ctx, cipher_ctx **iCtx) {
 static void sqlcipher_cipher_ctx_free(codec_ctx* ctx, cipher_ctx **iCtx) {
   cipher_ctx *c_ctx = *iCtx;
   sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_MEMORY, "cipher_ctx_free: iCtx=%p", iCtx);
-  if(c_ctx->key) sqlcipher_free(c_ctx->key, ctx->key_sz);
-  if(c_ctx->hmac_key) sqlcipher_free(c_ctx->hmac_key, ctx->key_sz);
+  if(c_ctx->key) sqlcipher_free(c_ctx->key, c_ctx->key_sz);
   if(c_ctx->pass) sqlcipher_free(c_ctx->pass, c_ctx->pass_sz);
-  sqlcipher_free(c_ctx, sizeof(cipher_ctx)); 
+  sqlcipher_free(c_ctx, sizeof(cipher_ctx));
 }
 
+/* reserve = salt(64) + tag(64) = 128 bytes; no block-size rounding, Ascon-Keccak has no
+** block-alignment requirement. See doc/crypto.md "Per-page blob format". */
 static int sqlcipher_codec_ctx_reserve_setup(codec_ctx *ctx) {
-  int base_reserve = ctx->iv_sz; /* base reserve size will be IV only */ 
-  int reserve = base_reserve;
+  ctx->reserve_sz = ctx->salt_sz + ctx->tag_sz;
 
-  ctx->hmac_sz = ctx->provider->get_hmac_sz(ctx->provider_ctx, ctx->hmac_algorithm); 
-
-  if(SQLCIPHER_FLAG_GET(ctx->flags, CIPHER_FLAG_HMAC))
-    reserve += ctx->hmac_sz; /* if reserve will include hmac, update that size */
-
-  /* calculate the amount of reserve needed in even increments of the cipher block size */
-  if(ctx->block_sz > 0) {
-    reserve = ((reserve % ctx->block_sz) == 0) ? reserve :
-               ((reserve / ctx->block_sz) + 1) * ctx->block_sz;  
-  }
-
-  sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_reserve_setup: base_reserve=%d block_sz=%d md_size=%d reserve=%d", 
-                base_reserve, ctx->block_sz, ctx->hmac_sz, reserve); 
-
-  ctx->reserve_sz = reserve;
+  sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_reserve_setup: salt_sz=%d tag_sz=%d reserve=%d",
+                ctx->salt_sz, ctx->tag_sz, ctx->reserve_sz);
 
   return SQLITE_OK;
 }
@@ -1266,18 +1220,32 @@ static int sqlcipher_cipher_ctx_cmp(cipher_ctx *c1, cipher_ctx *c2) {
   * returns SQLITE_NOMEM if an error occured allocating memory
   */
 static int sqlcipher_cipher_ctx_copy(codec_ctx *ctx, cipher_ctx *target, cipher_ctx *source) {
-  void *key = target->key; 
-  void *hmac_key = target->hmac_key; 
+  void *key = target->key; /* previously allocated key buffer, if any (may need resizing below,
+                            ** since the raw master key is variable-length) */
+  int key_sz = target->key_sz;
 
   sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlcipher_cipher_ctx_copy: target=%p, source=%p", target, source);
   if(target->pass) sqlcipher_free(target->pass, target->pass_sz);
   memcpy(target, source, sizeof(cipher_ctx));
 
-  target->key = key; /* restore pointer to previously allocated key data */
-  memcpy(target->key, source->key, ctx->key_sz);
+  target->key = key; /* restore pointer to previously allocated key buffer for now */
+  target->key_sz = key_sz;
 
-  target->hmac_key = hmac_key; /* restore pointer to previously allocated hmac key data */
-  memcpy(target->hmac_key, source->hmac_key, ctx->key_sz);
+  if(source->key && source->key_sz > 0) {
+    if(target->key == NULL || target->key_sz != source->key_sz) {
+      if(target->key) sqlcipher_free(target->key, target->key_sz);
+      if(!(target->key = sqlcipher_malloc(source->key_sz))) {
+        target->key_sz = 0;
+        return SQLITE_NOMEM;
+      }
+      target->key_sz = source->key_sz;
+    }
+    memcpy(target->key, source->key, source->key_sz);
+  } else if(target->key) {
+    sqlcipher_free(target->key, target->key_sz);
+    target->key = NULL;
+    target->key_sz = 0;
+  }
 
   if(source->pass && source->pass_sz) {
     target->pass = sqlcipher_malloc(source->pass_sz);
@@ -1289,7 +1257,11 @@ static int sqlcipher_cipher_ctx_copy(codec_ctx *ctx, cipher_ctx *target, cipher_
 
 /**
   * Get the keyspec for the cipher_ctx
-  * 
+  *
+  * Since this provider only supports a raw master key (no passphrase-derived key, and no
+  * per-database salt to bundle -- every page derives its own salt independently, see
+  * doc/crypto.md), the keyspec is simply the raw master key hex-encoded as x'hex(key)'.
+  *
   * returns SQLITE_OK if assignment was successfull
   * returns SQLITE_NOMEM if an error occured allocating memory
   */
@@ -1299,19 +1271,11 @@ static int sqlcipher_cipher_ctx_get_keyspec(codec_ctx *ctx, cipher_ctx *c_ctx, c
 
   if(keyspec_ptr == NULL) return SQLITE_NOMEM;
 
-  /* establish the size for a hex-formated key specification, containing the
-   * raw encryption key, optional hmac key, and the salt used to generate it.
-   * The format will be either:
-   *   x'hex(key)...hex(hmac_key)...hex(salt)'
-   *     or
-   *   x'hex(key)...hex(salt)'
-   *. The contents are SQLite BLOB formatted, so oversize by 3 bytes for the leading
-   * x' and trailing ' characters required by the spec*/
-  if(ctx->flags & CIPHER_FLAG_HMAC) { /* if HMAC is enabled, encode key, hmac key, and salt */
-    sz = ((ctx->key_sz + ctx->key_sz + ctx->kdf_salt_sz) * 2) + 3;
-  } else { /* otherwise encode key and salt */
-    sz = ((ctx->key_sz + ctx->kdf_salt_sz) * 2) + 3;
-  }
+  if(!c_ctx->key || c_ctx->key_sz < 1) return SQLITE_ERROR;
+
+  /* the contents are SQLite BLOB formatted, so oversize by 3 bytes for the leading
+   * x' and trailing ' characters required by the spec */
+  sz = (c_ctx->key_sz * 2) + 3;
 
   *keyspec_ptr = sqlcipher_malloc(sz);
   keyspec = *keyspec_ptr;
@@ -1323,32 +1287,14 @@ static int sqlcipher_cipher_ctx_get_keyspec(codec_ctx *ctx, cipher_ctx *c_ctx, c
 
   out = keyspec + 2;
 
-  /* start with the encryption key */
-  sqlcipher_shield(c_ctx->key, ctx->key_sz);
-  cipher_bin2hex(c_ctx->key, ctx->key_sz, out);
-  sqlcipher_shield(c_ctx->key, ctx->key_sz);
-  out += ctx->key_sz * 2;
-
-  if(ctx->flags & CIPHER_FLAG_HMAC) {
-    /* add the hmac key after the encryption key if HMAC is in use*/
-    sqlcipher_shield(c_ctx->hmac_key, ctx->key_sz);
-    cipher_bin2hex(c_ctx->hmac_key, ctx->key_sz, out);
-    sqlcipher_shield(c_ctx->hmac_key, ctx->key_sz);
-    out += ctx->key_sz * 2;
-  }
-
-  /* finally encode the salt last */
-  cipher_bin2hex(ctx->kdf_salt, ctx->kdf_salt_sz, out);
+  sqlcipher_shield(c_ctx->key, c_ctx->key_sz);
+  cipher_bin2hex(c_ctx->key, c_ctx->key_sz, out);
+  sqlcipher_shield(c_ctx->key, c_ctx->key_sz);
 
   keyspec[sz - 1] = '\'';
   *keyspec_sz = sz;
 
   return SQLITE_OK;
-}
-
-static void sqlcipher_set_derive_key(codec_ctx *ctx, int derive) {
-  if(ctx->read_ctx != NULL) ctx->read_ctx->derive_key = derive;
-  if(ctx->write_ctx != NULL) ctx->write_ctx->derive_key = derive;
 }
 
 /**
@@ -1393,73 +1339,6 @@ static int sqlcipher_codec_ctx_set_pass(codec_ctx *ctx, const void *zKey, int nK
   return SQLITE_OK;
 } 
 
-static int sqlcipher_codec_ctx_set_kdf_iter(codec_ctx *ctx, int kdf_iter) {
-  if(SQLCIPHER_FLAG_GET(ctx->flags, CIPHER_FLAG_KEY_USED)) return SQLITE_OK;
-  ctx->kdf_iter = kdf_iter;
-  sqlcipher_set_derive_key(ctx, 1);
-  return SQLITE_OK;
-}
-
-static int sqlcipher_codec_ctx_set_fast_kdf_iter(codec_ctx *ctx, int fast_kdf_iter) {
-  if(SQLCIPHER_FLAG_GET(ctx->flags, CIPHER_FLAG_KEY_USED)) return SQLITE_OK;
-
-  ctx->fast_kdf_iter = fast_kdf_iter;
-  sqlcipher_set_derive_key(ctx, 1);
-  return SQLITE_OK;
-}
-
-/* set the global default flag for HMAC */
-static void sqlcipher_set_default_use_hmac(int use) {
-  if(use) SQLCIPHER_FLAG_SET(default_flags, CIPHER_FLAG_HMAC);
-  else SQLCIPHER_FLAG_UNSET(default_flags,CIPHER_FLAG_HMAC);
-}
-
-/* set the codec flag for whether this individual database should be using hmac */
-static int sqlcipher_codec_ctx_set_use_hmac(codec_ctx *ctx, int use) {
-  if(SQLCIPHER_FLAG_GET(ctx->flags, CIPHER_FLAG_KEY_USED)) return SQLITE_OK;
-
-  if(use) {
-    SQLCIPHER_FLAG_SET(ctx->flags, CIPHER_FLAG_HMAC);
-  } else {
-    SQLCIPHER_FLAG_UNSET(ctx->flags, CIPHER_FLAG_HMAC);
-  } 
-
-  return sqlcipher_codec_ctx_reserve_setup(ctx);
-}
-
-/* the length of plaintext header size must be:
- * 1. greater than or equal to zero
- * 2. a multiple of the cipher block size
- * 3. less than or equal to the non-reserve size of the first database page
- *
- * Note: it is possible to leave the entire first page in plaintext. This is discouraged since it will
- * likely leak some small amount of schema data, but it's required to support use of the recovery VFS.
- * see comment in sqlcipher_page_cipher for more details.
- */
-static int sqlcipher_codec_ctx_set_plaintext_header_size(codec_ctx *ctx, int size) {
-  if(size >= 0 && ctx->block_sz > 0 && (size % ctx->block_sz) == 0 && size <= (ctx->page_sz - ctx->reserve_sz)) {
-    ctx->plaintext_header_sz = size;
-    return SQLITE_OK;
-  }
-  ctx->plaintext_header_sz = -1;
-  sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: attempt to set invalid plantext_header_size %d", __func__, size);
-  return SQLITE_ERROR;
-} 
-
-static int sqlcipher_codec_ctx_set_hmac_algorithm(codec_ctx *ctx, int algorithm) {
-  if(SQLCIPHER_FLAG_GET(ctx->flags, CIPHER_FLAG_KEY_USED)) return SQLITE_OK;
-
-  ctx->hmac_algorithm = algorithm;
-  return sqlcipher_codec_ctx_reserve_setup(ctx);
-} 
-
-static int sqlcipher_codec_ctx_set_kdf_algorithm(codec_ctx *ctx, int algorithm) {
-  if(SQLCIPHER_FLAG_GET(ctx->flags, CIPHER_FLAG_KEY_USED)) return SQLITE_OK;
-
-  ctx->kdf_algorithm = algorithm;
-  return SQLITE_OK;
-} 
-
 static void sqlcipher_codec_ctx_set_error(codec_ctx *ctx, int error) {
   sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_set_error %d", error);
   sqlite3pager_error(sqlite3BtreePager(ctx->pBt), error);
@@ -1467,48 +1346,30 @@ static void sqlcipher_codec_ctx_set_error(codec_ctx *ctx, int error) {
   ctx->error = error;
 }
 
-static int sqlcipher_codec_ctx_init_kdf_salt(codec_ctx *ctx) {
+/* Read page 1's current on-disk salt (the salt_sz bytes of its reserve region, at file
+** offset page_sz - reserve_sz) directly off disk, for PRAGMA cipher_salt reporting only.
+** Page 1 is not special-cased any more -- its salt lives in its own reserve region exactly
+** like every other page's (see doc/crypto.md "Per-page blob format"), so there is no
+** separate cached/persistent copy of it on codec_ctx: this simply reads it back out of the
+** file on demand. If the file doesn't exist yet or is shorter than one page, a fresh random
+** salt is generated purely for reporting purposes; it has no bearing on the real salt that
+** will be used once page 1 is actually written, since sqlcipher_page_cipher always
+** generates its own fresh random salt on every encrypt regardless of what this reports. */
+static int sqlcipher_codec_ctx_get_page1_salt(codec_ctx *ctx, unsigned char *salt) {
   sqlite3_file *fd = sqlite3PagerFile(sqlite3BtreePager(ctx->pBt));
+  i64 file_sz = 0;
 
-  if(SQLCIPHER_FLAG_GET(ctx->flags, CIPHER_FLAG_HAS_KDF_SALT)) {
-    return SQLITE_OK; /* don't reload salt when not needed */
-  }
+  if(fd != NULL && fd->pMethods != 0) sqlite3OsFileSize(fd, &file_sz);
 
-  /* read salt from header, if present, otherwise generate a new random salt */
-  sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_init_kdf_salt: obtaining salt");
-  if(fd == NULL || fd->pMethods == 0 || sqlite3OsRead(fd, ctx->kdf_salt, ctx->kdf_salt_sz, 0) != SQLITE_OK) {
-    sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_init_kdf_salt: unable to read salt from file header, generating random");
-    if(ctx->provider->random(ctx->provider_ctx, ctx->kdf_salt, ctx->kdf_salt_sz) != SQLITE_OK) {
-      sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_init_kdf_salt: error retrieving random bytes from provider");
+  if(fd == NULL || fd->pMethods == 0 || file_sz < ctx->page_sz ||
+     sqlite3OsRead(fd, salt, ctx->salt_sz, ctx->page_sz - ctx->reserve_sz) != SQLITE_OK) {
+    sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_get_page1_salt: unable to read salt from page 1, generating random value for reporting purposes only");
+    if(ctx->provider->random(ctx->provider_ctx, salt, ctx->salt_sz) != SQLITE_OK) {
+      sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_get_page1_salt: error retrieving random bytes from provider");
       return SQLITE_ERROR;
     }
   }
-  SQLCIPHER_FLAG_SET(ctx->flags, CIPHER_FLAG_HAS_KDF_SALT);
-  return SQLITE_OK; 
-}
-
-static int sqlcipher_codec_ctx_set_kdf_salt(codec_ctx *ctx, unsigned char *salt, int size) {
-  if(SQLCIPHER_FLAG_GET(ctx->flags, CIPHER_FLAG_KEY_USED)) return SQLITE_OK;
-
-  if(size >= ctx->kdf_salt_sz) {
-    memcpy(ctx->kdf_salt, salt, ctx->kdf_salt_sz);
-    SQLCIPHER_FLAG_SET(ctx->flags, CIPHER_FLAG_HAS_KDF_SALT);
-    return SQLITE_OK;
-  }
-  sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_set_kdf_salt: attempt to set salt of incorrect size %d", size);
-  return SQLITE_ERROR;
-}
-
-static int sqlcipher_codec_ctx_get_kdf_salt(codec_ctx *ctx, void** salt) {
-  int rc = SQLITE_OK;
-  if(!SQLCIPHER_FLAG_GET(ctx->flags, CIPHER_FLAG_HAS_KDF_SALT)) {
-    if((rc = sqlcipher_codec_ctx_init_kdf_salt(ctx)) != SQLITE_OK) {
-      sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_get_kdf_salt: error %d from sqlcipher_codec_ctx_init_kdf_salt", rc);
-    }
-  }
-  *salt = ctx->kdf_salt;
-
-  return rc;
+  return SQLITE_OK;
 }
 
 static int sqlcipher_codec_ctx_set_pagesize(codec_ctx *ctx, int size) {
@@ -1544,22 +1405,6 @@ static int sqlcipher_codec_ctx_init(codec_ctx **iCtx, Db *pDb, Pager *pPager, co
 
   ctx->pBt = pDb->pBt; /* assign pointer to database btree structure */
 
-  /* allocate space for salt data. Then read the first 16 bytes 
-       directly off the database file. This is the salt for the
-       key derivation function. If we get a short read allocate
-       a new random salt value */
-  sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_MEMORY, "sqlcipher_codec_ctx_init: allocating kdf_salt");
-  ctx->kdf_salt_sz = FILE_HEADER_SZ;
-  ctx->kdf_salt = sqlcipher_malloc(ctx->kdf_salt_sz);
-  if(ctx->kdf_salt == NULL) return SQLITE_NOMEM;
-
-  /* allocate space for separate hmac salt data. We want the
-     HMAC derivation salt to be different than the encryption
-     key derivation salt */
-  sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_MEMORY, "sqlcipher_codec_ctx_init: allocating hmac_kdf_salt");
-  ctx->hmac_kdf_salt = sqlcipher_malloc(ctx->kdf_salt_sz);
-  if(ctx->hmac_kdf_salt == NULL) return SQLITE_NOMEM;
-
   /* setup default flags */
   ctx->flags = default_flags;
 
@@ -1572,51 +1417,22 @@ static int sqlcipher_codec_ctx_init(codec_ctx **iCtx, Db *pDb, Pager *pPager, co
   }
 
   ctx->key_sz = ctx->provider->get_key_sz(ctx->provider_ctx);
-  ctx->iv_sz = ctx->provider->get_iv_sz(ctx->provider_ctx);
-  ctx->block_sz = ctx->provider->get_block_sz(ctx->provider_ctx);
+  ctx->nonce_sz = ctx->provider->get_nonce_sz(ctx->provider_ctx);
+  ctx->tag_sz = ctx->provider->get_tag_sz(ctx->provider_ctx);
+  ctx->salt_sz = ctx->key_sz; /* HKDF salt is sized to match the provider's key size (64) */
+
+  if((rc = sqlcipher_codec_ctx_reserve_setup(ctx)) != SQLITE_OK) {
+    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_init: error %d returned from sqlcipher_codec_ctx_reserve_setup", rc);
+    return rc;
+  }
 
   /*
      Always overwrite page size and set to the default because the first page of the database
-     in encrypted and thus sqlite can't effectively determine the pagesize. this causes an issue in 
+     in encrypted and thus sqlite can't effectively determine the pagesize. this causes an issue in
      cases where bytes 16 & 17 of the page header are a power of 2 as reported by John Lehman
   */
   if((rc = sqlcipher_codec_ctx_set_pagesize(ctx, default_page_size)) != SQLITE_OK) {
     sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_init: error %d returned from sqlcipher_codec_ctx_set_pagesize with %d", rc, default_page_size);
-    return rc;
-  }
-
-  /* establish settings for the KDF iterations and fast (HMAC) KDF iterations */
-  if((rc = sqlcipher_codec_ctx_set_kdf_iter(ctx, default_kdf_iter)) != SQLITE_OK) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_init: error %d setting default_kdf_iter %d", rc, default_kdf_iter);
-    return rc;
-  }
-
-  if((rc = sqlcipher_codec_ctx_set_fast_kdf_iter(ctx, FAST_PBKDF2_ITER)) != SQLITE_OK) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_init: error %d setting fast_kdf_iter to %d", rc, FAST_PBKDF2_ITER);
-    return rc;
-  }
-
-  /* set the default HMAC and KDF algorithms which will determine the reserve size */
-  if((rc = sqlcipher_codec_ctx_set_hmac_algorithm(ctx, default_hmac_algorithm)) != SQLITE_OK) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_init: error %d setting sqlcipher_codec_ctx_set_hmac_algorithm with %d", rc, default_hmac_algorithm);
-    return rc;
-  }
-
-  /* Note that use_hmac is a special case that requires recalculation of page size
-     so we call set_use_hmac to perform setup */
-  if((rc = sqlcipher_codec_ctx_set_use_hmac(ctx, SQLCIPHER_FLAG_GET(default_flags, CIPHER_FLAG_HMAC))) != SQLITE_OK) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_init: error %d setting use_hmac %d", rc, SQLCIPHER_FLAG_GET(default_flags, CIPHER_FLAG_HMAC));
-    return rc;
-  }
-
-  if((rc = sqlcipher_codec_ctx_set_kdf_algorithm(ctx, default_kdf_algorithm)) != SQLITE_OK) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_init: error %d setting sqlcipher_codec_ctx_set_kdf_algorithm with %d", rc, default_kdf_algorithm);
-    return rc;
-  }
-
-  /* setup the default plaintext header size */
-  if((rc = sqlcipher_codec_ctx_set_plaintext_header_size(ctx, default_plaintext_header_size)) != SQLITE_OK) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_init: error %d setting sqlcipher_codec_ctx_set_plaintext_header_size with %d", rc, default_plaintext_header_size);
     return rc;
   }
 
@@ -1652,8 +1468,6 @@ static int sqlcipher_codec_ctx_init(codec_ctx **iCtx, Db *pDb, Pager *pPager, co
 static void sqlcipher_codec_ctx_free(codec_ctx **iCtx) {
   codec_ctx *ctx = *iCtx;
   sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_MEMORY, "codec_ctx_free: iCtx=%p", iCtx);
-  if(ctx->kdf_salt) sqlcipher_free(ctx->kdf_salt, ctx->kdf_salt_sz);
-  if(ctx->hmac_kdf_salt) sqlcipher_free(ctx->hmac_kdf_salt, ctx->kdf_salt_sz);
   if(ctx->buffer) sqlcipher_free(ctx->buffer, ctx->page_sz);
   if(ctx->provider) ctx->provider->ctx_free(&ctx->provider_ctx);
 
@@ -1662,191 +1476,164 @@ static void sqlcipher_codec_ctx_free(codec_ctx **iCtx) {
   sqlcipher_free(ctx, sizeof(codec_ctx)); 
 }
 
-/** convert a 32bit unsigned integer to little endian byte ordering */
-static void sqlcipher_put4byte_le(unsigned char *p, u32 v) { 
-  p[0] = (u8)v;
-  p[1] = (u8)(v>>8);
-  p[2] = (u8)(v>>16);
-  p[3] = (u8)(v>>24);
-}
-
-static int sqlcipher_page_hmac(codec_ctx *ctx, cipher_ctx *c_ctx, Pgno pgno, unsigned char *in, int in_sz, unsigned char *out) {
-  unsigned char pgno_raw[sizeof(pgno)];
-  int rc;
-  /* we may convert page number to consistent representation before calculating MAC for
-     compatibility across big-endian and little-endian platforms. 
-
-     Note: The public release of sqlcipher 2.0.0 to 2.0.6 had a bug where the bytes of pgno 
-     were used directly in the MAC. SQLCipher convert's to little endian by default to preserve
-     backwards compatibility on the most popular platforms, but can optionally be configured
-     to use either big endian or native byte ordering via pragma. */
-
-  if(SQLCIPHER_FLAG_GET(ctx->flags, CIPHER_FLAG_LE_PGNO)) { /* compute hmac using little endian pgno*/
-    sqlcipher_put4byte_le(pgno_raw, pgno);
-  } else if(SQLCIPHER_FLAG_GET(ctx->flags, CIPHER_FLAG_BE_PGNO)) { /* compute hmac using big endian pgno */
-    sqlite3Put4byte(pgno_raw, pgno); /* sqlite3Put4byte converts 32bit uint to big endian  */
-  } else { /* use native byte ordering */
-    memcpy(pgno_raw, &pgno, sizeof(pgno));
-  }
-
-  /* include the encrypted page data,  initialization vector, and page number in HMAC. This will 
-     prevent both tampering with the ciphertext, manipulation of the IV, or resequencing otherwise
-     valid pages out of order in a database */ 
-  sqlcipher_shield(c_ctx->hmac_key, ctx->key_sz);
-  rc = ctx->provider->hmac(
-    ctx->provider_ctx, ctx->hmac_algorithm, c_ctx->hmac_key,
-    ctx->key_sz, in,
-    in_sz, (unsigned char*) &pgno_raw,
-    sizeof(pgno), out);
-  sqlcipher_shield(c_ctx->hmac_key, ctx->key_sz);
-
-  return rc;
-}
+/* HKDF info labels used to derive independent per-page AEAD key/nonce from the same
+** (master key, per-page salt) pair -- see doc/crypto.md "Per-page key/nonce derivation". */
+static const char SQLCIPHER_HKDF_KEY_INFO[]   = "sqlcipher-leancrypto-key-v1";
+static const char SQLCIPHER_HKDF_NONCE_INFO[] = "sqlcipher-leancrypto-nonce-v1";
 
 /*
  * ctx - codec context
- * pgno - page number in database
- * size - size in bytes of input and output buffers
- * mode - 1 to encrypt, 0 to decrypt
+ * for_ctx - 1 to use ctx->write_ctx, 0 to use ctx->read_ctx
+ * pgno - page number in database (NOT included in the AAD or key derivation -- see
+ *        doc/crypto.md "Known limitations")
+ * mode - SQLCIPHER_ENCRYPT or SQLCIPHER_DECRYPT
+ * page_sz - size in bytes of the input/output buffers (the full page size -- page 1 is
+ *           NOT special-cased or offset any more, see doc/crypto.md "Why there is no
+ *           on-disk plaintext header")
  * in - pointer to input bytes
- * out - pouter to output bytes
+ * out - pointer to output bytes
+ *
+ * Every page (including page 1) is stored identically, with no special-cased plaintext
+ * region:
+ *   [ ciphertext (page_sz - reserve_sz bytes) ][ salt (salt_sz bytes) ][ tag (tag_sz bytes) ]
+ * AAD = magic(2) || version(2) || salt(salt_sz), where magic/version are the fixed
+ * CIPHER_MAGIC_0/1 and CIPHER_VERSION_MAJOR/MINOR compile-time constants (never stored on
+ * disk) and salt is this page's own on-disk salt.
  */
 static int sqlcipher_page_cipher(codec_ctx *ctx, int for_ctx, Pgno pgno, int mode, int page_sz, unsigned char *in, unsigned char *out) {
   cipher_ctx *c_ctx = for_ctx ? ctx->write_ctx : ctx->read_ctx;
-  unsigned char *iv_in, *iv_out, *hmac_in, *hmac_out, *out_start;
-  int size, rc;
+  unsigned char *salt_in, *salt_out, *tag_in, *tag_out, *out_start;
+  unsigned char aad[4 + CIPHER_MAX_KEY_SZ];
+  unsigned char page_key[CIPHER_MAX_KEY_SZ];
+  unsigned char page_nonce[CIPHER_MAX_KEY_SZ];
+  int size, aad_sz, rc;
 
   /* calculate some required positions into various buffers */
   size = page_sz - ctx->reserve_sz; /* adjust size to useable size and memset reserve at end of page */
-  iv_out = out + size;
-  iv_in = in + size;
+  salt_out = out + size;
+  salt_in = in + size;
 
-  /* if the full amount of the first page (excluding reserve size), e.g. 4016 bytes for a 4096 byte page size with HMAC_SHA512,
-   * is used as a plaintext header, then the entire first page will be completely plaintext, and this function should just return early.
-   * This should almost never occur during normal usage, so we will log at WARN level, but it is required in the special case that
-   * a user wants to attempt recovery on an encrypted database. In that case, the database header must be completely plaintext so that
-   * the recovery VFS can be used with it's special 1st page logic */
-  if(pgno == 1 && size == 0) {
-    sqlcipher_log(SQLCIPHER_LOG_WARN, SQLCIPHER_LOG_CORE, "%s: skipping encryption/decryption for fully  plaintext header", __func__);
-    return SQLITE_OK;
-  }
-
-  /* hmac will be written immediately after the initialization vector. the remainder of the page reserve will contain
-     random bytes. note, these pointers are only valid when using hmac */
-  hmac_in = in + size + ctx->iv_sz; 
-  hmac_out = out + size + ctx->iv_sz;
+  /* the tag is written immediately after the salt. note these pointers are only valid
+     after the salt has been established (below) */
+  tag_in = in + size + ctx->salt_sz;
+  tag_out = out + size + ctx->salt_sz;
   out_start = out; /* note the original position of the output buffer pointer, as out will be rewritten during encryption */
 
   sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "%s: pgno=%d, mode=%d, size=%d", __func__, pgno, mode, size);
   CODEC_HEXDUMP("sqlcipher_page_cipher: input page data", in, page_sz);
 
   /* the key size should never be zero. If it is, error out. */
-  if(ctx->key_sz == 0) {
+  if(ctx->key_sz == 0 || c_ctx->key == NULL || c_ctx->key_sz == 0) {
     sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: error possible context corruption, key_sz is zero for pgno=%d", __func__, pgno);
     goto error;
-  } 
+  }
 
   if(mode == SQLCIPHER_ENCRYPT) {
-    /* start at front of the reserve block, write random data to the end */
-    if(ctx->provider->random(ctx->provider_ctx, iv_out, ctx->reserve_sz) != SQLITE_OK) goto error;
+    /* generate a fresh random salt for this page, used both as the HKDF salt and stored
+       on disk so it can be recovered on decrypt */
+    if(ctx->provider->random(ctx->provider_ctx, salt_out, ctx->salt_sz) != SQLITE_OK) goto error;
   } else { /* SQLCIPHER_DECRYPT */
-    memcpy(iv_out, iv_in, ctx->iv_sz); /* copy the iv from the input to output buffer */
-  } 
+    memcpy(salt_out, salt_in, ctx->salt_sz); /* copy the salt from the input to output buffer */
+  }
 
-  if(SQLCIPHER_FLAG_GET(ctx->flags, CIPHER_FLAG_HMAC) && (mode == SQLCIPHER_DECRYPT)) {
-    if(sqlcipher_page_hmac(ctx, c_ctx, pgno, in, size + ctx->iv_sz, hmac_out) != SQLITE_OK) {
-      sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: hmac operation on decrypt failed for pgno=%d", __func__, pgno);
-      goto error;
-    }
+  /* AAD = magic(2) || version(2) || salt(salt_sz), see doc/crypto.md */
+  aad[0] = CIPHER_MAGIC_0;
+  aad[1] = CIPHER_MAGIC_1;
+  aad[2] = CIPHER_VERSION_MAJOR;
+  aad[3] = CIPHER_VERSION_MINOR;
+  memcpy(aad + 4, salt_out, ctx->salt_sz);
+  aad_sz = 4 + ctx->salt_sz;
 
-    sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "%s: comparing hmac on in=%p out=%p hmac_sz=%d", __func__, hmac_in, hmac_out, ctx->hmac_sz);
-    if(sqlcipher_memcmp(hmac_in, hmac_out, ctx->hmac_sz) != 0) { /* the hmac check failed */ 
-      if(sqlite3BtreeGetAutoVacuum(ctx->pBt) != BTREE_AUTOVACUUM_NONE && sqlcipher_ismemset(in, 0, page_sz) == 0) {
-        /* first check if the entire contents of the page is zeros. If so, this page 
-           resulted from a short read (i.e. sqlite attempted to pull a page after the end of the file. these 
-           short read failures must be ignored for autovaccum mode to work so wipe the output buffer 
-           and return SQLITE_OK to skip the decryption step. */
-        sqlcipher_log(SQLCIPHER_LOG_INFO, SQLCIPHER_LOG_CORE, "%s: zeroed page (short read) for pgno %d with autovacuum enabled", __func__, pgno);
-        sqlcipher_memset(out, 0, page_sz); 
-        return SQLITE_OK;
-      } else {
-        /* if the page memory is not all zeros, it means the there was data and a hmac on the page. 
-           since the check failed, the page was either tampered with or corrupted. wipe the output buffer,
-           and return SQLITE_ERROR to the caller */
-        sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: hmac check failed for pgno=%d", __func__, pgno);
-        goto error;
-      }
-    }
-  } 
-  
-  sqlcipher_shield(c_ctx->key, ctx->key_sz);
-  rc = ctx->provider->cipher(ctx->provider_ctx, mode, c_ctx->key, ctx->key_sz, iv_out, in, size, out);
-  sqlcipher_shield(c_ctx->key, ctx->key_sz);
+  /* derive independent per-page key and nonce from (master key, salt) via two HKDF calls
+     with distinct info labels -- see doc/crypto.md "Per-page key/nonce derivation". Note
+     the master key (IKM) is variable-length (c_ctx->key_sz), unlike the fixed-size derived
+     page key/nonce (ctx->key_sz / ctx->nonce_sz, both 64 for this provider). */
+  sqlcipher_shield(c_ctx->key, c_ctx->key_sz);
+  rc = ctx->provider->hkdf(ctx->provider_ctx, c_ctx->key, c_ctx->key_sz, salt_out, ctx->salt_sz,
+        (const unsigned char*) SQLCIPHER_HKDF_KEY_INFO, sizeof(SQLCIPHER_HKDF_KEY_INFO) - 1,
+        ctx->key_sz, page_key);
+  if(rc == SQLITE_OK) {
+    rc = ctx->provider->hkdf(ctx->provider_ctx, c_ctx->key, c_ctx->key_sz, salt_out, ctx->salt_sz,
+          (const unsigned char*) SQLCIPHER_HKDF_NONCE_INFO, sizeof(SQLCIPHER_HKDF_NONCE_INFO) - 1,
+          ctx->nonce_sz, page_nonce);
+  }
+  sqlcipher_shield(c_ctx->key, c_ctx->key_sz);
 
   if(rc != SQLITE_OK) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: cipher operation mode=%d failed for pgno=%d", __func__, mode, pgno);
+    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: hkdf operation failed for pgno=%d", __func__, pgno);
+    sqlcipher_memset(page_key, 0, sizeof(page_key));
+    sqlcipher_memset(page_nonce, 0, sizeof(page_nonce));
     goto error;
-  };
- 
-  if(SQLCIPHER_FLAG_GET(ctx->flags, CIPHER_FLAG_HMAC) && (mode == SQLCIPHER_ENCRYPT)) {
-    if(sqlcipher_page_hmac(ctx, c_ctx, pgno, out_start, size + ctx->iv_sz, hmac_out) != SQLITE_OK) {
-      sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: hmac operation on encrypt failed for pgno=%d", __func__, pgno);
-      goto error;
-    }; 
+  }
+
+  if(mode == SQLCIPHER_ENCRYPT) {
+    rc = ctx->provider->aead_encrypt(ctx->provider_ctx, page_key, ctx->key_sz, page_nonce, ctx->nonce_sz,
+          aad, aad_sz, in, size, out, tag_out, ctx->tag_sz);
+  } else { /* SQLCIPHER_DECRYPT */
+    rc = ctx->provider->aead_decrypt(ctx->provider_ctx, page_key, ctx->key_sz, page_nonce, ctx->nonce_sz,
+          aad, aad_sz, in, size, out, tag_in, ctx->tag_sz);
+  }
+  sqlcipher_memset(page_key, 0, sizeof(page_key));
+  sqlcipher_memset(page_nonce, 0, sizeof(page_nonce));
+
+  if(rc != SQLITE_OK) {
+    if(mode == SQLCIPHER_DECRYPT) {
+      if(sqlite3BtreeGetAutoVacuum(ctx->pBt) != BTREE_AUTOVACUUM_NONE && sqlcipher_ismemset(in, 0, page_sz) == 0) {
+        /* first check if the entire contents of the page is zeros. If so, this page
+           resulted from a short read (i.e. sqlite attempted to pull a page after the end of the file. these
+           short read failures must be ignored for autovaccum mode to work so wipe the output buffer
+           and return SQLITE_OK to skip the decryption step. */
+        sqlcipher_log(SQLCIPHER_LOG_INFO, SQLCIPHER_LOG_CORE, "%s: zeroed page (short read) for pgno %d with autovacuum enabled", __func__, pgno);
+        sqlcipher_memset(out, 0, page_sz);
+        return SQLITE_OK;
+      }
+      /* if the page memory is not all zeros, it means the there was real data on the page and the
+         AEAD authentication tag failed to verify. The page was either tampered with, corrupted, or
+         the wrong key was supplied. Wipe the output buffer and return SQLITE_ERROR to the caller */
+      sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: aead_decrypt authentication failed for pgno=%d", __func__, pgno);
+    } else {
+      sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: aead_encrypt operation failed for pgno=%d", __func__, pgno);
+    }
+    goto error;
   }
 
   CODEC_HEXDUMP("sqlcipher_page_cipher: output page data", out_start, page_sz);
 
   return SQLITE_OK;
 error:
-  sqlcipher_memset(out, 0, page_sz); 
+  sqlcipher_memset(out, 0, page_sz);
   return SQLITE_ERROR;
 }
 
 /**
-  * Derive an encryption key for a cipher contex key based on the raw password.
+  * Validate and store the raw master key for a cipher_ctx.
   *
-  * If the raw key data is formated as x'hex' and there are exactly enough hex chars to fill
-  * the key (i.e 64 hex chars for a 256 bit key) then the key data will be used directly. 
-
-  * Else, if the raw key data is formated as x'hex' and there are exactly enough hex chars to fill
-  * the key and the salt (i.e 92 hex chars for a 256 bit key and 16 byte salt) then it will be unpacked
-  * as the key followed by the salt.
-  * 
-  * Otherwise, a key data will be derived using PBKDF2
-  * 
-  * returns SQLITE_OK if initialization was successful
-  * returns SQLITE_ERROR if the key could't be derived (for instance if pass is NULL or pass_sz is 0)
+  * This provider supports only a single input form: a raw key blob formatted as x'hex',
+  * where the hex-decoded length is at least CIPHER_MIN_KEY_SZ (256) bytes -- see
+  * doc/crypto.md "Key provisioning". There is no passphrase concept and no PBKDF2 (or any
+  * other) key-stretching path; keys shorter than CIPHER_MIN_KEY_SZ, or not supplied in
+  * x'...' form, are rejected here with a clear error.
+  *
+  * Per-page salt/key/nonce derivation happens later, in sqlcipher_page_cipher, not here --
+  * this function's job is just to validate and store the raw master key.
+  *
+  * returns SQLITE_OK if the key was valid and stored
+  * returns SQLITE_ERROR if the key material is missing, malformed, or too short
+  * returns SQLITE_NOMEM if a memory allocation failed
   */
 static int sqlcipher_cipher_ctx_key_derive(codec_ctx *ctx, cipher_ctx *c_ctx) {
-  int rc, raw_key_sz = 0, raw_salt_sz = 0, blob_format = 0, derive_hmac_key = 1;
+  int raw_key_sz, blob_format;
 
-  sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "%s: ctx->kdf_salt_sz=%d ctx->kdf_iter=%d ctx->fast_kdf_iter=%d ctx->key_sz=%d",
-    __func__, ctx->kdf_salt_sz, ctx->kdf_iter, ctx->fast_kdf_iter, ctx->key_sz);
-
-  /* if key material is present on the context for derivation */
   if(!c_ctx->pass || !c_ctx->pass_sz) {
     sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_cipher_ctx_key_derive: key material is not present on the context for key derivation");
     return SQLITE_ERROR;
   }
 
-  /* if necessary, initialize the salt from the header or random source */
-  if(!SQLCIPHER_FLAG_GET(ctx->flags, CIPHER_FLAG_HAS_KDF_SALT)) {
-    if((rc = sqlcipher_codec_ctx_init_kdf_salt(ctx)) != SQLITE_OK) {
-      sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: error %d from sqlcipher_codec_ctx_init_kdf_salt", __func__, rc);
-      goto error;
-    }
-  }
-
-  /* raw hey hex encoded is 2x long */
-  raw_key_sz = ctx->key_sz * 2;
-  raw_salt_sz = ctx->kdf_salt_sz *2;
-
   /* raw key must be BLOB formatted:
    * 1. greater than or equal to 5 characters long
    * 2. starting with x'
    * 3. ending with '
-   * 4. length of contents between the x' and ' must be a power of 2
+   * 4. length of contents between the x' and ' must be even (whole bytes)
    * 5. contents must be hex */
   blob_format =
     c_ctx->pass_sz >= 5
@@ -1855,72 +1642,34 @@ static int sqlcipher_cipher_ctx_key_derive(codec_ctx *ctx, cipher_ctx *c_ctx) {
     && (c_ctx->pass_sz - 3) % 2 == 0
     && cipher_isHex(c_ctx->pass + 2, c_ctx->pass_sz - 3);
 
-  if(blob_format && c_ctx->pass_sz == raw_key_sz + 3) {
-    /* option 1 - raw key consisting of only the encryption key */
-    const unsigned char *z = c_ctx->pass + 2; /* adjust lead offset of x' */
-    sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "%s: using raw key only", __func__);
-    cipher_hex2bin(z, raw_key_sz, c_ctx->key);
-  } else if(blob_format && c_ctx->pass_sz == raw_key_sz + raw_salt_sz + 3) {
-    /* option 2 - raw key consisting of the encryption key and salt */
-    const unsigned char *z = c_ctx->pass + 2;
-    sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "%s: using raw key and salt", __func__);
-    cipher_hex2bin(z, raw_key_sz, c_ctx->key);
-    cipher_hex2bin(z + raw_key_sz, raw_salt_sz, ctx->kdf_salt);
-  } else if(blob_format && c_ctx->pass_sz == raw_key_sz + raw_key_sz + raw_salt_sz + 3) {
-    /* option 3 - raw key consisting of the encryption key, then hmac key, then salt */
-    const unsigned char *z = c_ctx->pass + 2;
-    sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "%s: using raw key, hmac key, and salt", __func__);
-    cipher_hex2bin(z, raw_key_sz, c_ctx->key);
-    cipher_hex2bin(z + raw_key_sz, raw_key_sz, c_ctx->hmac_key);
-    cipher_hex2bin(z + raw_key_sz + raw_key_sz, raw_salt_sz, ctx->kdf_salt);
-    derive_hmac_key = 0;
-  } else {
-    sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "%s: deriving key using PBKDF2 with %d iterations", __func__, ctx->kdf_iter);
-    if((rc = ctx->provider->kdf(ctx->provider_ctx, ctx->kdf_algorithm, c_ctx->pass, c_ctx->pass_sz,
-                  ctx->kdf_salt, ctx->kdf_salt_sz, ctx->kdf_iter,
-                  ctx->key_sz, c_ctx->key)) != SQLITE_OK) {
-      sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: error %d occurred from provider kdf generating encryption key", __func__, rc);
-      goto error;
-    }
+  raw_key_sz = blob_format ? (c_ctx->pass_sz - 3) / 2 : 0;
+
+  if(!blob_format || raw_key_sz < CIPHER_MIN_KEY_SZ) {
+    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE,
+      "%s: key must be supplied as a raw key blob x'...' of at least %d bytes (%d hex characters); "
+      "passphrase-derived keys are not supported by this provider", __func__,
+      CIPHER_MIN_KEY_SZ, CIPHER_MIN_KEY_SZ * 2);
+    goto error;
   }
 
-  /* if this context is setup to use hmac checks, and we didn't already get an hmac
-   * key inbound via keyspec / raw key, then generate a seperate
-   * key for HMAC. In this case, we use the output of the previous KDF as the input to
-   * this KDF run. This ensures a distinct but predictable HMAC key. */
-  if(ctx->flags & CIPHER_FLAG_HMAC && derive_hmac_key) {
-    int i;
-
-    /* start by copying the kdf key into the hmac salt slot
-       then XOR it with the fixed hmac salt defined at compile time
-       this ensures that the salt passed in to derive the hmac key, while
-       easy to derive and publically known, is not the same as the salt used
-       to generate the encryption key */
-    memcpy(ctx->hmac_kdf_salt, ctx->kdf_salt, ctx->kdf_salt_sz);
-    for(i = 0; i < ctx->kdf_salt_sz; i++) {
-      ctx->hmac_kdf_salt[i] ^= hmac_salt_mask;
+  if(c_ctx->key == NULL || c_ctx->key_sz != raw_key_sz) {
+    if(c_ctx->key) sqlcipher_free(c_ctx->key, c_ctx->key_sz);
+    c_ctx->key_sz = 0;
+    if(!(c_ctx->key = sqlcipher_malloc(raw_key_sz))) {
+      return SQLITE_NOMEM;
     }
-
-    sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "%s: deriving hmac key from encryption key using PBKDF2 with %d iterations",
-      __func__, ctx->fast_kdf_iter);
-
-    if((rc = ctx->provider->kdf(ctx->provider_ctx, ctx->kdf_algorithm, c_ctx->key, ctx->key_sz,
-                  ctx->hmac_kdf_salt, ctx->kdf_salt_sz, ctx->fast_kdf_iter,
-                  ctx->key_sz, c_ctx->hmac_key)) != SQLITE_OK) {
-      sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: error occurred from provider kdf generating HMAC key", __func__, rc);
-      goto error;
-    }
+    c_ctx->key_sz = raw_key_sz;
   }
 
-  sqlcipher_shield(c_ctx->key, ctx->key_sz);
-  sqlcipher_shield(c_ctx->hmac_key, ctx->key_sz);
+  cipher_hex2bin(c_ctx->pass + 2, raw_key_sz * 2, c_ctx->key);
+
+  sqlcipher_shield(c_ctx->key, c_ctx->key_sz);
   c_ctx->derive_key = 0;
   return SQLITE_OK;
 
 error:
-  /* if an error occurred, overwrite any derived key material */
-  xoshiro_randomness(c_ctx->key, ctx->key_sz);
-  xoshiro_randomness(c_ctx->hmac_key, ctx->key_sz);
+  /* if an error occurred, overwrite any partially-derived key material */
+  if(c_ctx->key) xoshiro_randomness(c_ctx->key, c_ctx->key_sz);
   return SQLITE_ERROR;
 }
 
@@ -1965,57 +1714,15 @@ static int sqlcipher_codec_key_copy(codec_ctx *ctx, int source) {
   }
 }
 
-static int sqlcipher_check_connection(const char *filename, char *key, int key_sz, char *sql, int *user_version, char** journal_mode) {
-  int rc;
-  sqlite3 *db = NULL;
-  sqlite3_stmt *statement = NULL;
-  char *query_journal_mode = "PRAGMA journal_mode;";
-  char *query_user_version = "PRAGMA user_version;";
- 
-  rc = sqlite3_open(filename, &db);
-  if(rc != SQLITE_OK) goto cleanup; 
-    
-  rc = sqlite3_key(db, key, key_sz);
-  if(rc != SQLITE_OK) goto cleanup; 
-    
-  rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
-  if(rc != SQLITE_OK) goto cleanup; 
-
-  /* start by querying the user version. 
-     this will fail if the key is incorrect */
-  rc = sqlite3_prepare(db, query_user_version, -1, &statement, NULL);
-  if(rc != SQLITE_OK) goto cleanup; 
-    
-  rc = sqlite3_step(statement);
-  if(rc == SQLITE_ROW) {
-    *user_version = sqlite3_column_int(statement, 0);
-  } else {
-    goto cleanup;
-  }
-  sqlite3_finalize(statement); 
-
-  rc = sqlite3_prepare(db, query_journal_mode, -1, &statement, NULL);
-  if(rc != SQLITE_OK) goto cleanup; 
-    
-  rc = sqlite3_step(statement);
-  if(rc == SQLITE_ROW) {
-    *journal_mode = sqlite3_mprintf("%s", sqlite3_column_text(statement, 0)); 
-  } else {
-    goto cleanup; 
-  }
-  rc = SQLITE_OK;
-  /* cleanup will finalize open statement */
-  
-cleanup:
-  if(statement) sqlite3_finalize(statement); 
-  if(db) sqlite3_close(db); 
-  return rc;
-}
-
+/* Integrity check by attempting a full AEAD decrypt (which includes tag verification) of
+** every page in the file using the read context's key. Since AEAD authentication is
+** intrinsic to every decrypt (there is no separate optional HMAC step any more), this
+** simply reuses sqlcipher_page_cipher's normal decrypt path against a scratch buffer and
+** reports any page that fails to authenticate. */
 static int sqlcipher_codec_ctx_integrity_check(codec_ctx *ctx, Parse *pParse, char *column) {
   Pgno page = 1;
   char *result;
-  unsigned char *hmac_out = NULL;
+  unsigned char *page_buffer = NULL;
   sqlite3_file *fd = sqlite3PagerFile(sqlite3BtreePager(ctx->pBt));
   i64 file_sz;
 
@@ -2025,12 +1732,6 @@ static int sqlcipher_codec_ctx_integrity_check(codec_ctx *ctx, Parse *pParse, ch
 
   if(fd == NULL || fd->pMethods == 0) {
     sqlite3VdbeAddOp4(v, OP_String8, 0, 1, 0, "database file is undefined", P4_TRANSIENT);
-    sqlite3VdbeAddOp2(v, OP_ResultRow, 1, 1);
-    goto cleanup;
-  }
-
-  if(!(ctx->flags & CIPHER_FLAG_HMAC)) {
-    sqlite3VdbeAddOp4(v, OP_String8, 0, 1, 0, "HMAC is not enabled, unable to integrity check", P4_TRANSIENT);
     sqlite3VdbeAddOp2(v, OP_ResultRow, 1, 1);
     goto cleanup;
   }
@@ -2047,35 +1748,21 @@ static int sqlcipher_codec_ctx_integrity_check(codec_ctx *ctx, Parse *pParse, ch
     goto cleanup;
   }
 
-  if(!(hmac_out = sqlcipher_malloc(ctx->hmac_sz))) {
-    sqlite3VdbeAddOp4(v, OP_String8, 0, 1, 0, "unable to allocate memory for hmac", P4_TRANSIENT);
-    sqlite3VdbeAddOp2(v, OP_ResultRow, 1, 1);
-    goto cleanup;
-  }
-
-  if(ctx->plaintext_header_sz < 0) {
-    sqlite3VdbeAddOp4(v, OP_String8, 0, 1, 0, "invalid plaintext header size", P4_TRANSIENT);
+  if(!(page_buffer = sqlcipher_malloc(ctx->page_sz))) {
+    sqlite3VdbeAddOp4(v, OP_String8, 0, 1, 0, "unable to allocate memory for page buffer", P4_TRANSIENT);
     sqlite3VdbeAddOp2(v, OP_ResultRow, 1, 1);
     goto cleanup;
   }
 
   for(page = 1; page <= file_sz / ctx->page_sz; page++) {
     i64 offset = (page - 1) * (i64) ctx->page_sz;
-    int payload_sz = ctx->page_sz - ctx->reserve_sz + ctx->iv_sz;
     int read_sz = ctx->page_sz;
 
     /* skip integrity check on PAGER_SJ_PGNO since it will have no valid content */
     if(sqlite3pager_is_sj_pgno(sqlite3BtreePager(ctx->pBt), page)) continue;
 
-    if(page==1) {
-      int page1_offset = ctx->plaintext_header_sz ? ctx->plaintext_header_sz : FILE_HEADER_SZ;
-      read_sz = read_sz - page1_offset;
-      payload_sz = payload_sz - page1_offset;
-      offset += page1_offset;
-    }
-
     sqlcipher_memset(ctx->buffer, 0, ctx->page_sz);
-    sqlcipher_memset(hmac_out, 0, ctx->hmac_sz);
+    sqlcipher_memset(page_buffer, 0, ctx->page_sz);
 
     if(sqlite3OsRead(fd, ctx->buffer, read_sz, offset) != SQLITE_OK) {
       result = sqlite3_mprintf("error reading %d bytes from file page %d at offset %lld", read_sz, page, offset);
@@ -2085,20 +1772,13 @@ static int sqlcipher_codec_ctx_integrity_check(codec_ctx *ctx, Parse *pParse, ch
         sqlite3VdbeAddOp4(v, OP_String8, 0, 1, 0, "error reading from file (OOM)" , P4_STATIC);
       }
       sqlite3VdbeAddOp2(v, OP_ResultRow, 1, 1);
-    } else if(sqlcipher_page_hmac(ctx, ctx->read_ctx, page, ctx->buffer, payload_sz, hmac_out) != SQLITE_OK) {
-      result = sqlite3_mprintf("HMAC operation failed for page %d", page);
+    } else if(sqlcipher_page_cipher(ctx, CIPHER_READ_CTX, page, SQLCIPHER_DECRYPT,
+                ctx->page_sz, ctx->buffer, page_buffer) != SQLITE_OK) {
+      result = sqlite3_mprintf("AEAD authentication failed for page %d", page);
       if(result) {
         sqlite3VdbeAddOp4(v, OP_String8, 0, 1, 0, result, P4_DYNAMIC);
       } else {
-        sqlite3VdbeAddOp4(v, OP_String8, 0, 1, 0, "HMAC operation failed (OOM)" , P4_STATIC);
-      }
-      sqlite3VdbeAddOp2(v, OP_ResultRow, 1, 1);
-    } else if(sqlcipher_memcmp(ctx->buffer + payload_sz, hmac_out, ctx->hmac_sz) != 0) {
-      result = sqlite3_mprintf("HMAC verification failed for page %d", page);
-      if(result) {
-        sqlite3VdbeAddOp4(v, OP_String8, 0, 1, 0, result, P4_DYNAMIC);
-      } else {
-        sqlite3VdbeAddOp4(v, OP_String8, 0, 1, 0, "HMAC verification failed (OOM)" , P4_STATIC);
+        sqlite3VdbeAddOp4(v, OP_String8, 0, 1, 0, "AEAD authentication failed (OOM)" , P4_STATIC);
       }
       sqlite3VdbeAddOp2(v, OP_ResultRow, 1, 1);
     }
@@ -2115,290 +1795,8 @@ static int sqlcipher_codec_ctx_integrity_check(codec_ctx *ctx, Parse *pParse, ch
   }
 
 cleanup:
-  if(hmac_out != NULL) sqlcipher_free(hmac_out, ctx->hmac_sz);
+  if(page_buffer != NULL) sqlcipher_free(page_buffer, ctx->page_sz);
   return SQLITE_OK;
-}
-
-static int sqlcipher_codec_ctx_migrate(codec_ctx *ctx) {
-  int i, pass_sz, keyspec_sz, nRes, user_version, rc, rc_cleanup, oflags, migrated_db_filename_sz;
-  Db *pDb = 0;
-  sqlite3 *db = ctx->pBt->db;
-  const char *db_filename = sqlite3_db_filename(db, "main");
-  char *set_user_version = NULL, *pass = NULL, *attach_command = NULL, *migrated_db_filename = NULL, *keyspec = NULL, *temp = NULL, *journal_mode = NULL, *set_journal_mode = NULL, *pragma_compat = NULL;
-  Btree *pDest = NULL, *pSrc = NULL;
-  sqlite3_file *srcfile, *destfile;
-#if defined(_WIN32) || defined(SQLITE_OS_WINRT)
-  LPWSTR w_db_filename = NULL, w_migrated_db_filename = NULL;
-  int w_db_filename_sz = 0, w_migrated_db_filename_sz = 0;
-#endif
-  pass_sz = keyspec_sz = rc = user_version = 0;
-
-  if(!db_filename || sqlite3Strlen30(db_filename) < 1) 
-    goto cleanup; /* exit immediately if this is an in memory database */ 
-  
-  /* pull the provided password / key material off the current codec context */
-  pass_sz = ctx->read_ctx->pass_sz;
-
-  if(pass_sz < 1 || !ctx->read_ctx->pass) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: underived key material is not available. PRAGMA cipher_migrate MUST be run as the first operation after keying", __func__);
-    rc = SQLITE_MISUSE;
-    goto handle_error;
-  }
-
-  if(!(pass = sqlcipher_malloc(pass_sz+1))) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: failed to allocate key material storage", __func__);
-    rc = SQLITE_NOMEM;
-    goto handle_error;
-  }
-  memset(pass, 0, pass_sz+1);
-  memcpy(pass, ctx->read_ctx->pass, pass_sz);
-
-  /* Version 4 - current, no upgrade required, so exit immediately */
-  rc = sqlcipher_check_connection(db_filename, pass, pass_sz, "", &user_version, &journal_mode);
-  if(rc == SQLITE_OK){
-    sqlcipher_log(SQLCIPHER_LOG_INFO, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: no upgrade required - exiting");
-    goto cleanup;
-  }
-
-  for(i = 3; i > 0; i--) {
-    if(!(pragma_compat = sqlite3_mprintf("PRAGMA cipher_compatibility = %d;", i))) {
-      sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: failed to format pragma_compat", __func__);
-      goto handle_error;
-    }
-
-    rc = sqlcipher_check_connection(db_filename, pass, pass_sz, pragma_compat, &user_version, &journal_mode);
-    if(rc == SQLITE_OK) {
-      sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: version %d format found", i);
-      goto migrate;
-    }
-    sqlite3_free(pragma_compat);
-    pragma_compat = NULL;
-  }
-  
-  /* if we exit the loop normally we failed to determine the version, this is an error */
-  sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: unable to determine format version for upgrade: this may indicate custom settings were used ");
-  rc = SQLITE_NOTADB;
-  goto handle_error;
-
-migrate:
-
-  if(!(temp = sqlite3_mprintf("%s-migrated", db_filename))) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: failed to format temp filename", __func__);
-    rc = SQLITE_NOMEM;
-    goto handle_error;
-  }
-
-  /* overallocate migrated_db_filename, because sqlite3OsOpen will read past the null terminator
-   * to determine whether the filename was URI formatted */
-  migrated_db_filename_sz = sqlite3Strlen30(temp)+2;
-  if(!(migrated_db_filename = sqlcipher_malloc(migrated_db_filename_sz))) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: failed to allocate migrated db filename", __func__);
-    rc = SQLITE_NOMEM;
-    goto handle_error;
-  }
-
-  memcpy(migrated_db_filename, temp, sqlite3Strlen30(temp));
-  sqlite3_free(temp);
-  temp = NULL;
-
-  if(!(attach_command = sqlite3_mprintf("ATTACH DATABASE '%s' as migrate;", migrated_db_filename))) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: failed to allocate attach command", __func__);
-    rc = SQLITE_NOMEM;
-    goto handle_error;
-  }
-
-  if(!(set_user_version = sqlite3_mprintf("PRAGMA migrate.user_version = %d;", user_version))) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: failed to allocate user_version command", __func__);
-    rc = SQLITE_NOMEM;
-    goto handle_error;
-  }
-
-  rc = sqlite3_exec(db, pragma_compat, NULL, NULL, NULL);
-  if(rc != SQLITE_OK){
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: set compatibility mode failed, error code %d", rc);
-    goto handle_error;
-  }
-
-  /* force journal mode to DELETE, we will set it back later if different */
-  rc = sqlite3_exec(db, "PRAGMA journal_mode = delete;", NULL, NULL, NULL);
-  if(rc != SQLITE_OK){
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: force journal mode DELETE failed, error code %d", rc);
-    goto handle_error;
-  }
-
-  rc = sqlite3_exec(db, attach_command, NULL, NULL, NULL);
-  if(rc != SQLITE_OK){
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: attach failed, error code %d", rc);
-    goto handle_error;
-  }
-
-  rc = sqlite3_key_v2(db, "migrate", pass, pass_sz);
-  if(rc != SQLITE_OK){
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: keying attached database failed, error code %d", rc);
-    goto handle_error;
-  }
-
-  rc = sqlite3_exec(db, "SELECT sqlcipher_export('migrate');", NULL, NULL, NULL);
-  if(rc != SQLITE_OK){
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: sqlcipher_export failed, error code %d", rc);
-    goto handle_error;
-  }
-
-#ifdef SQLCIPHER_TEST
-  if((cipher_test_flags & TEST_FAIL_MIGRATE) > 0) {
-    rc = SQLITE_ERROR;
-    sqlcipher_log(SQLCIPHER_LOG_WARN, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: simulated migrate failure, error code %d", rc);
-    goto handle_error;
-  }
-#endif
-
-  rc = sqlite3_exec(db, set_user_version, NULL, NULL, NULL);
-  if(rc != SQLITE_OK){
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: set user version failed, error code %d", rc);
-    goto handle_error;
-  }
-
-  if( !db->autoCommit ){
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: cannot migrate from within a transaction");
-    rc = SQLITE_MISUSE;
-    goto handle_error;
-  }
-  if( db->nVdbeActive>1 ){
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: cannot migrate - SQL statements in progress");
-    rc = SQLITE_MISUSE;
-    goto handle_error;
-  }
-
-  pDest = db->aDb[0].pBt;
-  pDb = &(db->aDb[db->nDb-1]);
-  pSrc = pDb->pBt;
-
-  nRes = sqlite3BtreeGetRequestedReserve(pSrc);
-  /* unset the BTS_PAGESIZE_FIXED flag to avoid SQLITE_READONLY */
-  pDest->pBt->btsFlags &= ~BTS_PAGESIZE_FIXED; 
-  rc = sqlite3BtreeSetPageSize(pDest, default_page_size, nRes, 0);
-  if(rc != SQLITE_OK) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: failed to set btree page size to %d res %d rc %d", default_page_size, nRes, rc);
-    goto handle_error;
-  }
-
-  sqlcipherCodecGetKey(db, db->nDb - 1, (void**)&keyspec, &keyspec_sz);
-  if(keyspec_sz < 1 || !keyspec) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: failed to retrieve keyspec from migrated database", __func__);
-    rc = SQLITE_ERROR;
-    goto handle_error;
-  }
-
-  SQLCIPHER_FLAG_UNSET(ctx->flags, CIPHER_FLAG_KEY_USED);
-  sqlcipherCodecAttach(db, 0, keyspec, keyspec_sz);
-  
-  srcfile = sqlite3PagerFile(sqlite3BtreePager(pSrc));
-  destfile = sqlite3PagerFile(sqlite3BtreePager(pDest));
-
-  sqlite3OsClose(srcfile);
-  sqlite3OsClose(destfile); 
-
-#if defined(_WIN32) || defined(SQLITE_OS_WINRT)
-  sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: performing windows MoveFileExA");
-
-  w_db_filename_sz = MultiByteToWideChar(CP_UTF8, 0, (LPCCH) db_filename, -1, NULL, 0);
-  if(!(w_db_filename = sqlcipher_malloc(w_db_filename_sz * sizeof(wchar_t)))) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: failed to allocate wide filename", __func__);
-    rc = SQLITE_NOMEM;
-    goto handle_error;
-  }
-  w_db_filename_sz = MultiByteToWideChar(CP_UTF8, 0, (LPCCH) db_filename, -1, (const LPWSTR) w_db_filename, w_db_filename_sz);
-
-  w_migrated_db_filename_sz = MultiByteToWideChar(CP_UTF8, 0, (LPCCH) migrated_db_filename, -1, NULL, 0);
-  if(!(w_migrated_db_filename = sqlcipher_malloc(w_migrated_db_filename_sz * sizeof(wchar_t)))) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: failed to allocate wide migrated filename", __func__);
-    rc = SQLITE_NOMEM;
-    goto handle_error;
-  }
-  w_migrated_db_filename_sz = MultiByteToWideChar(CP_UTF8, 0, (LPCCH) migrated_db_filename, -1, (const LPWSTR) w_migrated_db_filename, w_migrated_db_filename_sz);
-
-  if(!MoveFileExW(w_migrated_db_filename, w_db_filename, MOVEFILE_REPLACE_EXISTING)) {
-    rc = SQLITE_ERROR;
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: error occurred while renaming migration files %d", rc);
-    goto handle_error;
-  }
-#else
-  sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: performing POSIX rename");
-  if ((rc = rename(migrated_db_filename, db_filename)) != 0) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: error occurred while renaming migration files %s to %s: %d", migrated_db_filename, db_filename, rc);
-    goto handle_error;
-  }
-#endif
-  sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: renamed migration database %s to main database %s: %d", migrated_db_filename, db_filename, rc);
-
-  rc = sqlite3OsOpen(db->pVfs, migrated_db_filename, srcfile, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_MAIN_DB, &oflags);
-  if(rc != SQLITE_OK) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: failed to reopen migration database %s: %d", migrated_db_filename, rc);
-    goto handle_error;
-  }
-
-  rc = sqlite3OsOpen(db->pVfs, db_filename, destfile, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_MAIN_DB, &oflags);
-  if(rc != SQLITE_OK) {
-    sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: failed to reopen main database %s: %d", db_filename, rc);
-    goto handle_error;
-  }
-
-  sqlite3pager_reset(sqlite3BtreePager(pDest));
-  sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: reset pager");
-
-handle_error:
-  rc_cleanup = sqlite3_exec(db, "DETACH DATABASE migrate;", NULL, NULL, NULL);
-  if(rc_cleanup != SQLITE_OK) {
-    sqlcipher_log(SQLCIPHER_LOG_WARN, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: DETACH DATABASE migrate failed: %d", rc_cleanup);
-    /* only overwrite the rc in the cleanup stage if it is currently not an error. This will prevent overwriting a previous error that occured earlier in migration */
-    if(rc == SQLITE_OK) { 
-      rc = rc_cleanup;
-    }
-  }
-
-  sqlite3ResetAllSchemasOfConnection(db);
-  sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: reset all schemas");
-
-  if(journal_mode) {
-    if((set_journal_mode = sqlite3_mprintf("PRAGMA journal_mode = %s;", journal_mode))) {
-      rc_cleanup = sqlite3_exec(db, set_journal_mode, NULL, NULL, NULL);
-      if(rc_cleanup != SQLITE_OK) {
-        sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: failed to re-set journal mode via %s: %d", set_journal_mode, rc_cleanup);
-        if(rc == SQLITE_OK) {
-          rc = rc_cleanup;
-        }
-      }
-    }
-  }
-
-  if(migrated_db_filename) {
-    int del_rc = sqlite3OsDelete(db->pVfs, migrated_db_filename, 0);
-    if(del_rc != SQLITE_OK) {
-      sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: failed to delete migration database %s: %d", migrated_db_filename, del_rc);
-    }
-  }
-
-  if(rc != SQLITE_OK) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_migrate: an error occurred attempting to migrate the database - last error %d", rc);
-    sqlite3pager_reset(sqlite3BtreePager(ctx->pBt));
-    ctx->error = rc; /* set flag for deferred error */
-  }
-
-cleanup:
-  if(pass) sqlcipher_free(pass, pass_sz);
-  if(keyspec) sqlcipher_free(keyspec, keyspec_sz);
-  if(attach_command) sqlite3_free(attach_command);
-  if(migrated_db_filename) sqlcipher_free(migrated_db_filename, migrated_db_filename_sz);
-  if(set_user_version) sqlite3_free(set_user_version);
-  if(set_journal_mode) sqlite3_free(set_journal_mode);
-  if(journal_mode) sqlite3_free(journal_mode);
-  if(pragma_compat) sqlite3_free(pragma_compat);
-#if defined(_WIN32) || defined(SQLITE_OS_WINRT)
-  if(w_db_filename) sqlcipher_free(w_db_filename, w_db_filename_sz);
-  if(w_migrated_db_filename) sqlcipher_free(w_migrated_db_filename, w_migrated_db_filename_sz);
-#endif
-
-  return rc;
 }
 
 static int sqlcipher_codec_add_random(codec_ctx *ctx, const char *zRight, int random_sz){
@@ -2829,12 +2227,9 @@ int sqlcipher_codec_pragma(sqlite3* db, int iDb, Parse *pParse, const char *zLef
   } else
   if( sqlite3_stricmp(zLeft, "cipher_migrate")==0 && !zRight ){
     if(ctx){
-      int status = sqlcipher_codec_ctx_migrate(ctx); 
-      char *migrate_status = sqlite3_mprintf("%d", status);
-      sqlcipher_vdbe_return_string(pParse, "cipher_migrate", migrate_status, P4_DYNAMIC);
-      if(status != SQLITE_OK) {
-        sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_pragma: error occurred during cipher_migrate: %d", status);
-      }
+      const char* message = "PRAGMA cipher_migrate is no longer supported: there is no migration path from AES-256 SQLCipher databases.";
+      sqlcipher_vdbe_return_string(pParse, "cipher_migrate", message, P4_TRANSIENT);
+      sqlite3_log(SQLITE_WARNING, message);
     }
   } else
   if( sqlite3_stricmp(zLeft, "cipher_provider")==0 && !zRight ){
@@ -2869,35 +2264,26 @@ int sqlcipher_codec_pragma(sqlite3* db, int iDb, Parse *pParse, const char *zLef
     sqlcipher_vdbe_return_string(pParse, "rekey_cipher", message, P4_TRANSIENT);
     sqlite3_log(SQLITE_WARNING, message);
   }else
+  /* PBKDF2/KDF-iteration concepts no longer exist -- there is no passphrase-derived key
+     any more, only a raw master key (see doc/crypto.md). These pragmas are kept as
+     harmless no-ops/deprecation notices following the precedent set by PRAGMA cipher. */
   if( sqlite3_stricmp(zLeft,"cipher_default_kdf_iter")==0 ){
-    if( zRight ) {
-      default_kdf_iter = atoi(zRight); /* change default KDF iterations */
-    } else {
-      char *kdf_iter = sqlite3_mprintf("%d", default_kdf_iter);
-      sqlcipher_vdbe_return_string(pParse, "cipher_default_kdf_iter", kdf_iter, P4_DYNAMIC);
-    }
+    const char* message = "PRAGMA cipher_default_kdf_iter is no longer supported.";
+    sqlcipher_vdbe_return_string(pParse, "cipher_default_kdf_iter", message, P4_TRANSIENT);
+    sqlite3_log(SQLITE_WARNING, message);
   }else
   if( sqlite3_stricmp(zLeft, "kdf_iter")==0 ){
     if(ctx) {
-      if( zRight ) {
-        sqlcipher_codec_ctx_set_kdf_iter(ctx, atoi(zRight)); /* change of RW PBKDF2 iteration */
-      } else {
-        char *kdf_iter = sqlite3_mprintf("%d", ctx->kdf_iter);
-        sqlcipher_vdbe_return_string(pParse, "kdf_iter", kdf_iter, P4_DYNAMIC);
-      }
+      const char* message = "PRAGMA kdf_iter is no longer supported.";
+      sqlcipher_vdbe_return_string(pParse, "kdf_iter", message, P4_TRANSIENT);
+      sqlite3_log(SQLITE_WARNING, message);
     }
   }else
   if( sqlite3_stricmp(zLeft, "fast_kdf_iter")==0){
     if(ctx) {
-      if( zRight ) {
-        char *deprecation = "PRAGMA fast_kdf_iter is deprecated, please remove from use";
-        sqlcipher_codec_ctx_set_fast_kdf_iter(ctx, atoi(zRight)); /* change of RW PBKDF2 iteration */
-        sqlcipher_vdbe_return_string(pParse, "fast_kdf_iter", deprecation, P4_TRANSIENT);
-        sqlite3_log(SQLITE_WARNING, deprecation);
-      } else {
-        char *fast_kdf_iter = sqlite3_mprintf("%d", ctx->fast_kdf_iter);
-        sqlcipher_vdbe_return_string(pParse, "fast_kdf_iter", fast_kdf_iter, P4_DYNAMIC);
-      }
+      const char* message = "PRAGMA fast_kdf_iter is no longer supported.";
+      sqlcipher_vdbe_return_string(pParse, "fast_kdf_iter", message, P4_TRANSIENT);
+      sqlite3_log(SQLITE_WARNING, message);
     }
   }else
   if( sqlite3_stricmp(zLeft, "rekey_kdf_iter")==0 && zRight ){
@@ -2934,117 +2320,82 @@ int sqlcipher_codec_pragma(sqlite3* db, int iDb, Parse *pParse, const char *zLef
       sqlcipher_vdbe_return_string(pParse, "cipher_default_page_size", page_size, P4_DYNAMIC);
     }
   }else
+  /* AEAD authentication is intrinsic to every page (there is no separate optional HMAC
+     step any more, and no page-number binding in the AAD -- see doc/crypto.md "Known
+     limitations"), so these HMAC-era pragmas are no longer meaningful. Kept as
+     deprecation notices following the precedent set by PRAGMA cipher. */
   if( sqlite3_stricmp(zLeft,"cipher_default_use_hmac")==0 ){
-    if( zRight ) {
-      sqlcipher_set_default_use_hmac(sqlite3GetBoolean(zRight,1));
-    } else {
-      char *default_use_hmac = sqlite3_mprintf("%d", SQLCIPHER_FLAG_GET(default_flags, CIPHER_FLAG_HMAC));
-      sqlcipher_vdbe_return_string(pParse, "cipher_default_use_hmac", default_use_hmac, P4_DYNAMIC);
-    }
+    const char* message = "PRAGMA cipher_default_use_hmac is no longer supported: AEAD authentication is always enabled.";
+    sqlcipher_vdbe_return_string(pParse, "cipher_default_use_hmac", message, P4_TRANSIENT);
+    sqlite3_log(SQLITE_WARNING, message);
   }else
   if( sqlite3_stricmp(zLeft,"cipher_use_hmac")==0 ){
     if(ctx) {
-      if( zRight ) {
-        rc = sqlcipher_codec_ctx_set_use_hmac(ctx, sqlite3GetBoolean(zRight,1));
-        if(rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, rc);
-        /* since the use of hmac has changed, the page size may also change */
-        rc = codec_set_btree_to_codec_pagesize(db, pDb, ctx);
-        if(rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, rc);
-      } else {
-        char *hmac_flag = sqlite3_mprintf("%d", SQLCIPHER_FLAG_GET(ctx->flags, CIPHER_FLAG_HMAC));
-        sqlcipher_vdbe_return_string(pParse, "cipher_use_hmac", hmac_flag, P4_DYNAMIC);
-      }
+      const char* message = "PRAGMA cipher_use_hmac is no longer supported: AEAD authentication is always enabled.";
+      sqlcipher_vdbe_return_string(pParse, "cipher_use_hmac", message, P4_TRANSIENT);
+      sqlite3_log(SQLITE_WARNING, message);
     }
   }else
   if( sqlite3_stricmp(zLeft,"cipher_hmac_pgno")==0 ){
     if(ctx) {
-      if(zRight) {
-        char *deprecation = "PRAGMA cipher_hmac_pgno is deprecated, please remove from use";
-        /* clear both pgno endian flags */
-        if(sqlite3_stricmp(zRight, "le") == 0) {
-          SQLCIPHER_FLAG_UNSET(ctx->flags, CIPHER_FLAG_BE_PGNO);
-          SQLCIPHER_FLAG_SET(ctx->flags, CIPHER_FLAG_LE_PGNO);
-        } else if(sqlite3_stricmp(zRight, "be") == 0) {
-          SQLCIPHER_FLAG_UNSET(ctx->flags, CIPHER_FLAG_LE_PGNO);
-          SQLCIPHER_FLAG_SET(ctx->flags, CIPHER_FLAG_BE_PGNO);
-        } else if(sqlite3_stricmp(zRight, "native") == 0) {
-          SQLCIPHER_FLAG_UNSET(ctx->flags, CIPHER_FLAG_LE_PGNO);
-          SQLCIPHER_FLAG_UNSET(ctx->flags, CIPHER_FLAG_BE_PGNO);
-        }
-        sqlcipher_vdbe_return_string(pParse, "cipher_hmac_pgno", deprecation, P4_TRANSIENT);
-        sqlite3_log(SQLITE_WARNING, deprecation);
- 
-      } else {
-        if(SQLCIPHER_FLAG_GET(ctx->flags, CIPHER_FLAG_LE_PGNO)) {
-          sqlcipher_vdbe_return_string(pParse, "cipher_hmac_pgno", "le", P4_TRANSIENT);
-        } else if(SQLCIPHER_FLAG_GET(ctx->flags, CIPHER_FLAG_BE_PGNO)) {
-          sqlcipher_vdbe_return_string(pParse, "cipher_hmac_pgno", "be", P4_TRANSIENT);
-        } else {
-          sqlcipher_vdbe_return_string(pParse, "cipher_hmac_pgno", "native", P4_TRANSIENT);
-        }
-      }
+      const char* message = "PRAGMA cipher_hmac_pgno is no longer supported.";
+      sqlcipher_vdbe_return_string(pParse, "cipher_hmac_pgno", message, P4_TRANSIENT);
+      sqlite3_log(SQLITE_WARNING, message);
     }
   }else
   if( sqlite3_stricmp(zLeft,"cipher_hmac_salt_mask")==0 ){
     if(ctx) {
-      if(zRight) {
-        char *deprecation = "PRAGMA cipher_hmac_salt_mask is deprecated, please remove from use";
-        if (sqlite3StrNICmp(zRight ,"x'", 2) == 0 && sqlite3Strlen30(zRight) == 5) {
-          unsigned char mask = 0;
-          const unsigned char *hex = (const unsigned char *)zRight+2;
-          cipher_hex2bin(hex,2,&mask);
-          hmac_salt_mask = mask;
-        }
-        sqlcipher_vdbe_return_string(pParse, "cipher_hmac_salt_mask", deprecation, P4_TRANSIENT);
-        sqlite3_log(SQLITE_WARNING, deprecation);
-      } else {
-        char *mask = sqlite3_mprintf("%02x", hmac_salt_mask);
-        sqlcipher_vdbe_return_string(pParse, "cipher_hmac_salt_mask", mask, P4_DYNAMIC);
-      }
-    }
-  }else 
-  if( sqlite3_stricmp(zLeft,"cipher_plaintext_header_size")==0 ){
-    if(ctx) {
-      if( zRight ) {
-        int size = atoi(zRight);
-        /* deliberately ignore result code, if size is invalid it will be set to -1
-           and trip the error later in the codec */
-        sqlcipher_codec_ctx_set_plaintext_header_size(ctx, size);
-      } else {
-        char *size = sqlite3_mprintf("%d", ctx->plaintext_header_sz);
-        sqlcipher_vdbe_return_string(pParse, "cipher_plaintext_header_size", size, P4_DYNAMIC);
-      }
-    }
-  }else 
-  if( sqlite3_stricmp(zLeft,"cipher_default_plaintext_header_size")==0 ){
-    if( zRight ) {
-      default_plaintext_header_size = atoi(zRight);
-    } else {
-      char *size = sqlite3_mprintf("%d", default_plaintext_header_size);
-      sqlcipher_vdbe_return_string(pParse, "cipher_default_plaintext_header_size", size, P4_DYNAMIC);
+      const char* message = "PRAGMA cipher_hmac_salt_mask is no longer supported.";
+      sqlcipher_vdbe_return_string(pParse, "cipher_hmac_salt_mask", message, P4_TRANSIENT);
+      sqlite3_log(SQLITE_WARNING, message);
     }
   }else
+  /* cipher_plaintext_header_size / cipher_default_plaintext_header_size ("recovery mode",
+     exposing part of page 1 as genuinely unencrypted): this existed solely to solve a
+     cryptographic bootstrapping problem in the old AES design, where a single database-wide
+     KDF salt had to be readable before ANY page could be decrypted. That problem does not
+     exist here -- the master key is supplied directly (no external-salt-driven derivation
+     needed to get started) and every page, including page 1, carries its own salt in its own
+     reserve region, exactly like the IV/HMAC reserve bytes always were. There is therefore no
+     bootstrapping reason for a plaintext carve-out to exist any more, and keeping it would
+     require reintroducing exactly the page-1-header-corruption hazard this fix removes (a
+     plaintext region overlapping real, mutable SQLite header fields like the schema cookie
+     and user_version). Deprecated as no-ops, following the same precedent as the other
+     now-meaningless pragmas above. */
+  if( sqlite3_stricmp(zLeft,"cipher_plaintext_header_size")==0 ){
+    if(ctx) {
+      const char* message = "PRAGMA cipher_plaintext_header_size is no longer supported: every page, including page 1, is always fully encrypted.";
+      sqlcipher_vdbe_return_string(pParse, "cipher_plaintext_header_size", message, P4_TRANSIENT);
+      sqlite3_log(SQLITE_WARNING, message);
+    }
+  }else
+  if( sqlite3_stricmp(zLeft,"cipher_default_plaintext_header_size")==0 ){
+    const char* message = "PRAGMA cipher_default_plaintext_header_size is no longer supported: every page, including page 1, is always fully encrypted.";
+    sqlcipher_vdbe_return_string(pParse, "cipher_default_plaintext_header_size", message, P4_TRANSIENT);
+    sqlite3_log(SQLITE_WARNING, message);
+  }else
+  /* PRAGMA cipher_salt: salt is per-page and freshly random on every write (see
+     doc/crypto.md), so there is no longer a single database-wide KDF salt. This reports
+     page 1's current on-disk salt, read directly from page 1's own reserve region --
+     exactly like any other page's -- with no separate cached copy on codec_ctx (see
+     sqlcipher_codec_ctx_get_page1_salt). This salt is used only for self-description /
+     cosmetic reporting; it plays no role in deriving any page's cryptographic key material
+     (see sqlcipher_page_cipher), and setting it has no effect on the real on-disk salt
+     (sqlcipher_page_cipher always freshly randomizes the salt on every page write, including
+     page 1's), so the setter form is deprecated as a no-op rather than pretending to cache a
+     value that would just be silently discarded on the next write. */
   if( sqlite3_stricmp(zLeft,"cipher_salt")==0 ){
     if(ctx) {
       if(zRight) {
-        if (sqlite3StrNICmp(zRight ,"x'", 2) == 0 && sqlite3Strlen30(zRight) == (FILE_HEADER_SZ*2)+3) {
-          unsigned char *salt = NULL;
-          const unsigned char *hex = (const unsigned char *)zRight+2;
-           
-          if(!(salt = (unsigned char*) sqlite3_malloc(FILE_HEADER_SZ))) {
-            sqlcipher_codec_ctx_set_error(ctx, SQLITE_NOMEM);
-          } else {
-            cipher_hex2bin(hex,FILE_HEADER_SZ*2,salt);
-            sqlcipher_codec_ctx_set_kdf_salt(ctx, salt, FILE_HEADER_SZ);
-            sqlite3_free(salt);
-          }
-        }
+        const char* message = "PRAGMA cipher_salt can no longer be set: every page's salt, including page 1's, is freshly randomized by the codec on each write.";
+        sqlcipher_vdbe_return_string(pParse, "cipher_salt", message, P4_TRANSIENT);
+        sqlite3_log(SQLITE_WARNING, message);
       } else {
-        void *salt;
+        unsigned char salt[CIPHER_MAX_KEY_SZ];
         char *hexsalt = NULL;
-        if((hexsalt = (char*) sqlite3_malloc((FILE_HEADER_SZ*2)+1))) {
-          if((rc = sqlcipher_codec_ctx_get_kdf_salt(ctx, &salt)) == SQLITE_OK) {
-            cipher_bin2hex(salt, FILE_HEADER_SZ, hexsalt);
+        if((hexsalt = (char*) sqlite3_malloc((ctx->salt_sz*2)+1))) {
+          if((rc = sqlcipher_codec_ctx_get_page1_salt(ctx, salt)) == SQLITE_OK) {
+            cipher_bin2hex(salt, ctx->salt_sz, hexsalt);
             sqlcipher_vdbe_return_string(pParse, "cipher_salt", hexsalt, P4_DYNAMIC);
           } else {
             sqlite3_free(hexsalt);
@@ -3056,195 +2407,46 @@ int sqlcipher_codec_pragma(sqlite3* db, int iDb, Parse *pParse, const char *zLef
       }
     }
   }else
+  /* HMAC/KDF algorithm selection and the legacy "compatibility" version presets don't
+     apply any more -- there is exactly one fixed algorithm combination (Ascon-Keccak-512
+     AEAD + HKDF-SHA3-512), selected at build time, not at runtime. Kept as deprecation
+     notices following the precedent set by PRAGMA cipher. */
   if( sqlite3_stricmp(zLeft,"cipher_hmac_algorithm")==0 ){
     if(ctx) {
-      if(zRight) {
-        rc = SQLITE_ERROR;
-        if(sqlite3_stricmp(zRight, SQLCIPHER_HMAC_SHA1_LABEL) == 0) {
-          rc = sqlcipher_codec_ctx_set_hmac_algorithm(ctx, SQLCIPHER_HMAC_SHA1);
-        } else if(sqlite3_stricmp(zRight, SQLCIPHER_HMAC_SHA256_LABEL) == 0) {
-          rc = sqlcipher_codec_ctx_set_hmac_algorithm(ctx, SQLCIPHER_HMAC_SHA256);
-        } else if(sqlite3_stricmp(zRight, SQLCIPHER_HMAC_SHA512_LABEL) == 0) {
-          rc = sqlcipher_codec_ctx_set_hmac_algorithm(ctx, SQLCIPHER_HMAC_SHA512);
-        }
-        if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-        rc = codec_set_btree_to_codec_pagesize(db, pDb, ctx);
-        if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-      } else {
-        int algorithm = ctx->hmac_algorithm;
-        if(ctx->hmac_algorithm == SQLCIPHER_HMAC_SHA1) {
-          sqlcipher_vdbe_return_string(pParse, "cipher_hmac_algorithm", SQLCIPHER_HMAC_SHA1_LABEL, P4_TRANSIENT);
-        } else if(algorithm == SQLCIPHER_HMAC_SHA256) {
-          sqlcipher_vdbe_return_string(pParse, "cipher_hmac_algorithm", SQLCIPHER_HMAC_SHA256_LABEL, P4_TRANSIENT);
-        } else if(algorithm == SQLCIPHER_HMAC_SHA512) {
-          sqlcipher_vdbe_return_string(pParse, "cipher_hmac_algorithm", SQLCIPHER_HMAC_SHA512_LABEL, P4_TRANSIENT);
-        }
-      }
+      const char* message = "PRAGMA cipher_hmac_algorithm is no longer supported.";
+      sqlcipher_vdbe_return_string(pParse, "cipher_hmac_algorithm", message, P4_TRANSIENT);
+      sqlite3_log(SQLITE_WARNING, message);
     }
-  }else 
+  }else
   if( sqlite3_stricmp(zLeft,"cipher_default_hmac_algorithm")==0 ){
-    if(zRight) {
-      if(sqlite3_stricmp(zRight, SQLCIPHER_HMAC_SHA1_LABEL) == 0) {
-        default_hmac_algorithm = SQLCIPHER_HMAC_SHA1;
-      } else if(sqlite3_stricmp(zRight, SQLCIPHER_HMAC_SHA256_LABEL) == 0) {
-        default_hmac_algorithm = SQLCIPHER_HMAC_SHA256;
-      } else if(sqlite3_stricmp(zRight, SQLCIPHER_HMAC_SHA512_LABEL) == 0) {
-        default_hmac_algorithm = SQLCIPHER_HMAC_SHA512;
-      }
-    } else {
-      if(default_hmac_algorithm == SQLCIPHER_HMAC_SHA1) {
-        sqlcipher_vdbe_return_string(pParse, "cipher_default_hmac_algorithm", SQLCIPHER_HMAC_SHA1_LABEL, P4_TRANSIENT);
-      } else if(default_hmac_algorithm == SQLCIPHER_HMAC_SHA256) {
-        sqlcipher_vdbe_return_string(pParse, "cipher_default_hmac_algorithm", SQLCIPHER_HMAC_SHA256_LABEL, P4_TRANSIENT);
-      } else if(default_hmac_algorithm == SQLCIPHER_HMAC_SHA512) {
-        sqlcipher_vdbe_return_string(pParse, "cipher_default_hmac_algorithm", SQLCIPHER_HMAC_SHA512_LABEL, P4_TRANSIENT);
-      }
-    }
-  }else 
+    const char* message = "PRAGMA cipher_default_hmac_algorithm is no longer supported.";
+    sqlcipher_vdbe_return_string(pParse, "cipher_default_hmac_algorithm", message, P4_TRANSIENT);
+    sqlite3_log(SQLITE_WARNING, message);
+  }else
   if( sqlite3_stricmp(zLeft,"cipher_kdf_algorithm")==0 ){
     if(ctx) {
-      if(zRight) {
-        rc = SQLITE_ERROR;
-        if(sqlite3_stricmp(zRight, SQLCIPHER_PBKDF2_HMAC_SHA1_LABEL) == 0) {
-          rc = sqlcipher_codec_ctx_set_kdf_algorithm(ctx, SQLCIPHER_PBKDF2_HMAC_SHA1);
-        } else if(sqlite3_stricmp(zRight, SQLCIPHER_PBKDF2_HMAC_SHA256_LABEL) == 0) {
-          rc = sqlcipher_codec_ctx_set_kdf_algorithm(ctx, SQLCIPHER_PBKDF2_HMAC_SHA256);
-        } else if(sqlite3_stricmp(zRight, SQLCIPHER_PBKDF2_HMAC_SHA512_LABEL) == 0) {
-          rc = sqlcipher_codec_ctx_set_kdf_algorithm(ctx, SQLCIPHER_PBKDF2_HMAC_SHA512);
-        }
-        if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-      } else {
-        if(ctx->kdf_algorithm == SQLCIPHER_PBKDF2_HMAC_SHA1) {
-          sqlcipher_vdbe_return_string(pParse, "cipher_kdf_algorithm", SQLCIPHER_PBKDF2_HMAC_SHA1_LABEL, P4_TRANSIENT);
-        } else if(ctx->kdf_algorithm == SQLCIPHER_PBKDF2_HMAC_SHA256) {
-          sqlcipher_vdbe_return_string(pParse, "cipher_kdf_algorithm", SQLCIPHER_PBKDF2_HMAC_SHA256_LABEL, P4_TRANSIENT);
-        } else if(ctx->kdf_algorithm == SQLCIPHER_PBKDF2_HMAC_SHA512) {
-          sqlcipher_vdbe_return_string(pParse, "cipher_kdf_algorithm", SQLCIPHER_PBKDF2_HMAC_SHA512_LABEL, P4_TRANSIENT);
-        }
-      }
+      const char* message = "PRAGMA cipher_kdf_algorithm is no longer supported.";
+      sqlcipher_vdbe_return_string(pParse, "cipher_kdf_algorithm", message, P4_TRANSIENT);
+      sqlite3_log(SQLITE_WARNING, message);
     }
-  }else 
+  }else
   if( sqlite3_stricmp(zLeft,"cipher_default_kdf_algorithm")==0 ){
-    if(zRight) {
-      if(sqlite3_stricmp(zRight, SQLCIPHER_PBKDF2_HMAC_SHA1_LABEL) == 0) {
-        default_kdf_algorithm = SQLCIPHER_PBKDF2_HMAC_SHA1;
-      } else if(sqlite3_stricmp(zRight, SQLCIPHER_PBKDF2_HMAC_SHA256_LABEL) == 0) {
-        default_kdf_algorithm = SQLCIPHER_PBKDF2_HMAC_SHA256;
-      } else if(sqlite3_stricmp(zRight, SQLCIPHER_PBKDF2_HMAC_SHA512_LABEL) == 0) {
-        default_kdf_algorithm = SQLCIPHER_PBKDF2_HMAC_SHA512;
-      }
-    } else {
-      if(default_kdf_algorithm == SQLCIPHER_PBKDF2_HMAC_SHA1) {
-        sqlcipher_vdbe_return_string(pParse, "cipher_default_kdf_algorithm", SQLCIPHER_PBKDF2_HMAC_SHA1_LABEL, P4_TRANSIENT);
-      } else if(default_kdf_algorithm == SQLCIPHER_PBKDF2_HMAC_SHA256) {
-        sqlcipher_vdbe_return_string(pParse, "cipher_default_kdf_algorithm", SQLCIPHER_PBKDF2_HMAC_SHA256_LABEL, P4_TRANSIENT);
-      } else if(default_kdf_algorithm == SQLCIPHER_PBKDF2_HMAC_SHA512) {
-        sqlcipher_vdbe_return_string(pParse, "cipher_default_kdf_algorithm", SQLCIPHER_PBKDF2_HMAC_SHA512_LABEL, P4_TRANSIENT);
-      }
-    }
+    const char* message = "PRAGMA cipher_default_kdf_algorithm is no longer supported.";
+    sqlcipher_vdbe_return_string(pParse, "cipher_default_kdf_algorithm", message, P4_TRANSIENT);
+    sqlite3_log(SQLITE_WARNING, message);
   }else
   if( sqlite3_stricmp(zLeft,"cipher_compatibility")==0 ){
     if(ctx) {
-      if(zRight) {
-        int version = atoi(zRight); 
-
-        switch(version) {
-          case 1: 
-            rc = sqlcipher_codec_ctx_set_pagesize(ctx, 1024);
-            if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-            rc = sqlcipher_codec_ctx_set_hmac_algorithm(ctx, SQLCIPHER_HMAC_SHA1);
-            if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-            rc = sqlcipher_codec_ctx_set_kdf_algorithm(ctx, SQLCIPHER_PBKDF2_HMAC_SHA1);
-            if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-            rc = sqlcipher_codec_ctx_set_kdf_iter(ctx, 4000); 
-            if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-            rc = sqlcipher_codec_ctx_set_use_hmac(ctx, 0);
-            if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-            break;
-
-          case 2: 
-            rc = sqlcipher_codec_ctx_set_pagesize(ctx, 1024);
-            if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-            rc = sqlcipher_codec_ctx_set_hmac_algorithm(ctx, SQLCIPHER_HMAC_SHA1);
-            if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-            rc = sqlcipher_codec_ctx_set_kdf_algorithm(ctx, SQLCIPHER_PBKDF2_HMAC_SHA1);
-            if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-            rc = sqlcipher_codec_ctx_set_kdf_iter(ctx, 4000); 
-            if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-            rc = sqlcipher_codec_ctx_set_use_hmac(ctx, 1);
-            if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-            break;
-
-          case 3:
-            rc = sqlcipher_codec_ctx_set_pagesize(ctx, 1024);
-            if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-            rc = sqlcipher_codec_ctx_set_hmac_algorithm(ctx, SQLCIPHER_HMAC_SHA1);
-            if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-            rc = sqlcipher_codec_ctx_set_kdf_algorithm(ctx, SQLCIPHER_PBKDF2_HMAC_SHA1);
-            if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-            rc = sqlcipher_codec_ctx_set_kdf_iter(ctx, 64000); 
-            if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-            rc = sqlcipher_codec_ctx_set_use_hmac(ctx, 1);
-            if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-            break;
-
-          default:
-            rc = sqlcipher_codec_ctx_set_pagesize(ctx, 4096);
-            if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-            rc = sqlcipher_codec_ctx_set_hmac_algorithm(ctx, SQLCIPHER_HMAC_SHA512);
-            if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-            rc = sqlcipher_codec_ctx_set_kdf_algorithm(ctx, SQLCIPHER_PBKDF2_HMAC_SHA512);
-            if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-            rc = sqlcipher_codec_ctx_set_kdf_iter(ctx, 256000); 
-            if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-            rc = sqlcipher_codec_ctx_set_use_hmac(ctx, 1);
-            if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-            break;
-        }  
-
-        rc = codec_set_btree_to_codec_pagesize(db, pDb, ctx);
-        if (rc != SQLITE_OK) sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-      } 
+      const char* message = "PRAGMA cipher_compatibility is no longer supported.";
+      sqlcipher_vdbe_return_string(pParse, "cipher_compatibility", message, P4_TRANSIENT);
+      sqlite3_log(SQLITE_WARNING, message);
     }
-  }else 
+  }else
   if( sqlite3_stricmp(zLeft,"cipher_default_compatibility")==0 ){
-    if(zRight) {
-      int version = atoi(zRight); 
-      switch(version) {
-        case 1: 
-          default_page_size = 1024;
-          default_hmac_algorithm = SQLCIPHER_HMAC_SHA1;
-          default_kdf_algorithm = SQLCIPHER_PBKDF2_HMAC_SHA1;
-          default_kdf_iter = 4000;
-          sqlcipher_set_default_use_hmac(0);
-          break;
-
-        case 2: 
-          default_page_size = 1024;
-          default_hmac_algorithm = SQLCIPHER_HMAC_SHA1;
-          default_kdf_algorithm = SQLCIPHER_PBKDF2_HMAC_SHA1;
-          default_kdf_iter = 4000;
-          sqlcipher_set_default_use_hmac(1);
-          break;
-
-        case 3:
-          default_page_size = 1024;
-          default_hmac_algorithm = SQLCIPHER_HMAC_SHA1;
-          default_kdf_algorithm = SQLCIPHER_PBKDF2_HMAC_SHA1;
-          default_kdf_iter = 64000;
-          sqlcipher_set_default_use_hmac(1);
-          break;
-
-        default:
-          default_page_size = 4096;
-          default_hmac_algorithm = SQLCIPHER_HMAC_SHA512;
-          default_kdf_algorithm = SQLCIPHER_PBKDF2_HMAC_SHA512;
-          default_kdf_iter = 256000;
-          sqlcipher_set_default_use_hmac(1);
-          break;
-      }  
-    } 
-  }else 
+    const char* message = "PRAGMA cipher_default_compatibility is no longer supported.";
+    sqlcipher_vdbe_return_string(pParse, "cipher_default_compatibility", message, P4_TRANSIENT);
+    sqlite3_log(SQLITE_WARNING, message);
+  }else
   if( sqlite3_stricmp(zLeft,"cipher_memory_security")==0 ){
     if( zRight ) {
       if(sqlite3GetBoolean(zRight,1)) {
@@ -3263,80 +2465,24 @@ int sqlcipher_codec_pragma(sqlite3* db, int iDb, Parse *pParse, const char *zLef
       sqlcipher_vdbe_return_string(pParse, "cipher_memory_security", on, P4_DYNAMIC);
     }
   }else
+  /* cipher_settings/cipher_default_settings: report only the settings that still exist
+     for this provider (there is a single fixed algorithm combination, so most of the
+     historic HMAC/KDF-algorithm/iteration settings no longer apply) */
   if( sqlite3_stricmp(zLeft,"cipher_settings")==0 ){
     if(ctx) {
-      int algorithm;
       char *pragma;
-
-      pragma = sqlite3_mprintf("PRAGMA kdf_iter = %d;", ctx->kdf_iter);
-      sqlcipher_vdbe_return_string(pParse, "pragma", pragma, P4_DYNAMIC);
 
       pragma = sqlite3_mprintf("PRAGMA cipher_page_size = %d;", ctx->page_sz);
       sqlcipher_vdbe_return_string(pParse, "pragma", pragma, P4_DYNAMIC);
 
-      pragma = sqlite3_mprintf("PRAGMA cipher_use_hmac = %d;", SQLCIPHER_FLAG_GET(ctx->flags, CIPHER_FLAG_HMAC));
+      pragma = sqlite3_mprintf("PRAGMA cipher = '%s';", ctx->provider->get_cipher(ctx->provider_ctx));
       sqlcipher_vdbe_return_string(pParse, "pragma", pragma, P4_DYNAMIC);
-
-      pragma = sqlite3_mprintf("PRAGMA cipher_plaintext_header_size = %d;", ctx->plaintext_header_sz);
-      sqlcipher_vdbe_return_string(pParse, "pragma", pragma, P4_DYNAMIC);
-
-      algorithm = ctx->hmac_algorithm;
-      pragma = NULL;
-      if(algorithm == SQLCIPHER_HMAC_SHA1) {
-        pragma = sqlite3_mprintf("PRAGMA cipher_hmac_algorithm = %s;", SQLCIPHER_HMAC_SHA1_LABEL);
-      } else if(algorithm == SQLCIPHER_HMAC_SHA256) {
-        pragma = sqlite3_mprintf("PRAGMA cipher_hmac_algorithm = %s;", SQLCIPHER_HMAC_SHA256_LABEL);
-      } else if(algorithm == SQLCIPHER_HMAC_SHA512) {
-        pragma = sqlite3_mprintf("PRAGMA cipher_hmac_algorithm = %s;", SQLCIPHER_HMAC_SHA512_LABEL);
-      }
-      sqlcipher_vdbe_return_string(pParse, "pragma", pragma, P4_DYNAMIC);
-
-      algorithm = ctx->kdf_algorithm;
-      pragma = NULL;
-      if(algorithm == SQLCIPHER_PBKDF2_HMAC_SHA1) {
-        pragma = sqlite3_mprintf("PRAGMA cipher_kdf_algorithm = %s;", SQLCIPHER_PBKDF2_HMAC_SHA1_LABEL);
-      } else if(algorithm == SQLCIPHER_PBKDF2_HMAC_SHA256) {
-        pragma = sqlite3_mprintf("PRAGMA cipher_kdf_algorithm = %s;", SQLCIPHER_PBKDF2_HMAC_SHA256_LABEL);
-      } else if(algorithm == SQLCIPHER_PBKDF2_HMAC_SHA512) {
-        pragma = sqlite3_mprintf("PRAGMA cipher_kdf_algorithm = %s;", SQLCIPHER_PBKDF2_HMAC_SHA512_LABEL);
-      }
-      sqlcipher_vdbe_return_string(pParse, "pragma", pragma, P4_DYNAMIC);
-
     }
   }else
   if( sqlite3_stricmp(zLeft,"cipher_default_settings")==0 ){
     char *pragma;
 
-    pragma = sqlite3_mprintf("PRAGMA cipher_default_kdf_iter = %d;", default_kdf_iter);
-    sqlcipher_vdbe_return_string(pParse, "pragma", pragma, P4_DYNAMIC);
-
     pragma = sqlite3_mprintf("PRAGMA cipher_default_page_size = %d;", default_page_size);
-    sqlcipher_vdbe_return_string(pParse, "pragma", pragma, P4_DYNAMIC);
-
-    pragma = sqlite3_mprintf("PRAGMA cipher_default_use_hmac = %d;", SQLCIPHER_FLAG_GET(default_flags, CIPHER_FLAG_HMAC)); 
-    sqlcipher_vdbe_return_string(pParse, "pragma", pragma, P4_DYNAMIC);
-
-    pragma = sqlite3_mprintf("PRAGMA cipher_default_plaintext_header_size = %d;", default_plaintext_header_size);
-    sqlcipher_vdbe_return_string(pParse, "pragma", pragma, P4_DYNAMIC);
-
-    pragma = NULL;
-    if(default_hmac_algorithm == SQLCIPHER_HMAC_SHA1) {
-      pragma = sqlite3_mprintf("PRAGMA cipher_default_hmac_algorithm = %s;", SQLCIPHER_HMAC_SHA1_LABEL);
-    } else if(default_hmac_algorithm == SQLCIPHER_HMAC_SHA256) {
-      pragma = sqlite3_mprintf("PRAGMA cipher_default_hmac_algorithm = %s;", SQLCIPHER_HMAC_SHA256_LABEL);
-    } else if(default_hmac_algorithm == SQLCIPHER_HMAC_SHA512) {
-      pragma = sqlite3_mprintf("PRAGMA cipher_default_hmac_algorithm = %s;", SQLCIPHER_HMAC_SHA512_LABEL);
-    }
-    sqlcipher_vdbe_return_string(pParse, "pragma", pragma, P4_DYNAMIC);
-
-    pragma = NULL;
-    if(default_kdf_algorithm == SQLCIPHER_PBKDF2_HMAC_SHA1) {
-      pragma = sqlite3_mprintf("PRAGMA cipher_default_kdf_algorithm = %s;", SQLCIPHER_PBKDF2_HMAC_SHA1_LABEL);
-    } else if(default_kdf_algorithm == SQLCIPHER_PBKDF2_HMAC_SHA256) {
-      pragma = sqlite3_mprintf("PRAGMA cipher_default_kdf_algorithm = %s;", SQLCIPHER_PBKDF2_HMAC_SHA256_LABEL);
-    } else if(default_kdf_algorithm == SQLCIPHER_PBKDF2_HMAC_SHA512) {
-      pragma = sqlite3_mprintf("PRAGMA cipher_default_kdf_algorithm = %s;", SQLCIPHER_PBKDF2_HMAC_SHA512_LABEL);
-    }
     sqlcipher_vdbe_return_string(pParse, "pragma", pragma, P4_DYNAMIC);
   }else
   if( sqlite3_stricmp(zLeft,"cipher_integrity_check")==0 ){
@@ -3395,7 +2541,7 @@ int sqlcipher_codec_pragma(sqlite3* db, int iDb, Parse *pParse, const char *zLef
  */
 static void* sqlite3Codec(void *iCtx, void *data, Pgno pgno, int mode) {
   codec_ctx *ctx = (codec_ctx *) iCtx;
-  int offset = 0, rc = 0;
+  int rc = 0;
   unsigned char *pData = (unsigned char *) data;
   int cctx = CIPHER_READ_CTX;
   void *out = NULL;
@@ -3430,26 +2576,13 @@ static void* sqlite3Codec(void *iCtx, void *data, Pgno pgno, int mode) {
     goto cleanup;
   }
 
-  /* if the plaintext_header_size is negative that means an invalid size was set via 
-     PRAGMA. We can't set the error state on the pager at that point because the pager
-     may not be open yet. However, this is a fatal error state, so abort the codec */
-  if(ctx->plaintext_header_sz < 0) {
-    sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlite3Codec: error invalid ctx->plaintext_header_sz: %d", ctx->plaintext_header_sz);
-    sqlcipher_codec_ctx_set_error(ctx, SQLITE_ERROR);
-    goto cleanup;
-  }
-
-  if(pgno == 1) /* adjust starting pointers in data page for header offset on first page*/   
-    offset = ctx->plaintext_header_sz ? ctx->plaintext_header_sz : FILE_HEADER_SZ; 
-  
-
-  sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlite3Codec: switch mode=%d offset=%d",  mode, offset);
+  sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlite3Codec: switch mode=%d",  mode);
   switch(mode) {
     case CODEC_READ_OP: /* decrypt */
-      if(pgno == 1) /* copy initial part of file header or SQLite magic to buffer */ 
-        memcpy(ctx->buffer, ctx->plaintext_header_sz ? pData : (void *) SQLITE_FILE_HEADER, offset); 
-
-      rc = sqlcipher_page_cipher(ctx, cctx, pgno, SQLCIPHER_DECRYPT, ctx->page_sz - offset, pData + offset, (unsigned char*)ctx->buffer + offset);
+      /* page 1 is not special-cased any more: its magic/salt/tag live in its own reserve
+         region exactly like every other page's, so it is decrypted with the same call as
+         any other page -- see doc/crypto.md "Why there is no on-disk plaintext header" */
+      rc = sqlcipher_page_cipher(ctx, cctx, pgno, SQLCIPHER_DECRYPT, ctx->page_sz, pData, ctx->buffer);
 #ifdef SQLCIPHER_TEST
       if((cipher_test_flags & TEST_FAIL_DECRYPT) > 0 && sqlcipher_get_test_fail()) {
         rc = SQLITE_ERROR;
@@ -3458,16 +2591,10 @@ static void* sqlite3Codec(void *iCtx, void *data, Pgno pgno, int mode) {
 #endif
       if(rc != SQLITE_OK) {
         /* failure to decrypt a page is considered a permanent error and will render the pager unusable
-         * in order to prevent inconsistent data being loaded into page cache. The only exception here is when a database is being "recovered",
-         * which we consider to be the case if the plaintext header size is set to the full non-reserved size of a page. If that is the case we consider
-         * this to be operating in recovery mode, and will log the error but not permanently put the codec into an error state */
+         * in order to prevent inconsistent data being loaded into page cache. */
         sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlite3Codec: error decrypting page %d data: %d", pgno, rc);
-        sqlcipher_memset((unsigned char*) ctx->buffer+offset, 0, ctx->page_sz-offset);
-        if(ctx->plaintext_header_sz == ctx->page_sz - ctx->reserve_sz) {
-          sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: plaintext header size of %d indicates recovery mode, suppressing permanent error", __func__, ctx->plaintext_header_sz);
-        } else {
-          sqlcipher_codec_ctx_set_error(ctx, rc);
-        }
+        sqlcipher_memset((unsigned char*) ctx->buffer, 0, ctx->page_sz);
+        sqlcipher_codec_ctx_set_error(ctx, rc);
       } else {
         SQLCIPHER_FLAG_SET(ctx->flags, CIPHER_FLAG_KEY_USED);
       }
@@ -3477,20 +2604,10 @@ static void* sqlite3Codec(void *iCtx, void *data, Pgno pgno, int mode) {
       break;
 
     case CODEC_WRITE_OP: /* encrypt database page, operate on write context and fall through to case 7, so the write context is used*/
-      cctx = CIPHER_WRITE_CTX; 
+      cctx = CIPHER_WRITE_CTX;
 
-    case CODEC_JOURNAL_OP: /* encrypt journal page, operate on read context use to get the original page data from the database */ 
-      if(pgno == 1) { /* copy initial part of file header or salt to buffer */ 
-        void *kdf_salt = NULL; 
-        /* retrieve the kdf salt */
-        if((rc = sqlcipher_codec_ctx_get_kdf_salt(ctx, &kdf_salt)) != SQLITE_OK) {
-          sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlite3Codec: error retrieving salt: %d", rc);
-          sqlcipher_codec_ctx_set_error(ctx, rc); 
-          goto cleanup;
-        }
-        memcpy(ctx->buffer, ctx->plaintext_header_sz ? pData : kdf_salt, offset);
-      }
-      rc = sqlcipher_page_cipher(ctx, cctx, pgno, SQLCIPHER_ENCRYPT, ctx->page_sz - offset, pData + offset, (unsigned char*)ctx->buffer + offset);
+    case CODEC_JOURNAL_OP: /* encrypt journal page, operate on read context use to get the original page data from the database */
+      rc = sqlcipher_page_cipher(ctx, cctx, pgno, SQLCIPHER_ENCRYPT, ctx->page_sz, pData, ctx->buffer);
 #ifdef SQLCIPHER_TEST
       if((cipher_test_flags & TEST_FAIL_ENCRYPT) > 0 && sqlcipher_get_test_fail()) {
         rc = SQLITE_ERROR;
@@ -3501,7 +2618,7 @@ static void* sqlite3Codec(void *iCtx, void *data, Pgno pgno, int mode) {
         /* failure to encrypt a page is considered a permanent error and will render the pager unusable
            in order to prevent corrupted pages from being written to the main databased when using WAL */
         sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlite3Codec: error encrypting page %d data: %d", pgno, rc);
-        sqlcipher_memset((unsigned char*)ctx->buffer+offset, 0, ctx->page_sz-offset);
+        sqlcipher_memset((unsigned char*)ctx->buffer, 0, ctx->page_sz);
         sqlcipher_codec_ctx_set_error(ctx, rc);
         goto cleanup;
       }

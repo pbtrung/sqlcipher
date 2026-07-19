@@ -41,21 +41,12 @@
 #define SQLCIPHER_DECRYPT 0
 #define SQLCIPHER_ENCRYPT 1
 
-#define SQLCIPHER_HMAC_SHA1 0
-#define SQLCIPHER_HMAC_SHA1_LABEL "HMAC_SHA1"
-#define SQLCIPHER_HMAC_SHA256 1
-#define SQLCIPHER_HMAC_SHA256_LABEL "HMAC_SHA256"
-#define SQLCIPHER_HMAC_SHA512 2
-#define SQLCIPHER_HMAC_SHA512_LABEL "HMAC_SHA512"
-
-
-#define SQLCIPHER_PBKDF2_HMAC_SHA1 0
-#define SQLCIPHER_PBKDF2_HMAC_SHA1_LABEL "PBKDF2_HMAC_SHA1"
-#define SQLCIPHER_PBKDF2_HMAC_SHA256 1
-#define SQLCIPHER_PBKDF2_HMAC_SHA256_LABEL "PBKDF2_HMAC_SHA256"
-#define SQLCIPHER_PBKDF2_HMAC_SHA512 2
-#define SQLCIPHER_PBKDF2_HMAC_SHA512_LABEL "PBKDF2_HMAC_SHA512"
-
+/*
+** The sqlcipher_provider vtable below is AEAD-shaped: a single provider
+** (leancrypto's Ascon-Keccak-512 AEAD, keyed via HKDF-SHA3-512) is
+** supported, so there is no per-call algorithm selector as earlier
+** CBC+HMAC-shaped providers had. See doc/crypto.md for the design.
+*/
 typedef struct sqlcipher_provider sqlcipher_provider;
 struct sqlcipher_provider {
   int (*init)(void);
@@ -63,26 +54,29 @@ struct sqlcipher_provider {
   const char* (*get_provider_name)(void *ctx);
   int (*add_random)(void *ctx, const void *buffer, int length);
   int (*random)(void *ctx, void *buffer, int length);
-  int (*hmac)(void *ctx, int algorithm,
-              const unsigned char *hmac_key, int key_sz,
-              const unsigned char *in, int in_sz,
-              const unsigned char *in2, int in2_sz,
-              unsigned char *out);
-  int (*kdf)(void *ctx, int algorithm,
-              const unsigned char *pass, int pass_sz,
-              const unsigned char* salt, int salt_sz,
-              int workfactor,
+  int (*hkdf)(void *ctx,
+              const unsigned char *ikm, int ikm_sz,
+              const unsigned char *salt, int salt_sz,
+              const unsigned char *info, int info_sz,
               int key_sz, unsigned char *key);
-  int (*cipher)(void *ctx, int mode,
+  int (*aead_encrypt)(void *ctx,
               const unsigned char *key, int key_sz,
-              const unsigned char *iv,
+              const unsigned char *nonce, int nonce_sz,
+              const unsigned char *aad, int aad_sz,
               const unsigned char *in, int in_sz,
-              unsigned char *out);
+              unsigned char *out,
+              unsigned char *tag, int tag_sz);
+  int (*aead_decrypt)(void *ctx,
+              const unsigned char *key, int key_sz,
+              const unsigned char *nonce, int nonce_sz,
+              const unsigned char *aad, int aad_sz,
+              const unsigned char *in, int in_sz,
+              unsigned char *out,
+              const unsigned char *tag, int tag_sz);
   const char* (*get_cipher)(void *ctx);
   int (*get_key_sz)(void *ctx);
-  int (*get_iv_sz)(void *ctx);
-  int (*get_block_sz)(void *ctx);
-  int (*get_hmac_sz)(void *ctx, int algorithm);
+  int (*get_nonce_sz)(void *ctx);
+  int (*get_tag_sz)(void *ctx);
   int (*ctx_init)(void **ctx);
   int (*ctx_free)(void **ctx);
   int (*fips_status)(void *ctx);

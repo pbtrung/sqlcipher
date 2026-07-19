@@ -58,12 +58,18 @@ file. Every time a page is written, a fresh random 64-byte salt is generated
 for that page.
 
 ```
-magic (2 bytes)     0x54 0x58  ("TX")
-version (2 bytes)   major . minor, e.g. 0x01 0x00 = v1.0
-salt (64 bytes)     random per page, fresh on every write, HKDF input salt
 ciphertext (var)    page_size - reserve_size bytes
+salt (64 bytes)     random per page, fresh on every write, HKDF input salt
 tag (64 bytes)      Ascon-Keccak authentication tag
 ```
+
+`salt` and `tag` live in the page's *reserve* region (the same trailing bytes
+SQLite already reserves per page for the codec, exactly as IV+HMAC did in the
+previous AES design) — `reserve_size = salt(64) + tag(64) = 128` bytes, with
+no block-size rounding (Ascon-Keccak has no block-alignment requirement).
+This layout is identical for **every** page, including page 1 — there is no
+special per-database salt storage and no plaintext prefix at the start of the
+file (see "Why there is no on-disk plaintext header" below).
 
 Additional Data (AD) passed to the AEAD call:
 
@@ -71,13 +77,46 @@ Additional Data (AD) passed to the AEAD call:
 AD = magic (2) || version (2) || salt (64)   -> 68 bytes total
 ```
 
-The first page of the database file carries this same `magic || version ||
-salt` as its plaintext prefix (68 bytes, replacing the historic 16-byte raw
-KDF-salt prefix used by AES-256 SQLCipher) so that the file format is
-self-describing. Every subsequent page reserves `salt(64) + tag(64) = 128`
-bytes at the end of the page for its own header/tag (the "reserve" region);
-there is no separate HMAC region and no block-size rounding (Ascon-Keccak has
-no block-alignment requirement).
+`magic` (`0x54 0x58`, "TX") and `version` (major.minor, e.g. `0x01 0x00` =
+v1.0) are **fixed protocol constants baked into the code, not stored on
+disk anywhere**. Both the encrypting and decrypting side already agree on
+them out-of-band (by virtue of running this exact codec version), the same
+way the choice of Ascon-Keccak-512 itself isn't stored per-page either — so
+they only ever appear as constant AAD material, never as on-disk bytes. This
+is a deliberate correction from an earlier version of this document/design,
+which called for a 68-byte on-disk `magic||version||salt` plaintext prefix
+on page 1; that turned out to be incompatible with SQLite's own page-1
+layout (see below) and was dropped before implementation was completed.
+
+### Why there is no on-disk plaintext header
+
+Page 1 of every SQLite database has a 100-byte header that includes not just
+a fixed magic string (bytes 0-15) but real, per-database mutable state:
+schema cookie, `user_version`, freelist bookkeeping, autovacuum/incremental-
+vacuum tracking, default page cache size, text encoding, and `application_id`
+all live at fixed offsets between byte 16 and byte 99. The *original*
+AES-256 SQLCipher design got away with a 16-byte plaintext prefix (holding
+the database-wide KDF salt) precisely because 16 bytes exactly matches the
+length of SQLite's own fixed magic string and nothing else — bytes 16-99
+were always part of the normally-encrypted page content.
+
+An earlier version of this design tried to widen that prefix to 68 bytes to
+carry `magic||version||salt` in the clear at the start of the file. That
+silently swallows real database state (schema cookie, `user_version`, etc.)
+into the "never encrypted, reconstructed with defaults on read" region —
+concretely, `PRAGMA user_version` stopped surviving a reopen when this was
+tested, which is an unacceptable correctness regression, not a cosmetic one.
+
+Because this design derives a fresh, independent key and nonce for **every**
+page from an already-high-entropy master key (see below) rather than
+deriving a single database-wide key from a database-wide salt, there is no
+cryptographic bootstrapping problem that requires any salt to be readable
+before decryption can begin: page 1's own salt and tag live in page 1's own
+reserve region exactly like any other page's, which is already stored in the
+clear (as it must be, to make decryption possible at all) without requiring
+a separate plaintext prefix. Page 1 is therefore encrypted uniformly with
+every other page, with no special-cased plaintext region, no reconstructed
+"fake" header fields, and no data loss.
 
 ## Per-page key/nonce derivation
 
