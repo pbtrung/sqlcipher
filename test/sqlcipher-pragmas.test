@@ -33,6 +33,24 @@
 # automatically pass in a key value. Thus tests in this file
 # should explicitly close and open db with sqlite_orig in order
 # to bypass default key assignment.
+#
+# NOTE ON THIS FILE (post-leancrypto migration): this build has a single,
+# fixed algorithm combination (Ascon-Keccak-512 AEAD + HKDF-SHA3-512,
+# selected at build time -- see doc/crypto.md) with no PBKDF2/iteration
+# count, no separately-toggleable HMAC step (AEAD authentication is
+# intrinsic to every page), no runtime HMAC/KDF algorithm selection, and no
+# version-compatibility presets. All of the pragmas that used to configure
+# those things (cipher_use_hmac, cipher_default_use_hmac, kdf_iter,
+# fast_kdf_iter, cipher_default_kdf_iter, rekey_kdf_iter, cipher (setter),
+# rekey_cipher, cipher_hmac_salt_mask, cipher_hmac_pgno,
+# cipher_hmac_algorithm, cipher_default_hmac_algorithm, cipher_kdf_algorithm,
+# cipher_default_kdf_algorithm, cipher_compatibility,
+# cipher_default_compatibility) are kept only as harmless, clearly-worded
+# deprecation-message no-ops (see the comments above each pragma's handling
+# in src/sqlcipher.c) -- this file now verifies that no-op behavior instead
+# of the old functional behavior. cipher_page_size, cipher_store_pass, and
+# cipher_log_level/cipher_log_source are unrelated to the crypto algorithm
+# change and are verified unchanged.
 
 set testdir [file dirname $argv0]
 source $testdir/tester.tcl
@@ -50,130 +68,78 @@ do_test verify-pragma-cipher-version {
 db close
 file delete -force test.db
 
-# verify the pragma cipher_use_hmac
-# is set to true be default
-do_test verify-pragma-cipher-use-hmac-default {
+# PRAGMA cipher_use_hmac / cipher_default_use_hmac are deprecated no-ops now:
+# AEAD authentication is always enabled and cannot be turned off (see
+# doc/crypto.md "Known limitations"). Verify the deprecation message is
+# returned for both the getter and setter forms.
+do_test verify-pragma-cipher-use-hmac-is-a-noop {
     sqlite_orig db test.db
     execsql {
-        PRAGMA key = 'test';
+        PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
         PRAGMA cipher_use_hmac;
-    }
-} {ok 1}
-db close
-file delete -force test.db
-
-# verify the pragma cipher_use_hmac
-# reports the flag turned off
-do_test verify-pragma-cipher-use-hmac-off {
-    sqlite_orig db test.db
-    execsql {
-        PRAGMA key = 'test';
         PRAGMA cipher_use_hmac = off;
         PRAGMA cipher_use_hmac;
     }
-} {ok 0}
+} {ok {PRAGMA cipher_use_hmac is no longer supported: AEAD authentication is always enabled.} {PRAGMA cipher_use_hmac is no longer supported: AEAD authentication is always enabled.} {PRAGMA cipher_use_hmac is no longer supported: AEAD authentication is always enabled.}}
 db close
 file delete -force test.db
 
-# verify the pragma default_cipher_use_hmac
-# is set to true by default
-do_test verify-pragma-cipher-default-use-hmac-default {
+do_test verify-pragma-cipher-default-use-hmac-is-a-noop {
     sqlite_orig db test.db
     execsql {
         PRAGMA cipher_default_use_hmac;
-    }
-} {1}
-db close
-file delete -force test.db
-
-# verify the pragma default_cipher_use_hmac
-# reports the flag turned off
-do_test verify-pragma-cipher-default-use-hmac-off {
-    sqlite_orig db test.db
-    execsql {
         PRAGMA cipher_default_use_hmac = off;
         PRAGMA cipher_default_use_hmac;
-        -- Be sure to turn cipher_default_use_hmac
-        -- back on or it will break later tests 
-        -- (it's a global flag)
-        PRAGMA cipher_default_use_hmac = ON;
     }
-} {0}
+} {{PRAGMA cipher_default_use_hmac is no longer supported: AEAD authentication is always enabled.} {PRAGMA cipher_default_use_hmac is no longer supported: AEAD authentication is always enabled.} {PRAGMA cipher_default_use_hmac is no longer supported: AEAD authentication is always enabled.}}
 db close
 file delete -force test.db
 
-# verify the pragma default_cipher_kdf_iter
-# is set to 256000 by default
-do_test verify-pragma-cipher-default-kdf-iter-default {
+# PRAGMA cipher_default_kdf_iter / kdf_iter / fast_kdf_iter / rekey_kdf_iter are
+# deprecated no-ops now: there is no PBKDF2/iteration-count concept for this
+# provider (fixed HKDF-SHA3-512, see doc/crypto.md).
+do_test verify-pragma-cipher-default-kdf-iter-is-a-noop {
     sqlite_orig db test.db
     execsql {
         PRAGMA cipher_default_kdf_iter;
-    }
-} {256000}
-db close
-file delete -force test.db
-
-
-# verify the pragma default_cipher_kdf_ter
-# reports changes
-do_test verify-pragma-cipher-default-use-hmac-off {
-    sqlite_orig db test.db
-    execsql {
         PRAGMA cipher_default_kdf_iter = 1000;
         PRAGMA cipher_default_kdf_iter;
-        PRAGMA cipher_default_kdf_iter = 256000;
     }
-} {1000}
+} {{PRAGMA cipher_default_kdf_iter is no longer supported.} {PRAGMA cipher_default_kdf_iter is no longer supported.} {PRAGMA cipher_default_kdf_iter is no longer supported.}}
 db close
 file delete -force test.db
 
-# verify the pragma kdf_iter
-# reports the default value
-do_test verify-pragma-kdf-iter-reports-default {
+do_test verify-pragma-kdf-iter-is-a-noop {
     sqlite_orig db test.db
     execsql {
-        PRAGMA key = 'test';
+        PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
         PRAGMA kdf_iter;
-    }
-} {ok 256000}
-db close
-file delete -force test.db
-
-# verify the pragma kdf_iter
-# reports value changed
-do_test verify-pragma-kdf-iter-reports-value-changed {
-    sqlite_orig db test.db
-    execsql {
-        PRAGMA key = 'test';
         PRAGMA kdf_iter = 8000;
         PRAGMA kdf_iter;
     }
- } {ok 8000}
+} {ok {PRAGMA kdf_iter is no longer supported.} {PRAGMA kdf_iter is no longer supported.} {PRAGMA kdf_iter is no longer supported.}}
 db close
 file delete -force test.db
 
-# verify the pragma fast_kdf_iter
-# reports the default value
-do_test verify-pragma-fast-kdf-iter-reports-default {
+do_test verify-pragma-fast-kdf-iter-is-a-noop {
     sqlite_orig db test.db
     execsql {
-        PRAGMA key = 'test';
+        PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
         PRAGMA fast_kdf_iter;
-    }
-} {ok 2}
-db close
-file delete -force test.db
-
-# verify the pragma fast_kdf_iter
-# reports value changed
-do_test verify-pragma-kdf-iter-reports-value-changed {
-    sqlite_orig db test.db
-    execsql {
-        PRAGMA key = 'test';
         PRAGMA fast_kdf_iter = 4000;
         PRAGMA fast_kdf_iter;
     }
-} {ok {PRAGMA fast_kdf_iter is deprecated, please remove from use} 4000}
+} {ok {PRAGMA fast_kdf_iter is no longer supported.} {PRAGMA fast_kdf_iter is no longer supported.} {PRAGMA fast_kdf_iter is no longer supported.}}
+db close
+file delete -force test.db
+
+do_test verify-pragma-rekey-kdf-iter-is-a-noop {
+    sqlite_orig db test.db
+    execsql {
+        PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
+        PRAGMA rekey_kdf_iter = 1000;
+    }
+} {ok {PRAGMA rekey_kdf_iter is no longer supported.}}
 db close
 file delete -force test.db
 
@@ -182,7 +148,7 @@ file delete -force test.db
 do_test verify-pragma-cipher-page-size-default {
     sqlite_orig db test.db
     execsql {
-        PRAGMA key = 'test';
+        PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
         PRAGMA cipher_page_size;
     }
 } {ok 4096}
@@ -194,7 +160,7 @@ file delete -force test.db
 do_test verify-pragma-cipher-page-size-changed {
     sqlite_orig db test.db
     execsql {
-        PRAGMA key = 'test';
+        PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
         PRAGMA cipher_page_size = 8192;
         PRAGMA cipher_page_size;
     }
@@ -208,7 +174,7 @@ file delete -force test.db
 do_test verify-pragma-page-size-encrypted {
     sqlite_orig db test.db
     execsql {
-        PRAGMA key = 'test';
+        PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
         PRAGMA page_size = 8192;
         PRAGMA page_size;
         PRAGMA cipher_page_size;
@@ -237,7 +203,7 @@ do_test verify-cipher-store-pass-before-key-does-not-segfault {
     sqlite_orig db test.db
     execsql {
         PRAGMA cipher_store_pass = 1;
-        PRAGMA key = 'test';
+        PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
     }
 } {ok}
 db close
@@ -247,215 +213,156 @@ file delete -force test.db
 do_test verify-cipher-store-pass-deprecated {
     sqlite_orig db test.db
     execsql {
-        PRAGMA key = 'test';
+        PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
         PRAGMA cipher_store_pass = 1;
     }
 } {ok {PRAGMA cipher_store_pass is deprecated, please remove from use}}
 db close
 file delete -force test.db
 
-# verify the pragma cipher
-# reports the default value
-if_built_with_openssl verify-pragma-cipher-default {
+# verify the pragma cipher reports the current, real cipher name for this
+# single fixed provider (there is exactly one provider now, see
+# doc/crypto.md and if_built_with_leancrypto in sqlcipher.tcl)
+if_built_with_leancrypto verify-pragma-cipher-default {
     sqlite_orig db test.db
     execsql {
-        PRAGMA key = 'test';
+        PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
         PRAGMA cipher;
     }
-} {ok AES-256-CBC}
+} {ok ascon-keccak-512}
 db close
 file delete -force test.db
 
-# verify the pragma cipher_hmac_salt_mask reports default
-do_test verify-pragma-hmac-salt-mask-reports-default {
+# verify that trying to change the cipher via PRAGMA cipher is a
+# deprecated no-op (there is exactly one, fixed algorithm combination
+# selected at build time -- see doc/crypto.md)
+do_test verify-pragma-cipher-set-is-a-noop {
     sqlite_orig db test.db
     execsql {
-        PRAGMA key = 'test';
-        PRAGMA cipher_hmac_salt_mask;
+        PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
+        PRAGMA cipher = 'aes-256-ecb';
+        PRAGMA cipher;
     }
-} {ok 3a}
+} {ok {PRAGMA cipher is no longer supported.} ascon-keccak-512}
 db close
 file delete -force test.db
 
-# verify the pragma cipher_hmac_salt_mask reports
-# reports value changed
-do_test verify-pragma-hmac-salt-mask-reports-value-changed {
+# PRAGMA cipher_hmac_salt_mask is a deprecated no-op now (the salt itself
+# is generated fresh, randomly, per page on every write -- see
+# doc/crypto.md -- so there is nothing left to mask).
+do_test verify-pragma-hmac-salt-mask-is-a-noop {
     sqlite_orig db test.db
     execsql {
-        PRAGMA key = 'test';
+        PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
+        PRAGMA cipher_hmac_salt_mask;
         PRAGMA cipher_hmac_salt_mask = "x'11'";
         PRAGMA cipher_hmac_salt_mask;
-        PRAGMA cipher_hmac_salt_mask = "x'3a'";
     }
-} {ok {PRAGMA cipher_hmac_salt_mask is deprecated, please remove from use} 11 {PRAGMA cipher_hmac_salt_mask is deprecated, please remove from use}}
+} {ok {PRAGMA cipher_hmac_salt_mask is no longer supported.} {PRAGMA cipher_hmac_salt_mask is no longer supported.} {PRAGMA cipher_hmac_salt_mask is no longer supported.}}
 db close
 file delete -force test.db
 
-# verify the pragma cipher_hmac_pgno reports default
-do_test verify-pragma-hmac-pgno-reports-default {
+# PRAGMA cipher_hmac_pgno is a deprecated no-op now (the Additional Data
+# passed to the AEAD call no longer includes the page number at all -- see
+# doc/crypto.md "Known limitations" -- so there is no byte-order concept
+# left to configure).
+do_test verify-pragma-hmac-pgno-is-a-noop {
     sqlite_orig db test.db
     execsql {
-        PRAGMA key = 'test';
+        PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
         PRAGMA cipher_hmac_pgno;
-    }
-} {ok le}
-db close
-file delete -force test.db
-
-# verify the pragma cipher_hmac_pgno 
-# reports value changed
-do_test verify-pragma-hmac-pgno-reports-value-changed {
-    sqlite_orig db test.db
-    execsql {
-        PRAGMA key = 'test';
         PRAGMA cipher_hmac_pgno = be;
         PRAGMA cipher_hmac_pgno;
-        PRAGMA cipher_hmac_pgno = native;
-        PRAGMA cipher_hmac_pgno;
-        PRAGMA cipher_hmac_pgno = le;
-        PRAGMA cipher_hmac_pgno;
     }
-} {ok {PRAGMA cipher_hmac_pgno is deprecated, please remove from use} be {PRAGMA cipher_hmac_pgno is deprecated, please remove from use} native {PRAGMA cipher_hmac_pgno is deprecated, please remove from use} le}
+} {ok {PRAGMA cipher_hmac_pgno is no longer supported.} {PRAGMA cipher_hmac_pgno is no longer supported.} {PRAGMA cipher_hmac_pgno is no longer supported.}}
 db close
 file delete -force test.db
 
-# verify the pragma cipher_hmac_algorithm works properly
-do_test verify-pragma-cipher-hmac-algorithm-reports-default {
+# PRAGMA cipher_hmac_algorithm / cipher_default_hmac_algorithm /
+# cipher_kdf_algorithm / cipher_default_kdf_algorithm are all deprecated
+# no-ops now: there is exactly one fixed algorithm combination
+# (Ascon-Keccak-512 AEAD + HKDF-SHA3-512), selected at build time, not at
+# runtime (see doc/crypto.md).
+do_test verify-pragma-cipher-hmac-algorithm-is-a-noop {
     sqlite_orig db test.db
     execsql {
-        PRAGMA key = 'test';
+        PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
         PRAGMA cipher_hmac_algorithm;
-    }
-} {ok HMAC_SHA512}
-db close
-file delete -force test.db
-
-do_test verify-pragma-cipher-hmac-algorithm-reports-value-changed {
-    sqlite_orig db test.db
-    execsql {
-        PRAGMA key = 'test';
         PRAGMA cipher_hmac_algorithm = HMAC_SHA1;
         PRAGMA cipher_hmac_algorithm;
     }
-} {ok HMAC_SHA1}
+} {ok {PRAGMA cipher_hmac_algorithm is no longer supported.} {PRAGMA cipher_hmac_algorithm is no longer supported.} {PRAGMA cipher_hmac_algorithm is no longer supported.}}
 db close
 file delete -force test.db
 
-do_test verify-pragma-cipher-default-hmac-algorithm {
+do_test verify-pragma-cipher-default-hmac-algorithm-is-a-noop {
     sqlite_orig db test.db
     execsql {
         PRAGMA cipher_default_hmac_algorithm;
         PRAGMA cipher_default_hmac_algorithm = HMAC_SHA1;
         PRAGMA cipher_default_hmac_algorithm;
-        PRAGMA cipher_default_hmac_algorithm = HMAC_SHA512;
     }
-} {HMAC_SHA512 HMAC_SHA1}
+} {{PRAGMA cipher_default_hmac_algorithm is no longer supported.} {PRAGMA cipher_default_hmac_algorithm is no longer supported.} {PRAGMA cipher_default_hmac_algorithm is no longer supported.}}
 db close
 file delete -force test.db
 
-# verify the pragma cipher_kdf_algorithm works properly
-do_test verify-pragma-cipher-kdf-algorithm-reports-default {
+do_test verify-pragma-cipher-kdf-algorithm-is-a-noop {
     sqlite_orig db test.db
     execsql {
-        PRAGMA key = 'test';
+        PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
         PRAGMA cipher_kdf_algorithm;
-    }
-} {ok PBKDF2_HMAC_SHA512}
-db close
-file delete -force test.db
-
-do_test verify-pragma-cipher-kdf-algorithm-reports-value-changed {
-    sqlite_orig db test.db
-    execsql {
-        PRAGMA key = 'test';
         PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA1;
         PRAGMA cipher_kdf_algorithm;
     }
-} {ok PBKDF2_HMAC_SHA1}
+} {ok {PRAGMA cipher_kdf_algorithm is no longer supported.} {PRAGMA cipher_kdf_algorithm is no longer supported.} {PRAGMA cipher_kdf_algorithm is no longer supported.}}
 db close
 file delete -force test.db
 
-do_test verify-pragma-cipher-default-kdf-algorithm {
+do_test verify-pragma-cipher-default-kdf-algorithm-is-a-noop {
     sqlite_orig db test.db
     execsql {
         PRAGMA cipher_default_kdf_algorithm;
         PRAGMA cipher_default_kdf_algorithm = PBKDF2_HMAC_SHA1;
         PRAGMA cipher_default_kdf_algorithm;
-        PRAGMA cipher_default_kdf_algorithm = PBKDF2_HMAC_SHA512;
     }
-} {PBKDF2_HMAC_SHA512 PBKDF2_HMAC_SHA1}
+} {{PRAGMA cipher_default_kdf_algorithm is no longer supported.} {PRAGMA cipher_default_kdf_algorithm is no longer supported.} {PRAGMA cipher_default_kdf_algorithm is no longer supported.}}
 db close
 file delete -force test.db
 
-if_built_with_openssl verify-default-cipher {
+# PRAGMA cipher_compatibility / cipher_default_compatibility are deprecated
+# no-ops now: the per-SQLCipher-version presets they used to select (page
+# size, KDF iterations, HMAC/KDF algorithm) don't exist any more -- see
+# doc/crypto.md.
+do_test verify-pragma-cipher-compatibility-is-a-noop {
     sqlite_orig db test.db
     execsql {
-        PRAGMA key='test';
-        PRAGMA cipher;
-    }
-} {ok AES-256-CBC}
-db close
-file delete -force test.db
-
-if_built_with_libtomcrypt verify-default-cipher {
-    sqlite_orig db test.db
-    execsql {
-        PRAGMA key='test';
-        PRAGMA cipher;
-    }
-} {ok aes-256-cbc}
-db close
-file delete -force test.db
-
-if_built_with_commoncrypto verify-default-cipher {
-    sqlite_orig db test.db
-    execsql {
-        PRAGMA key='test';
-        PRAGMA cipher;
-    }
-} {ok aes-256-cbc}
-db close
-file delete -force test.db
-
-if_built_with_nss verify-default-cipher {
-    sqlite_orig db test.db
-    execsql {
-        PRAGMA key='test';
-        PRAGMA cipher;
-    }
-} {ok aes-256-cbc}
-db close
-file delete -force test.db
-
-do_test verify-cipher_settings_default {
-    sqlite_orig db test.db
-    execsql {
-        PRAGMA key = 'test';
-        PRAGMA cipher_settings;
-    }
-} {ok {PRAGMA kdf_iter = 256000;} {PRAGMA cipher_page_size = 4096;} {PRAGMA cipher_use_hmac = 1;} {PRAGMA cipher_plaintext_header_size = 0;} {PRAGMA cipher_hmac_algorithm = HMAC_SHA512;} {PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512;}}
-db close
-file delete -force test.db
-
-do_test verify-cipher_settings_v1 {
-    sqlite_orig db test.db
-    execsql {
-        PRAGMA key = 'test';
+        PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
         PRAGMA cipher_compatibility = 1;
-        PRAGMA cipher_settings;
     }
-} {ok {PRAGMA kdf_iter = 4000;} {PRAGMA cipher_page_size = 1024;} {PRAGMA cipher_use_hmac = 0;} {PRAGMA cipher_plaintext_header_size = 0;} {PRAGMA cipher_hmac_algorithm = HMAC_SHA1;} {PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA1;}} 
+} {ok {PRAGMA cipher_compatibility is no longer supported.}}
 db close
 file delete -force test.db
 
-do_test verify-cipher_default_settings_v1 {
+do_test verify-pragma-cipher-default-compatibility-is-a-noop {
     sqlite_orig db test.db
     execsql {
         PRAGMA cipher_default_compatibility = 1;
-        PRAGMA cipher_default_settings;
-        PRAGMA cipher_default_compatibility = 4;
     }
-} {{PRAGMA cipher_default_kdf_iter = 4000;} {PRAGMA cipher_default_page_size = 1024;} {PRAGMA cipher_default_use_hmac = 0;} {PRAGMA cipher_default_plaintext_header_size = 0;} {PRAGMA cipher_default_hmac_algorithm = HMAC_SHA1;} {PRAGMA cipher_default_kdf_algorithm = PBKDF2_HMAC_SHA1;}} 
+} {{PRAGMA cipher_default_compatibility is no longer supported.}}
+db close
+file delete -force test.db
+
+# cipher_settings / cipher_default_settings now report only the settings
+# that still exist for this provider (page size and the fixed cipher name)
+# -- the historic KDF-iteration/HMAC/algorithm lines are gone since those
+# concepts no longer exist (see doc/crypto.md).
+do_test verify-cipher_settings_default {
+    sqlite_orig db test.db
+    execsql {
+        PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
+        PRAGMA cipher_settings;
+    }
+} {ok {PRAGMA cipher_page_size = 4096;} {PRAGMA cipher = 'ascon-keccak-512';}}
 db close
 file delete -force test.db
 
@@ -464,7 +371,7 @@ do_test verify-cipher_default_settings_default {
     execsql {
         PRAGMA cipher_default_settings;
     }
-} {{PRAGMA cipher_default_kdf_iter = 256000;} {PRAGMA cipher_default_page_size = 4096;} {PRAGMA cipher_default_use_hmac = 1;} {PRAGMA cipher_default_plaintext_header_size = 0;} {PRAGMA cipher_default_hmac_algorithm = HMAC_SHA512;} {PRAGMA cipher_default_kdf_algorithm = PBKDF2_HMAC_SHA512;}}
+} {{PRAGMA cipher_default_page_size = 4096;}}
 db close
 file delete -force test.db
 

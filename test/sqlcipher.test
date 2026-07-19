@@ -47,19 +47,30 @@ execsql {
 }
 db close
 
+# NOTE: sqlcipher-compatibility.test was removed entirely as part of the
+# leancrypto migration (see doc/crypto.md). It tested cipher_compatibility /
+# cipher_default_compatibility presets and cross-version (SQLCipher 1-4)
+# on-disk format migration -- both concepts are gone now that there is a
+# single, fixed algorithm combination (Ascon-Keccak-512 AEAD + HKDF-SHA3-512)
+# selected at build time with no migration path from AES-256 SQLCipher
+# databases. The pragma's harmless deprecated-no-op behavior is covered by
+# sqlcipher-pragmas.test instead. sqlcipher-threads.test is intentionally not
+# part of this default suite (it is a long-running, ~30s-per-run
+# ThreadSanitizer-oriented stress test meant to be run standalone -- see the
+# comments at the top of that file).
 test_suite "sqlcipher" -prefix "" -description {
   Runs SQLCipher tests
 } -files [
   test_set $pretests \
            sqlcipher-core.test \
-           sqlcipher-compatibility.test \
            sqlcipher-rekey.test \
            sqlcipher-plaintext-header.test \
            sqlcipher-pragmas.test \
            sqlcipher-integrity.test \
            sqlcipher-codecerror.test \
            sqlcipher-backup.test \
-           sqlcipher-zmemory.test
+           sqlcipher-zmemory.test \
+           sqlcipher-leancrypto.test
 ]
 run_test_suite sqlcipher
 finish_test

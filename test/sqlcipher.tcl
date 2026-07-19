@@ -49,48 +49,40 @@ if {![sqlite_orig -has-codec]} {
   return
 }
 
+# NOTE: sqlcipher_test_key / sqlcipher_test_key_hex / sqlcipher_short_key are
+# defined in tester.tcl (sourced above this file by every sqlcipher-*.test
+# file) and are the single source of truth for the raw, >=256-byte "x'<hex>'"
+# keys required by the leancrypto-based codec (see doc/crypto.md). "key" here
+# is expected to already be a full, quoted PRAGMA key value expression, e.g.
+# [sqlcipher_test_key] or "x'...'" written out literally.
 proc setup {file key} {
   sqlite_orig db $file
   execsql "PRAGMA key=$key;"
   execsql {
     CREATE table t1(a,b);
-    INSERT INTO t1 VALUES ('test1', 'test2'); 
+    INSERT INTO t1 VALUES ('test1', 'test2');
   } db
   db close
 }
 
 proc get_cipher_provider {} {
    sqlite_orig db test.db
-   execsql {
-     PRAGMA key = 'test';
-   }
+   execsql "PRAGMA key = \"[sqlcipher_test_key]\";"
    return [execsql {
      PRAGMA cipher_provider;
    }];
 }
 
-proc if_built_with_openssl {name cmd expected} {
-    if {[get_cipher_provider] == "openssl"} {
+# There is exactly one cipher provider now (leancrypto, see doc/crypto.md) --
+# the historic openssl/libtomcrypt/commoncrypto/nss providers and their
+# if_built_with_* guards no longer exist. if_built_with_leancrypto is kept as
+# the (currently redundant, since it's the only provider that can be built)
+# analogous guard so provider-specific tests read the same way they always
+# have and so a future second provider could reuse the pattern.
+proc if_built_with_leancrypto {name cmd expected} {
+    if {[get_cipher_provider] == "leancrypto"} {
         do_test $name $cmd $expected
     }
-}
-
-proc if_built_with_libtomcrypt {name cmd expected} {
-    if {[get_cipher_provider] == "libtomcrypt"} {
-        do_test $name $cmd $expected
-    }
-}
-
-proc if_built_with_commoncrypto {name cmd expected} {
-     if {[get_cipher_provider] == "commoncrypto"} {
-        do_test $name $cmd $expected
-     }
-}
-
-proc if_built_with_nss {name cmd expected} {
-     if {[get_cipher_provider] == "nss"} {
-        do_test $name $cmd $expected
-     }
 }
 
 proc cmpFilesChunked {file1 file2 {chunksize 16384}} {

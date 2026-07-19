@@ -98,10 +98,17 @@ puts $fd {
 }
 close $fd
 
+# This build's codec (leancrypto, see doc/crypto.md) requires a raw master
+# key of at least 256 bytes (512 hex characters), supplied as an
+# "x'<hex>'" blob -- there is no passphrase-based key derivation any more,
+# so the historic 5-byte "xyzzy" passphrase used here is no longer a valid
+# key. There is also no HMAC/KDF-algorithm selection knob left to configure
+# (a single, fixed algorithm combination is selected at build time), so
+# there is nothing else to adjust here besides the key format.
 set fd [open perftest1.sql w]
-puts $fd {
-PRAGMA key='xyzzy';
-}
+puts $fd [format {
+PRAGMA key="x'%s'";
+} [string repeat 01 256]]
 close $fd
 
 exec cat perftest0.sql | ./sqlite3 perftest0.db

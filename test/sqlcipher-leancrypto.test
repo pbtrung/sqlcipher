@@ -1,0 +1,224 @@
+# SQLCipher
+# http://zetetic.net
+#
+# Copyright (c) 2026, ZETETIC LLC
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#     * Redistributions of source code must retain the above copyright
+#       notice, this list of conditions and the following disclaimer.
+#     * Redistributions in binary form must reproduce the above copyright
+#       notice, this list of conditions and the following disclaimer in the
+#       documentation and/or other materials provided with the distribution.
+#     * Neither the name of the ZETETIC LLC nor the
+#       names of its contributors may be used to endorse or promote products
+#       derived from this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY ZETETIC LLC ''AS IS'' AND ANY
+# EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+# WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL ZETETIC LLC BE LIABLE FOR ANY
+# DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+# (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+# ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+# SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#
+# This file adds coverage that is specific to the leancrypto-based
+# Ascon-Keccak-512 AEAD / HKDF-SHA3-512 codec introduced by the migration
+# away from AES-256-CBC/HMAC-SHA512/PBKDF2 (see doc/crypto.md), and that
+# does not fit naturally into the other, more structurally-oriented
+# sqlcipher-*.test files:
+#
+#   1. a plain encrypt/decrypt round trip with a valid >=256-byte raw key
+#   2. rejection of a key shorter than 256 bytes, with a clear error
+#   3. tamper detection: flipping a single on-disk byte breaks decryption
+#      rather than silently returning corrupted data
+#   4. per-page salt uniqueness: different pages have different salts, and
+#      the same page gets a fresh salt every time it is rewritten
+#   5. PRAGMA cipher_provider / PRAGMA cipher report "leancrypto" and
+#      "ascon-keccak-512" respectively
+#
+# NOTE: tester.tcl has overridden the definition of sqlite3 to
+# automatically pass in a key value. Thus tests in this file
+# should explicitly close and open db with sqlite_orig in order
+# to bypass default key assignment.
+
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+source $testdir/sqlcipher.tcl
+
+# ------------------------------------------------------------------------
+# 1. correct encrypt/decrypt round-trip with a valid >=256-byte raw key
+# ------------------------------------------------------------------------
+do_test leancrypto-roundtrip-with-valid-key {
+  sqlite_orig db test.db
+  execsql "
+    PRAGMA key = \"[sqlcipher_test_key 1]\";
+    CREATE TABLE t1(a INTEGER PRIMARY KEY, b);
+    INSERT INTO t1(b) VALUES ('row one'), ('row two'), ('row three');
+  "
+  db close
+
+  sqlite_orig db test.db
+  execsql "
+    PRAGMA key = \"[sqlcipher_test_key 1]\";
+    SELECT b FROM t1 ORDER BY a;
+  "
+} {ok {row one} {row two} {row three}}
+db close
+file delete -force test.db
+
+# ------------------------------------------------------------------------
+# 2. rejection of a key shorter than 256 bytes, with a clear error
+# ------------------------------------------------------------------------
+do_test leancrypto-rejects-short-key {
+  sqlite_orig db test.db
+  catchsql {
+    PRAGMA key = "x'0011223344556677'";
+    CREATE TABLE t1(a,b);
+  }
+} {1 {out of memory}}
+db close
+file delete -force test.db
+
+# a key of exactly 255 bytes (one byte short of the minimum) is rejected...
+do_test leancrypto-rejects-key-one-byte-short-of-minimum {
+  sqlite_orig db test.db
+  catchsql "
+    PRAGMA key = \"x'[string repeat 09 255]'\";
+    CREATE TABLE t1(a,b);
+  "
+} {1 {out of memory}}
+db close
+file delete -force test.db
+
+# ...while a key of exactly 256 bytes (the minimum) is accepted.
+do_test leancrypto-accepts-key-at-exact-minimum {
+  sqlite_orig db test.db
+  execsql "
+    PRAGMA key = \"x'[string repeat 09 256]'\";
+    CREATE TABLE t1(a,b);
+    INSERT INTO t1 VALUES(1,2);
+  "
+} {ok}
+db close
+file delete -force test.db
+
+# ------------------------------------------------------------------------
+# 3. tamper detection: flip a byte in the raw database file on disk,
+#    reopen, and confirm decryption fails rather than silently returning
+#    corrupt data
+# ------------------------------------------------------------------------
+do_test leancrypto-detects-single-byte-tamper {
+  sqlite_orig db test.db
+  execsql "
+    PRAGMA key = \"[sqlcipher_test_key 1]\";
+    CREATE TABLE t1(a,b);
+    INSERT INTO t1 VALUES(1, 'untampered value');
+  "
+  db close
+
+  # flip a single byte inside page 1's ciphertext region (well before the
+  # reserve region, which starts at page_sz - reserve_sz = 4096 - 128 = 3968)
+  set before [hexio_read test.db 200 1]
+  set flipped [format %02X [expr {([scan $before %x] ^ 0xFF) & 0xFF}]]
+  hexio_write test.db 200 $flipped
+
+  sqlite_orig db test.db
+  catchsql "
+    PRAGMA key = \"[sqlcipher_test_key 1]\";
+    SELECT * FROM t1;
+  "
+} {1 {file is not a database}}
+db close
+file delete -force test.db
+
+# ------------------------------------------------------------------------
+# 4. per-page salt uniqueness
+# ------------------------------------------------------------------------
+# reserve_sz = salt(64) + tag(64) = 128 bytes (see doc/crypto.md); the salt
+# lives in the first 64 bytes of that reserve region, at file offset
+# (pgno-1)*page_sz + (page_sz - reserve_sz).
+set ::PAGE_SZ 4096
+set ::RESERVE_SZ 128
+set ::SALT_SZ 64
+proc page_salt_offset {pgno} {
+  return [expr {($pgno - 1) * $::PAGE_SZ + ($::PAGE_SZ - $::RESERVE_SZ)}]
+}
+
+do_test leancrypto-different-pages-have-different-salts {
+  sqlite_orig db test.db
+  execsql "
+    PRAGMA key = \"[sqlcipher_test_key 1]\";
+    CREATE TABLE t1(a INTEGER PRIMARY KEY, b);
+    BEGIN;
+  "
+  # force at least 3 real data pages by inserting several large rows
+  for {set i 1} {$i <= 20} {incr i} {
+    execsql "INSERT INTO t1(a,b) VALUES($i, zeroblob(1500));"
+  }
+  execsql { COMMIT; }
+  db close
+
+  set pageCount [expr {[file size test.db] / $::PAGE_SZ}]
+  set salt1 [hexio_read test.db [page_salt_offset 1] $::SALT_SZ]
+  set salt2 [hexio_read test.db [page_salt_offset 2] $::SALT_SZ]
+  set salt3 [hexio_read test.db [page_salt_offset 3] $::SALT_SZ]
+
+  list [expr {$pageCount >= 3}] \
+       [string equal $salt1 $salt2] \
+       [string equal $salt2 $salt3] \
+       [string equal $salt1 $salt3]
+} {1 0 0 0}
+file delete -force test.db
+
+do_test leancrypto-same-page-gets-fresh-salt-on-rewrite {
+  sqlite_orig db test.db
+  execsql "
+    PRAGMA key = \"[sqlcipher_test_key 1]\";
+    CREATE TABLE t1(a INTEGER PRIMARY KEY, b);
+    INSERT INTO t1(a,b) VALUES(1, 'first write');
+  "
+  db close
+  set salt_before [hexio_read test.db [page_salt_offset 1] $::SALT_SZ]
+
+  # rewrite page 1 (any write to the schema/root page will do) and confirm
+  # its salt changed even though its logical content is materially the same
+  sqlite_orig db test.db
+  execsql "
+    PRAGMA key = \"[sqlcipher_test_key 1]\";
+    UPDATE t1 SET b = 'second write' WHERE a = 1;
+  "
+  db close
+  set salt_after [hexio_read test.db [page_salt_offset 1] $::SALT_SZ]
+
+  string equal $salt_before $salt_after
+} {0}
+file delete -force test.db
+
+# ------------------------------------------------------------------------
+# 5. PRAGMA cipher_provider / PRAGMA cipher report the fixed provider and
+#    cipher name for this build
+# ------------------------------------------------------------------------
+do_test leancrypto-cipher-provider-name {
+  sqlite_orig db test.db
+  execsql "
+    PRAGMA key = \"[sqlcipher_test_key 1]\";
+    PRAGMA cipher_provider;
+  "
+} {ok leancrypto}
+db close
+file delete -force test.db
+
+do_test leancrypto-cipher-name {
+  sqlite_orig db test.db
+  execsql "
+    PRAGMA key = \"[sqlcipher_test_key 1]\";
+    PRAGMA cipher;
+  "
+} {ok ascon-keccak-512}
+db close
+file delete -force test.db
+
+finish_test

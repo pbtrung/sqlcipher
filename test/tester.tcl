@@ -102,14 +102,37 @@ set tcl_precision 15
 sqlite3_test_control_pending_byte 0x0010000
 
 
+# SQLCipher: the leancrypto-based codec (see doc/crypto.md) requires a raw,
+# high-entropy master key of at least 256 bytes (512 hex characters),
+# supplied using the "x'<hex>'" raw-key-blob convention -- there is no
+# passphrase-based key derivation any more, so the historic 5-byte
+# "xyzzy" passphrase used below (and throughout the test suite) is no
+# longer a valid key. sqlcipher_test_key generates a fixed, deterministic,
+# distinct-per-index 256-byte key so every test file that needs a default
+# key can share the same source of truth instead of inventing its own
+# (now-rejected) short passphrase; sqlcipher_short_key returns a
+# syntactically well-formed but too-short key for negative tests. Both are
+# also used by test/sqlcipher.tcl (sourced after this file by every
+# sqlcipher-*.test file) and are documented there as well.
+proc sqlcipher_test_key_hex {{n 1}} {
+  set byte [format %02x [expr {$n % 256}]]
+  return [string repeat $byte 256]
+}
+proc sqlcipher_test_key {{n 1}} {
+  return "x'[sqlcipher_test_key_hex $n]'"
+}
+proc sqlcipher_short_key {} {
+  return "x'00112233'"
+}
+
 # If the pager codec is available, create a wrapper for the [sqlite3]
-# command that appends "-key {xyzzy}" to the command line. i.e. this:
+# command that appends "-key <raw-key>" to the command line. i.e. this:
 #
 #     sqlite3 db test.db
 #
 # becomes
 #
-#     sqlite3 db test.db -key {xyzzy}
+#     sqlite3 db test.db -key x'0101...01'
 #
 if {[info command sqlite_orig]==""} {
   rename sqlite3 sqlite_orig
@@ -121,7 +144,7 @@ if {[info command sqlite_orig]==""} {
         set args [concat $args $::G(perm:sqlite3_args)]
       }
       if {[sqlite_orig -has-codec] && ![info exists ::do_not_use_codec]} {
-        lappend args -key {xyzzy}
+        lappend args -key [sqlcipher_test_key]
       }
 
       set res [uplevel 1 sqlite_orig $args]

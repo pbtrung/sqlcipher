@@ -37,5 +37,23 @@
 #set testdir [file dirname $argv0]
 #source $testdir/tester.tcl
 #source $testdir/sqlcipher.tcl
+#
+# NOTE: this build's codec (leancrypto, see doc/crypto.md) requires a raw
+# master key of at least 256 bytes supplied as an "x'<hex>'" blob -- there
+# is no passphrase support. Use the shared sqlcipher_test_key helper (defined
+# in tester.tcl) rather than inventing a new short passphrase-style key. It
+# returns the bare "x'<hex>'" text (suitable as-is for the -key command line
+# option and sqlite3_key); when embedding it in SQL text it must be wrapped
+# in SQL string-literal quotes, e.g.:
+#
+#   do_test my-new-test {
+#     sqlite_orig db test.db
+#     execsql "
+#       PRAGMA key = \"[sqlcipher_test_key]\";
+#       CREATE TABLE t1(a,b);
+#     "
+#   } {}
+#   db close
+#   file delete -force test.db
 
 #finish_test

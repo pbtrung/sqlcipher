@@ -45,7 +45,7 @@ do_test hmac-tamper-resistence-first-page {
   sqlite_orig db test.db
 
   execsql {
-    PRAGMA key = 'testkey';
+    PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
     CREATE table t1(a,b);
     BEGIN;
   }
@@ -68,7 +68,7 @@ do_test hmac-tamper-resistence-first-page {
   sqlite_orig db test.db
 
   catchsql {
-    PRAGMA key = 'testkey';
+    PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
     SELECT count(*) FROM t1;
   }
 
@@ -78,12 +78,21 @@ file delete -force test.db
 
 # 1. create a database and insert a bunch of data, close the database
 # 2. seek to the middle of a database page and write some junk
-# 3. Open the database and verify that the database is still readable
-do_test nohmac-not-tamper-resistent {
+# 3. Open the database and verify that it is now unreadable
+#
+# HISTORICAL NOTE: this test used to demonstrate the opposite -- that with
+# PRAGMA cipher_use_hmac = OFF, mid-page tampering was NOT detected, because
+# per-page authentication could be turned off entirely. AEAD authentication
+# is now intrinsic to every page and cannot be disabled (see doc/crypto.md
+# "Known limitations" and the "PRAGMA cipher_use_hmac is no longer
+# supported: AEAD authentication is always enabled." deprecation message in
+# src/sqlcipher.c), so cipher_use_hmac = OFF is now a no-op and tampering is
+# always caught.
+do_test cipher-use-hmac-off-does-not-disable-tamper-detection {
   sqlite_orig db test.db
 
   execsql {
-    PRAGMA key = 'testkey';
+    PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
     PRAGMA cipher_use_hmac = OFF;
     PRAGMA cipher_page_size = 1024;
     CREATE table t1(a,b);
@@ -92,12 +101,12 @@ do_test nohmac-not-tamper-resistent {
 
   for {set i 1} {$i<=1000} {incr i} {
     set r [expr {int(rand()*500000)}]
-    execsql "INSERT INTO t1 VALUES($i,'value $r');" 
+    execsql "INSERT INTO t1 VALUES($i,'value $r');"
   }
 
   execsql {
     COMMIT;
-  } 
+  }
 
   db close
 
@@ -106,14 +115,14 @@ do_test nohmac-not-tamper-resistent {
 
   sqlite_orig db test.db
 
-  execsql {
-    PRAGMA key = 'testkey';
+  catchsql {
+    PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
     PRAGMA cipher_use_hmac = OFF;
     PRAGMA cipher_page_size = 1024;
     SELECT count(*) FROM t1;
   }
 
-} {ok 1000}
+} {1 {database disk image is malformed}}
 db close
 file delete -force test.db
 
@@ -124,7 +133,7 @@ do_test hmac-tamper-resistence {
   sqlite_orig db test.db
 
   execsql {
-    PRAGMA key = 'testkey';
+    PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
     CREATE table t1(a,b);
     BEGIN;
   }
@@ -147,7 +156,7 @@ do_test hmac-tamper-resistence {
   sqlite_orig db test.db
 
   catchsql {
-    PRAGMA key = 'testkey';
+    PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
     SELECT count(*) FROM t1;
   }
 
@@ -161,7 +170,7 @@ do_test integrity-check-clean-database {
   sqlite_orig db test.db
 
   execsql {
-    PRAGMA key = 'testkey';
+    PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
     CREATE table t1(a,b);
     BEGIN;
   }
@@ -178,7 +187,7 @@ do_test integrity-check-clean-database {
 
   sqlite_orig db test.db
   execsql {
-    PRAGMA key = 'testkey';
+    PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
     PRAGMA cipher_integrity_check;
     PRAGMA integrity_check;
     SELECT count(*) FROM t1;
@@ -193,7 +202,7 @@ file delete -force test.db
 do_test memory-integrity-check-should-fail {
   sqlite_orig db :memory:
   execsql {
-    PRAGMA key = 'testkey';
+    PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
     CREATE TABLE t1(a,b);
     INSERT INTO t1(a,b) values (1,2);
     PRAGMA cipher_integrity_check;
@@ -201,146 +210,23 @@ do_test memory-integrity-check-should-fail {
 } {ok {database file is undefined}}
 db close
 
-# try cipher_integrity_check on a valid 1.1.8 database
-# should fail because version 1.0 doesn't use HMAC
-do_test version-1-integrity-check-fail-no-hmac {
-  file copy -force $sampleDir/sqlcipher-1.1.8-testkey.db test.db
-  sqlite_orig db test.db
-  execsql {
-    PRAGMA key = 'testkey';
-    PRAGMA cipher_compatibility = 1;
-    PRAGMA cipher_integrity_check;
-  } 
-} {ok {HMAC is not enabled, unable to integrity check}}
-db close
-file delete -force test.db
-
-# try cipher_integrity_check on a valid 2 database
-do_test version-2-integrity-check-valid {
-  file copy -force $sampleDir/sqlcipher-2.0-le-testkey.db test.db
-  sqlite_orig db test.db
-  execsql {
-    PRAGMA key = 'testkey';
-    PRAGMA cipher_compatibility = 2;
-    PRAGMA cipher_integrity_check;
-  } 
-} {ok}
-db close
-file delete -force test.db
-
-# try cipher_integrity_check on a corrupted version 2 database
-do_test version-2-integrity-check-invalid {
-  file copy -force $sampleDir/sqlcipher-2.0-le-testkey.db test.db
-  hexio_write test.db 8202 000000
-  hexio_write test.db 10250 000000
-  sqlite_orig db test.db
-  execsql {
-    PRAGMA key = 'testkey';
-    PRAGMA cipher_compatibility = 2;
-    PRAGMA cipher_integrity_check;
-  } 
-} {ok {HMAC verification failed for page 9} {HMAC verification failed for page 11}}
-db close
-file delete -force test.db
-
-# try cipher_integrity_check on a valid version 3 database
-do_test version-3-integrity-check-valid {
-  file copy -force $sampleDir/sqlcipher-3.0-testkey.db test.db
-  sqlite_orig db test.db
-  execsql {
-    PRAGMA key = 'testkey';
-    PRAGMA cipher_compatibility = 3;
-    PRAGMA cipher_integrity_check;
-  } 
-} {ok}
-db close
-file delete -force test.db
-
-# try cipher_integrity_check on a corrupted version 3 database
-do_test version-3-integrity-check-invalid {
-  file copy -force $sampleDir/sqlcipher-3.0-testkey.db test.db
-  hexio_write test.db 8202 000000
-  hexio_write test.db 10250 000000
-  sqlite_orig db test.db
-  execsql {
-    PRAGMA key = 'testkey';
-    PRAGMA cipher_compatibility = 3;
-    PRAGMA cipher_integrity_check;
-  } 
-} {ok {HMAC verification failed for page 9} {HMAC verification failed for page 11}}
-db close
-file delete -force test.db
-
-# try cipher_integrity_check on a valid version 4 database
-do_test version-4-integrity-check-valid {
-  file copy -force $sampleDir/sqlcipher-4.0-testkey.db test.db
-  sqlite_orig db test.db
-  execsql {
-    PRAGMA key = 'testkey';
-    PRAGMA cipher_integrity_check;
-  } 
-} {ok}
-db close
-file delete -force test.db
-
-# try cipher_integrity_check on a corrupted version 4 database
-do_test version-4-integrity-check-invalid {
-  file copy -force $sampleDir/sqlcipher-4.0-testkey.db test.db
-  # corrupt page data 
-  hexio_write test.db 5120 000000
-  # corrupt iv 
-  hexio_write test.db 12208 000000 
-  # corrupt the mac segment 
-  hexio_write test.db 16320 000000
-  sqlite_orig db test.db
-  execsql {
-    PRAGMA key = 'testkey';
-    PRAGMA cipher_integrity_check;
-  } 
-} {ok {HMAC verification failed for page 2} {HMAC verification failed for page 3} {HMAC verification failed for page 4}}
-db close
-file delete -force test.db
-
-# try cipher_integrity_check on a corrupted version 4 database
-do_test version-4-integrity-check-invalid-last-page {
-  file copy -force $sampleDir/sqlcipher-4.0-testkey.db test.db
-  hexio_write test.db 978944 0000
-  sqlite_orig db test.db
-  execsql {
-    PRAGMA key = 'testkey';
-    PRAGMA cipher_integrity_check;
-  } 
-} {ok {page 240 has an invalid size of 2 bytes (expected 4096 bytes)}}
-db close
-file delete -force test.db
-
-# verify cipher_integrity_check works on a plaintext header db
-do_test integrity-check-plaintext-header {
-  sqlite_orig db test.db
-  set rc {}
-
-  execsql {
-    PRAGMA key = 'test';
-    PRAGMA cipher_plaintext_header_size = 32;
-    CREATE TABLE t1(a,b);
-    INSERT INTO t1(a,b) VALUES (1,2);
-  }
-
-  lappend rc [execsql {
-    PRAGMA cipher_integrity_check;
-  }]
-
-  lappend rc [string equal [hexio_read test.db 16 5] "1000010150"]
-  
-  hexio_write test.db 120 000000
-  hexio_write test.db 5120 000000
-
-  lappend rc [execsql {
-    PRAGMA cipher_integrity_check;
-  }]
-} {{} 1 {{HMAC verification failed for page 1} {HMAC verification failed for page 2}}}
-db close
-file delete -force test.db
+# REMOVED: version-1/2/3/4-integrity-check-* and integrity-check-plaintext-header.
+#
+# These tests opened pre-built sample databases (sqlcipher-1.1.8-testkey.db,
+# sqlcipher-2.0-le-testkey.db, sqlcipher-3.0-testkey.db, sqlcipher-4.0-testkey.db
+# in $sampleDir) that were encrypted with the historic AES-256-CBC/HMAC-SHA512/
+# PBKDF2 codec, selected a legacy on-disk format/algorithm combination via
+# PRAGMA cipher_compatibility, and asserted cipher_integrity_check's
+# behavior against that legacy per-version HMAC layout. None of that applies
+# any more: this build uses a single, fixed Ascon-Keccak-512/HKDF-SHA3-512
+# codec with no migration path from AES-256 SQLCipher databases (see
+# doc/crypto.md), so those sample databases cannot be decrypted at all, and
+# PRAGMA cipher_compatibility is a deprecated no-op (see
+# verify-pragma-cipher-compatibility-is-a-noop in sqlcipher-pragmas.test).
+# cipher_integrity_check's *current* structural behavior (does it detect
+# tampering, wrong sizes, etc. against freshly-created databases) is already
+# covered above and below by integrity-check-clean-database,
+# hmac-tamper-resistence(-first-page), and change-key-middle.
 
 # test that changing the key in the middle of database operations does
 # not cause a corruption
@@ -350,7 +236,7 @@ do_test change-key-middle {
   set rc {}
 
   execsql {
-    PRAGMA key = 'testkey';
+    PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
     CREATE table t1(a,b);
   }
 
@@ -359,7 +245,7 @@ do_test change-key-middle {
   }
 
   execsql {
-    PRAGMA key = 'diffkey';
+    PRAGMA key = "x'02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202'";
   }
 
   for {set i 1} {$i<=1000} {incr i} {
@@ -370,7 +256,7 @@ do_test change-key-middle {
 
   sqlite_orig db test.db
   execsql {
-    PRAGMA key = 'testkey';
+    PRAGMA key = "x'01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101'";
     SELECT name FROM sqlite_schema;
     PRAGMA cipher_integrity_check;
     PRAGMA integrity_check;
