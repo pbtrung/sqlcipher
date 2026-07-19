@@ -94,7 +94,18 @@ for a in "\$@"; do
 	esac
 	args+=("\$a")
 done
-exec "$REAL_EMCC" "\${args[@]}"
+
+# -msimd128 targets WASM's 128-bit SIMD instruction set. leancrypto's own
+# hand-written asm (AVX2/AVX512/NEON) can't target wasm32 at all -- it's
+# x86_64/ARM GNU-assembler syntax -- so this build always compiles
+# leancrypto's *portable C* Keccak-p[1600] permutation (disable-asm=true
+# below is a correctness requirement, not a missed optimization -- see
+# doc/crypto.md's "Performance" section). -msimd128 lets LLVM's
+# auto-vectorizer target that portable C with WASM SIMD instead of falling
+# back to scalar wasm32 code; every WASM/Node runtime that can load this
+# module already supports WASM SIMD (finalized in all major engines since
+# 2021), so there is no compatibility downside to enabling it unconditionally.
+exec "$REAL_EMCC" -msimd128 "\${args[@]}"
 EOF
 chmod +x "$EMCC_WRAPPER"
 

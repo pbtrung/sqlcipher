@@ -43,7 +43,10 @@ This:
    probing (`cc.has_argument()`) in leancrypto's *unmodified* `meson.build`
    incorrectly reports these as supported for the `wasm32-unknown-emscripten`
    target (they fail at actual compile time), and filtering them in a
-   wrapper avoids ever having to patch the pinned, vendored submodule.
+   wrapper avoids ever having to patch the pinned, vendored submodule. The
+   wrapper also unconditionally adds `-msimd128` to every compile (both
+   leancrypto's own build and the final link below) — see "Performance"
+   below.
 2. Builds leancrypto for `wasm32` via Meson + a generated cross-file
    (`third_party/wasm-cross.ini`, from `third_party/wasm-cross.ini.in`),
    into `third_party/leancrypto/build-wasm/`. Unlike the *native* Linux
@@ -67,8 +70,42 @@ This:
    [secbits/leancrypto](https://github.com/pbtrung/secbits/tree/main/leancrypto)
    WASM build this was adapted from.
 
-Output: `wasm/sqlcipher.js` + `wasm/sqlcipher.wasm` (both gitignored —
-build artifacts, not checked in).
+Output: `wasm/sqlcipher.js` + `wasm/sqlcipher.wasm` — checked in directly
+(not gitignored), so the module is usable without a local Emscripten
+toolchain. Re-run `tool/build-wasm.sh` and commit the results after any
+change to the codec, `wasm/leancrypto_wasm_api.c`, or the leancrypto
+version/options.
+
+## Performance
+
+See `doc/crypto.md`'s "Performance" section for the full explanation of why
+this project's Ascon-Keccak/SHA3 crypto suite can't reproduce SQLCipher
+Commercial's "~4x faster" AES-NI claim (this codec doesn't use AES, and
+there's no equivalent fixed-function CPU instruction for Keccak-p[1600]).
+For WASM specifically: leancrypto's own hand-written AVX2/AVX512/NEON asm
+is x86_64/ARM assembler and cannot target `wasm32` at all, so
+`disable-asm=true` is kept for this build (a correctness requirement, not a
+missed optimization). The WASM-appropriate equivalent is `-msimd128`,
+letting LLVM's auto-vectorizer target WASM's 128-bit SIMD instruction set
+when compiling leancrypto's portable C Keccak implementation. Measured with
+the same methodology as the native benchmark (20,000 iterations of
+`lc_wasm_aead_encrypt`/`_decrypt` over 4096-byte pages, under Node.js on
+this development machine):
+
+| | without `-msimd128` | with `-msimd128` |
+|---|---|---|
+| AEAD encrypt | 209.3 MB/s (19.57 µs/page) | 210.2 MB/s (19.48 µs/page) |
+| AEAD decrypt | 199.5 MB/s (20.53 µs/page) | 201.3 MB/s (20.35 µs/page) |
+| HKDF-SHA3-512 | 4.78 µs/op | 4.70 µs/op |
+
+Unlike the native AVX2 case, this is not a measurable win — LLVM's
+auto-vectorizer doesn't effectively vectorize Keccak's bit-interleaved
+permutation without explicit SIMD intrinsics (which leancrypto's portable C
+implementation doesn't use). `-msimd128` is kept anyway since it's a
+zero-cost, zero-risk flag (every WASM runtime that can load this module
+already supports WASM SIMD, finalized since 2021) and it keeps this build's
+compiler flags in the same spirit as the native one, but it should not be
+represented as a real performance improvement for this build.
 
 ## Verifying
 
