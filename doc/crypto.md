@@ -23,6 +23,7 @@ automatic migration path from an AES-256 SQLCipher database to this format.
 | Nonce size | 64 bytes |
 | Tag size | 64 bytes |
 | Master key (user-supplied) | ≥ 256 random bytes, supplied raw (no passphrase stretching) |
+| Per-page salt randomness | `getrandom(2)` Linux syscall, called directly (not via leancrypto) |
 
 ### Ascon-Keccak is not standard Ascon
 
@@ -183,7 +184,9 @@ build, invoked from `main.mk`. Only the subsystems needed here are enabled:
 Ascon-Keccak AEAD, SHA3, and HKDF. Everything else (ML-KEM, ML-DSA, SLH-DSA,
 BIKE, HQC, Curve25519/Curve448, the ASN.1/X.509/PKCS7/PKCS8 parsers — which
 are GPLv2-licensed and must stay disabled to keep the vendored tree fully
-permissive/BSD-compatible —, Rust bindings, EFI support, the `apps` and
-`tests` targets, and the `drng`/entropy-source subsystem, since this project
-never generates keys internally) is disabled at `meson setup` time. There is
-no dependency on a system-installed leancrypto package.
+permissive/BSD-compatible —, Rust bindings, EFI support, the `apps`/`tests`
+targets, and the `drng`/entropy-source subsystem, since per-page salts are
+generated via a direct `getrandom(2)` syscall rather than leancrypto's own
+RNG — see `doc/plan.md`'s "Post-implementation hardening" section for why)
+is disabled at `meson setup` time. There is no dependency on a
+system-installed leancrypto package.

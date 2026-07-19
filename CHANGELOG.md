@@ -1,6 +1,29 @@
 # SQLCipher Change Log
 Notable changes to this project are documented in this file.
 
+## [5.0.0] - (July 2026 - [5.0.0 changes])
+- **Breaking change**: replace the AES-256-CBC / HMAC-SHA512 / PBKDF2 crypto
+  stack with a single new provider based on
+  [leancrypto](https://github.com/smuellerDD/leancrypto) (vendored as a git
+  submodule, built from source): Ascon-Keccak-512 AEAD (64-byte key/nonce/tag)
+  keyed via HKDF-SHA3-512. See `doc/crypto.md` for the full design and
+  `doc/plan.md` for the implementation/verification notes.
+- The OpenSSL, LibTomCrypt, and CommonCrypto providers are removed entirely;
+  leancrypto is now the only supported provider. This build targets Linux
+  only.
+- The key model changes: a single raw, high-entropy master key of at least
+  256 bytes must be supplied via `PRAGMA key`/`sqlite3_key()` as a raw blob;
+  passphrase-based keys and PBKDF2 key derivation are no longer supported.
+- The on-disk page format changes: every page (including page 1, which no
+  longer has a plaintext prefix) stores a fresh random 64-byte salt and a
+  64-byte AEAD tag in its reserve region; there is no HMAC region and no
+  block-size rounding.
+- There is no migration path from AES-256 SQLCipher databases to this format.
+- Pragmas describing the old scheme (`cipher_hmac_algorithm`,
+  `cipher_kdf_algorithm`, `cipher_kdf_iter`, `cipher_compatibility`,
+  `cipher_plaintext_header_size`, and related `_default_` variants) are now
+  deprecated no-ops.
+
 ## [4.17.0] - (July 2026 - [4.17.0 changes])
 - Update baseline to SQLite 3.53.3
 - Normalize error behavior for incorrect keys when first operation attempts to modfiy the schema
