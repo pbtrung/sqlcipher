@@ -1631,7 +1631,11 @@ all: lib
 # Dynamic libsqlite3
 #
 $(libsqlite3.DLL):	$(LIBOBJ)
-	$(T.link.shared) -o $@ $(LIBOBJ) $(LDFLAGS.libsqlite3) \
+# $(LIBOBJ) already includes crypto_leancrypto.o (via LIBOBJS0/LIBOBJS1 --
+# see the SQLCIPHER_OBJ/LIBOBJS1 comments above), so it must be filtered
+# out of $(LDFLAGS.libsqlite3) here to avoid passing that object file to
+# the linker twice, which causes a "multiple definition" error.
+	$(T.link.shared) -o $@ $(LIBOBJ) $(filter-out crypto_leancrypto.o,$(LDFLAGS.libsqlite3)) \
 		$(LDFLAGS.libsqlite3.os-specific) $(LDFLAGS.libsqlite3.soname)
 $(libsqlite3.DLL)-1: $(libsqlite3.DLL)
 $(libsqlite3.DLL)-0 $(libsqlite3.DLL)-:
@@ -2318,10 +2322,12 @@ all: sqlite3$(T.exe)-$(HAVE_WASI_SDK)
 # is useful during development and debugging.
 #
 sqlite3d$(T.exe):	shell.c $(LIBOBJS0)
+# see the $(libsqlite3.DLL) rule above for why crypto_leancrypto.o must be
+# filtered out of $(LDFLAGS.libsqlite3) here ($(LIBOBJS0) already has it).
 	$(T.link) -o $@ \
 		shell.c $(LIBOBJS0) \
 		$(CFLAGS.readline) $(SHELL_OPT) \
-		$(LDFLAGS.libsqlite3) $(LDFLAGS.readline)
+		$(filter-out crypto_leancrypto.o,$(LDFLAGS.libsqlite3)) $(LDFLAGS.readline)
 
 install-shell-0: sqlite3$(T.exe) $(install-dir.bin)
 	$(INSTALL) sqlite3$(T.exe) "$(install-dir.bin)"
