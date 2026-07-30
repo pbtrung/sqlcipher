@@ -24,8 +24,8 @@ the native Linux build in `main.mk`.
   should work; this was built and verified against emscripten 6.0.3.
 - **Meson** (already required for the native build's leancrypto integration
   — see `main.mk`).
-- **Node.js**, to run the verification script (`wasm/test-roundtrip.mjs`).
-  Not required just to build the module.
+- **Node.js**, to run the verification scripts (`wasm/test-roundtrip.mjs`,
+  `wasm/test-js-vfs.mjs`). Not required just to build the module.
 - The `third_party/leancrypto` git submodule checked out
   (`git submodule update --init --recursive`).
 
@@ -111,9 +111,10 @@ represented as a real performance improvement for this build.
 
 ```
 $ node wasm/test-roundtrip.mjs
+$ node wasm/test-js-vfs.mjs
 ```
 
-Exercises both exported APIs end to end:
+`test-roundtrip.mjs` exercises both exported APIs end to end:
 
 - **SQLite/SQLCipher**: opens a database with a valid raw 256-byte key
   (`x'...512 hex chars...'`), creates a table, inserts rows, closes,
@@ -124,6 +125,70 @@ Exercises both exported APIs end to end:
 - **leancrypto's raw API** (via `leancrypto_wasm_api.c`'s thin wrappers):
   an AEAD encrypt/decrypt round trip, tamper detection (a flipped
   ciphertext byte fails to decrypt), and HKDF-SHA3-512 determinism.
+
+`test-js-vfs.mjs` exercises the JS-backed `sqlite3_vfs` (see below): an
+unencrypted create/insert/close/reopen round trip through it, confirms the
+rollback journal file is created and then removed from the backing store
+after a commit, layers SQLCipher's codec on top of it (open with a key,
+confirms the stored bytes don't contain the plaintext, reopens and
+decrypts), and confirms registering it (non-default) doesn't disturb the
+existing default MEMFS-backed VFS.
+
+## JS-backed sqlite3_vfs
+
+Beyond the default MEMFS-backed VFS Emscripten's libc provides automatically
+(what `test-roundtrip.mjs` uses), this build can also register a
+`sqlite3_vfs` whose `xOpen`/`xRead`/`xWrite`/... methods are plain JS
+functions (`wasm/js-vfs.mjs`) rather than compiled C. This is a
+demonstration/reference implementation of the underlying mechanism, not a
+persistence solution on its own — see "Storage backend" below.
+
+**How it works:**
+
+1. `tool/build-wasm.sh` passes `-s ALLOW_TABLE_GROWTH=1` and exports
+   `addFunction`/`removeFunction`. The WASM function table normally has no
+   free slots for functions added after startup — `Module.addFunction()`
+   would throw without table growth enabled.
+2. `wasm/js-vfs.mjs`'s `registerJsVfs(Module, opts)` turns each JS method
+   (`xOpen`, `xRead`, `xWrite`, ...) into a real, indirectly-callable WASM
+   function pointer via `Module.addFunction(fn, signature)`.
+3. Those pointers are handed to `sqlite3_js_vfs_register()` (`wasm/js_vfs.c`),
+   which assigns them into an actual C `sqlite3_vfs`/`sqlite3_io_methods`
+   struct pair (by ordinary struct-field assignment against the layouts in
+   `sqlite3.h` — the pointer values themselves are opaque to that file) and
+   calls `sqlite3_vfs_register()`. From that point on, SQLite's core C code
+   calls these function pointers exactly like it would any native VFS's
+   methods; it has no idea the callee is a JS trampoline.
+
+```js
+import Sqlite3Wasm from './sqlcipher.js';
+import { registerJsVfs } from './js-vfs.mjs';
+
+const Module = await Sqlite3Wasm();
+const { name, files } = registerJsVfs(Module, { name: 'jsvfs' });
+
+// select it via sqlite3_open_v2's zVfs argument (there's no JS-friendly
+// wrapper for that in this raw-C-API build — see wasm/test-js-vfs.mjs for
+// the full ccall/malloc-based open sequence)
+```
+
+**Storage backend:** a plain in-memory JS `Map` from filename to a growable
+`Uint8Array`, returned as `files` from `registerJsVfs()`. This proves out
+the VFS-in-JS mechanism end to end but is **not** actually more persistent
+than the default MEMFS backend — both are lost when the module instance
+goes away. A real persistence layer (IndexedDB/OPFS in a browser,
+Node's `fs`) can be added later by reimplementing `js-vfs.mjs`'s method
+functions against that backend instead of `files`; the C side
+(`js_vfs.c`) and the `addFunction`/table-growth mechanism don't change.
+
+**Limitations:** only `sqlite3_vfs`/`sqlite3_io_methods` version 1 is
+implemented (no WAL shared-memory methods, no `xFetch`/`xUnfetch` mmap
+methods) — this VFS only supports rollback-journal mode
+(`PRAGMA journal_mode=WAL` against a `jsvfs`-opened connection is not
+supported). Locking is a no-op (`xLock`/`xUnlock`/`xCheckReservedLock`
+always report "unlocked"/success) since the backing store isn't shared
+across processes or threads. `xRandomness` and `xCurrentTime` delegate to
+`globalThis.crypto.getRandomValues()`/`Date.now()`.
 
 ## Using the module
 
@@ -148,13 +213,15 @@ of both APIs.
 
 ## Known limitations
 
-- **No persistent storage backend.** This build relies on Emscripten's
-  default in-memory MEMFS for file I/O — databases exist only for the
-  lifetime of the loaded module instance (comparable to `:memory:`, just
-  backed by a real file path within that instance). There is no OPFS/IDBFS
-  integration (that's a substantial part of what makes `ext/wasm/`'s own
-  build so much larger) — a real persistent, browser-usable storage layer
-  is a natural follow-up but is out of scope here.
+- **No persistent storage backend.** By default this build relies on
+  Emscripten's in-memory MEMFS for file I/O — databases exist only for the
+  lifetime of the loaded module instance. The JS-backed `sqlite3_vfs`
+  described above (`wasm/js-vfs.mjs`/`wasm/js_vfs.c`) demonstrates the
+  mechanism a real persistence layer would plug into, but its own default
+  storage (a JS `Map`) is equally non-persistent. There is still no
+  OPFS/IDBFS integration (that's a substantial part of what makes
+  `ext/wasm/`'s own build so much larger) — swapping the JS VFS's storage
+  for one of those is a natural follow-up but is out of scope here.
 - **Verified under Node.js only.** Not yet tested in an actual browser
   environment.
 - **No JS-side OO wrapper.** Callers use the raw exported C functions

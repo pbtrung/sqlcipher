@@ -193,7 +193,8 @@ cp "$GEN_DIR/build/sqlite3.h" "$GEN_DIR/sqlite3.h"
 
 # ---------------------------------------------------------------------------
 # 6. Compile + link the WASM module: the amalgamation + the leancrypto
-#    provider glue + the WASM RNG shim + the leancrypto raw-API wrapper,
+#    provider glue + the WASM RNG shim + the leancrypto raw-API wrapper +
+#    the JS-backed sqlite3_vfs glue (wasm/js_vfs.c, see wasm/js-vfs.mjs),
 #    statically linked against leancrypto's wasm32 libleancrypto.a.
 #    Mirrors LEANCRYPTO_CFLAGS in main.mk, adjusted for the build-wasm
 #    generated-header directories.
@@ -210,6 +211,15 @@ cp "$GEN_DIR/build/sqlite3.h" "$GEN_DIR/sqlite3.h"
 #    actually present to export -- this is also why
 #    src/crypto_leancrypto_rng_wasm.c is included here defensively, in case
 #    whole-archive pulls in any object with an unresolved reference to it.
+#
+#    -s ALLOW_TABLE_GROWTH=1 plus exporting addFunction/removeFunction lets
+#    JS register new entries in the WASM function table at runtime -- with
+#    the default (non-growable) table there are no free slots for this, so
+#    addFunction() would throw. This is what lets wasm/js-vfs.mjs turn its
+#    JS sqlite3_vfs/io_methods implementations into real, C-callable
+#    function pointers and hand them to sqlite3_js_vfs_register()
+#    (js_vfs.c) to build an actual sqlite3_vfs SQLite's core can call into
+#    directly, same as any native VFS.
 # ---------------------------------------------------------------------------
 echo "==> Linking wasm/sqlcipher.js + .wasm"
 
@@ -234,6 +244,7 @@ echo "==> Linking wasm/sqlcipher.js + .wasm"
 	"$TOP/src/crypto_leancrypto.c" \
 	"$TOP/src/crypto_leancrypto_rng_wasm.c" \
 	"$TOP/wasm/leancrypto_wasm_api.c" \
+	"$TOP/wasm/js_vfs.c" \
 	-Wl,--whole-archive "$LC_LIB" -Wl,--no-whole-archive \
 	-s WASM=1 \
 	-s MODULARIZE=1 \
@@ -242,7 +253,8 @@ echo "==> Linking wasm/sqlcipher.js + .wasm"
 	-Wl,--export-all \
 	-Wl,--no-gc-sections \
 	-s ALLOW_MEMORY_GROWTH=1 \
-	-s EXPORTED_RUNTIME_METHODS='["ccall","cwrap","getValue","setValue","UTF8ToString","stringToUTF8","lengthBytesUTF8"]' \
+	-s ALLOW_TABLE_GROWTH=1 \
+	-s EXPORTED_RUNTIME_METHODS='["ccall","cwrap","getValue","setValue","UTF8ToString","stringToUTF8","lengthBytesUTF8","addFunction","removeFunction"]' \
 	-o "$OUT_DIR/sqlcipher.js"
 
 echo "Done: $OUT_DIR/sqlcipher.js  $OUT_DIR/sqlcipher.wasm"
