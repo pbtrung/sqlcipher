@@ -211,6 +211,29 @@ Emscripten runtime helpers (`_malloc`/`_free`, `stringToUTF8`/`UTF8ToString`,
 `getValue`/`setValue`) — see `wasm/test-roundtrip.mjs` for worked examples
 of both APIs.
 
+### Non-default page sizes
+
+`PRAGMA page_size = N` (any power of 2 from 512 to 65536) works normally
+while creating a database or for the lifetime of the connection that set
+it. But because this codec's page 1 has no plaintext header (see
+`doc/crypto.md`), a *new* connection reopening such a database has no way to
+learn its page size before the key is supplied, and must be told explicitly,
+before `PRAGMA key`:
+
+```js
+ccall('sqlite3_exec', 'number',
+  ['number', 'string', 'number', 'number', 'number'],
+  [db, 'PRAGMA cipher_default_page_size = 8192', 0, 0, 0]);
+ccall('sqlite3_exec', 'number',
+  ['number', 'string', 'number', 'number', 'number'],
+  [db, 'PRAGMA key = "x\'...\'"', 0, 0, 0]);
+```
+
+Skipping this on reopen fails with `sqlcipher_page_cipher: unrecognized
+magic/version bytes for pgno=1` — not a wasm-specific restriction, see
+`doc/crypto.md`'s "Known limitations" for the full explanation (it
+reproduces identically on the native Linux build).
+
 ## Known limitations
 
 - **No persistent storage backend.** By default this build relies on

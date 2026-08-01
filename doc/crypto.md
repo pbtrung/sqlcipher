@@ -122,6 +122,44 @@ therefore encrypted uniformly with every other page, with no special-cased
 plaintext region, no reconstructed
 "fake" header fields, and no data loss.
 
+### Consequence: non-default page sizes require `cipher_default_page_size` on every reopen
+
+Vanilla SQLite (and the original AES-256 SQLCipher, which kept bytes 16-99 of
+page 1 in the clear or semi-clear) discovers a database's page size by
+reading it straight out of the plaintext page 1 header on open — bytes 16-17
+of the file. Because this codec's page 1 is **fully** ciphertext (see
+above), that discovery mechanism no longer works: a fresh connection has no
+way to learn the on-disk page size before the key has been supplied and page
+1 decrypted, so it falls back to assuming
+`SQLITE_DEFAULT_PAGE_SIZE`/`PRAGMA cipher_default_page_size` (4096 unless
+overridden). If the database was actually created with a different page
+size, that first page-1 decrypt attempt reads the wrong number of bytes,
+lands on the wrong reserve-region offsets, and fails with `sqlcipher_page_cipher:
+unrecognized magic/version bytes for pgno=1` — indistinguishable at a glance
+from a wrong key or a corrupted file.
+
+`PRAGMA page_size = N` still works correctly for creating a new database or
+for the lifetime of the connection that set it — this only affects
+**reopening** a database that was created with a non-default page size.
+The fix is to tell the codec the real page size *before* supplying the key,
+on every connection that reopens such a database:
+
+```sql
+PRAGMA cipher_default_page_size = 8192;  -- must come before PRAGMA key
+PRAGMA key = "x'...'";
+```
+
+(`PRAGMA page_size = 8192` before the key works identically here — both
+pragmas hit the same `sqlcipher_codec_ctx_set_pagesize()` call before a codec
+context exists yet — but `cipher_default_page_size` is the more explicit,
+self-documenting spelling for "this is what I already know the on-disk page
+size to be", versus `page_size`'s usual meaning of "please use this page
+size going forward".) The application is responsible for remembering/
+persisting which page size it used for a given database file, the same way
+it's already responsible for remembering the key itself. This applies
+identically to the native Linux build and the WASM build (`wasm/README.md`)
+— it is not build-specific.
+
 ## Per-page key/nonce derivation
 
 Given the master key `K` (≥256 bytes, supplied by the application) and a
@@ -160,6 +198,12 @@ a hard authentication failure.
   known, accepted tradeoff rather than an oversight. A future revision could
   add the page number to the AD (and to the HKDF `info` strings) to close
   this gap without changing the on-disk field layout.
+- **Reopening a database created with a non-default page size requires
+  `PRAGMA cipher_default_page_size = N` before `PRAGMA key`** — see
+  "Consequence: non-default page sizes require `cipher_default_page_size` on
+  every reopen" above. `PRAGMA page_size` itself is not restricted to 4096;
+  this is purely a reopen-time page-size-discovery gap caused by this
+  codec's lack of a plaintext header.
 - No migration path from AES-256 SQLCipher databases.
 - Linux-only for the native build; no Windows/macOS build path is provided
   or supported. There is also an Emscripten/WASM build (`tool/build-wasm.sh`,
