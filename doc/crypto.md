@@ -100,15 +100,18 @@ and read back on decrypt.
 Additional Data (AD) passed to the AEAD call:
 
 ```
-AD = magic (2) || version (2) || pgno (4, big-endian) || salt (64)   -> 72 bytes total
+AD = magic (2) || version (2) || pgno (8, big-endian) || salt (64)   -> 76 bytes total
 ```
 
 `pgno` is the SQLite page number being encrypted/decrypted, folded into the AD
 so that a page's on-disk blob only authenticates in the file slot it was
 originally written to (see "Known limitations" below for the class of attack
-this closes, and why it was previously omitted). It is **not** stored on
-disk anywhere — it's already implicit in the page's byte offset in the file,
-the same way `magic`/`version` aren't stored either — so this adds no bytes
+this closes, and why it was previously omitted). It is encoded as 8 bytes
+(zero-extended, since `Pgno` is currently a 32-bit type) rather than 4 so a
+future widening of `Pgno` itself would not require another AAD-format/version
+bump. It is **not** stored on disk anywhere — it's already implicit in the
+page's byte offset in the file, the same way `magic`/`version` aren't stored
+either — so this adds no bytes
 to `reserve_size`, which stays 132.
 
 ### Why there is no on-disk plaintext header

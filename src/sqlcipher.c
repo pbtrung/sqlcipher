@@ -92,7 +92,7 @@ void sqlite3pager_reset(Pager *pPager);
 /* magic bytes ("TX") and version identifying this codec's on-disk blob format. These are
 ** fixed, compile-time constants that are NEVER read from or written to disk anywhere --
 ** they are only ever used as constant Additional Data (AAD) material for every page's AEAD
-** call (magic(2) || version(2) || pgno(4) || salt(64), see sqlcipher_page_cipher). Both the
+** call (magic(2) || version(2) || pgno(8) || salt(64), see sqlcipher_page_cipher). Both the
 ** encrypting and decrypting side agree on them out-of-band, simply by virtue of running this
 ** exact codec version, the same way the choice of Ascon-Keccak-512 itself isn't stored
 ** per-page either. See doc/crypto.md "Per-page blob format" and "Why there is no on-disk
@@ -104,7 +104,9 @@ void sqlite3pager_reset(Pager *pPager);
 ** AAD construction. Bumping the on-disk version constant makes the magic/version check in
 ** sqlcipher_page_cipher (which runs before any AEAD call is attempted) reject a 0x00 page
 ** outright with a clear "unrecognized magic/version" error, instead of failing later with a
-** less specific "authentication failed" that looks like tampering or a wrong key. */
+** less specific "authentication failed" that looks like tampering or a wrong key. (The pgno
+** field was later widened from 4 to 8 bytes, still under 0x01 -- no 0x01-tagged database
+** with the narrower 4-byte encoding was ever released, so no further bump was needed.) */
 #define CIPHER_MAGIC_0 0x54
 #define CIPHER_MAGIC_1 0x58
 #define CIPHER_VERSION_MAJOR 0x01
@@ -1553,12 +1555,14 @@ static const char SQLCIPHER_HKDF_NONCE_INFO[] = "sqlcipher-leancrypto-nonce-v1";
 /*
  * ctx - codec context
  * for_ctx - 1 to use ctx->write_ctx, 0 to use ctx->read_ctx
- * pgno - page number in database. Folded into the AAD (big-endian, 4 bytes) below;
- *        not stored on disk (it's implicit in the page's position in the file, so this
- *        adds no on-disk bytes) and not part of key derivation. Binding it into the AAD
- *        means a page's on-disk blob only authenticates in the slot it was written to --
- *        see doc/crypto.md "Per-page blob format" and the former "Known limitations"
- *        entry this closes.
+ * pgno - page number in database. Folded into the AAD (big-endian, 8 bytes, zero-extended
+ *        since Pgno is currently u32) below; not stored on disk (it's implicit in the
+ *        page's position in the file, so this adds no on-disk bytes) and not part of key
+ *        derivation. Binding it into the AAD means a page's on-disk blob only
+ *        authenticates in the slot it was written to -- see doc/crypto.md "Per-page blob
+ *        format" and the former "Known limitations" entry this closes. The field is 8
+ *        bytes wide (not 4) so a future widening of Pgno itself would not require another
+ *        AAD-format/version bump.
  * mode - SQLCIPHER_ENCRYPT or SQLCIPHER_DECRYPT
  * page_sz - size in bytes of the input/output buffers (the full page size -- page 1 is
  *           NOT special-cased or offset any more, see doc/crypto.md "Why there is no
@@ -1569,7 +1573,7 @@ static const char SQLCIPHER_HKDF_NONCE_INFO[] = "sqlcipher-leancrypto-nonce-v1";
  * Every page (including page 1) is stored identically, with no special-cased plaintext
  * region:
  *   [ ciphertext (page_sz - reserve_sz bytes) ][ magic(2) ][ version(2) ][ salt(salt_sz) ][ tag(tag_sz) ]
- * AAD = magic(2) || version(2) || pgno(4, big-endian) || salt(salt_sz). magic/version are
+ * AAD = magic(2) || version(2) || pgno(8, big-endian) || salt(salt_sz). magic/version are
  * always the fixed CIPHER_MAGIC_0/1 and CIPHER_VERSION_MAJOR/MINOR compile-time constants
  * on write, and are read back off disk (and checked against those same constants) on read
  * -- see doc/crypto.md "Per-page blob format".
@@ -1577,7 +1581,7 @@ static const char SQLCIPHER_HKDF_NONCE_INFO[] = "sqlcipher-leancrypto-nonce-v1";
 static int sqlcipher_page_cipher(codec_ctx *ctx, int for_ctx, Pgno pgno, int mode, int page_sz, unsigned char *in, unsigned char *out) {
   cipher_ctx *c_ctx = for_ctx ? ctx->write_ctx : ctx->read_ctx;
   unsigned char *magic_in, *magic_out, *salt_in, *salt_out, *tag_in, *tag_out, *out_start;
-  unsigned char aad[8 + CIPHER_MAX_KEY_SZ];
+  unsigned char aad[12 + CIPHER_MAX_KEY_SZ];
   unsigned char page_key[CIPHER_MAX_KEY_SZ];
   unsigned char page_nonce[CIPHER_MAX_KEY_SZ];
   int size, aad_sz, rc;
@@ -1625,16 +1629,25 @@ static int sqlcipher_page_cipher(codec_ctx *ctx, int for_ctx, Pgno pgno, int mod
     memcpy(salt_out, salt_in, ctx->salt_sz); /* copy the salt from the input to output buffer */
   }
 
-  /* AAD = magic(2) || version(2) || pgno(4, big-endian) || salt(salt_sz), see
+  /* AAD = magic(2) || version(2) || pgno(8, big-endian) || salt(salt_sz), see
      doc/crypto.md. pgno is bound in explicitly (big-endian, independent of host
-     byte order) rather than reusing Pgno's in-memory representation. */
-  memcpy(aad, magic_out, 4);
-  aad[4] = (unsigned char)(pgno >> 24);
-  aad[5] = (unsigned char)(pgno >> 16);
-  aad[6] = (unsigned char)(pgno >> 8);
-  aad[7] = (unsigned char)(pgno);
-  memcpy(aad + 8, salt_out, ctx->salt_sz);
-  aad_sz = 8 + ctx->salt_sz;
+     byte order, zero-extended to 8 bytes since Pgno is currently u32) rather than
+     reusing Pgno's in-memory representation. Widen to u64 before shifting: Pgno
+     (u32) shifted by more than 31 bits is undefined behavior. */
+  {
+    u64 pgno64 = (u64)pgno;
+    memcpy(aad, magic_out, 4);
+    aad[4]  = (unsigned char)(pgno64 >> 56);
+    aad[5]  = (unsigned char)(pgno64 >> 48);
+    aad[6]  = (unsigned char)(pgno64 >> 40);
+    aad[7]  = (unsigned char)(pgno64 >> 32);
+    aad[8]  = (unsigned char)(pgno64 >> 24);
+    aad[9]  = (unsigned char)(pgno64 >> 16);
+    aad[10] = (unsigned char)(pgno64 >> 8);
+    aad[11] = (unsigned char)(pgno64);
+  }
+  memcpy(aad + 12, salt_out, ctx->salt_sz);
+  aad_sz = 12 + ctx->salt_sz;
 
   /* derive independent per-page key and nonce from (master key, salt) via a single HKDF
      extract shared across two expand calls with distinct info labels -- see
