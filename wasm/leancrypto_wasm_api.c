@@ -113,10 +113,14 @@ int lc_wasm_aead_decrypt(
 }
 
 /*
-** HKDF-SHA3-512 (RFC 5869 extract-then-expand) in one call, matching
-** sqlcipher_leancrypto_hkdf() in src/crypto_leancrypto.c. `out_len` may be
-** any length HKDF-Expand supports (up to 255 * the hash's output size).
-** Returns 0 on success, a negative leancrypto error code otherwise.
+** HKDF-SHA3-512 (RFC 5869 extract-then-expand) in one call, using the same
+** underlying leancrypto HKDF primitive as sqlcipher_leancrypto_hkdf() in
+** src/crypto_leancrypto.c, but a single-output shape (one ikm/salt/info in,
+** one out) rather than that function's derive-two-outputs-from-one-extract
+** shape -- this is a general-purpose primitive for JS callers, not the
+** codec's own per-page derivation path. `out_len` may be any length
+** HKDF-Expand supports (up to 255 * the hash's output size). Returns 0 on
+** success, a negative leancrypto error code otherwise.
 */
 EMSCRIPTEN_KEEPALIVE
 int lc_wasm_hkdf_sha3_512(

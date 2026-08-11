@@ -251,5 +251,5 @@ reproduces identically on the native Linux build).
   directly (see above), not a higher-level JS API like `ext/wasm/`'s OO1
   bindings.
 - Everything in `doc/crypto.md`'s "Known limitations" (Linux/Emscripten
-  only, no migration path from AES-256 SQLCipher databases, AAD does not
-  bind the SQLite page number, etc.) applies equally here.
+  only, no migration path from AES-256 SQLCipher databases, etc.) applies
+  equally here.
