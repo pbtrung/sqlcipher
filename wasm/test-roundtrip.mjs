@@ -114,6 +114,30 @@ function collectRows(Module, db, sql) {
   return rows;
 }
 
+function collectTextRows(Module, db, sql) {
+  const rows = [];
+  const ppStmt = Module._malloc(4);
+  const { ptr } = cString(Module, sql);
+  const rc = Module._sqlite3_prepare_v2(db, ptr, -1, ppStmt, 0);
+  Module._free(ptr);
+  if (rc !== SQLITE_OK) { Module._free(ppStmt); return rows; }
+  const stmt = Module.getValue(ppStmt, 'i32');
+  Module._free(ppStmt);
+  while (Module._sqlite3_step(stmt) === SQLITE_ROW) {
+    const textPtr = Module._sqlite3_column_text(stmt, 0);
+    rows.push(Module.UTF8ToString(textPtr));
+  }
+  Module._sqlite3_finalize(stmt);
+  return rows;
+}
+
+function rekey(Module, db, keyStr) {
+  const { ptr, len } = cString(Module, keyStr);
+  const rc = Module._sqlite3_rekey(db, ptr, len);
+  Module._free(ptr);
+  return rc;
+}
+
 async function main() {
   const Module = await Sqlite3Wasm();
   console.log(`# sqlite3 version: ${Module.UTF8ToString(Module._sqlite3_libversion())}`);
@@ -171,23 +195,124 @@ async function main() {
   }
 
   // ---------------------------------------------------------------------
-  // 3. Undersized key is rejected immediately by sqlite3_key() itself (see
-  //    doc/crypto.md "Key provisioning") -- not deferred to first table
-  //    access. A rejected key leaves the connection exactly as if no key
-  //    had ever been supplied, so a *subsequent* statement like
-  //    CREATE TABLE would actually succeed (on a plain, unencrypted
-  //    connection) rather than fail; that's why this checks openDb's own
-  //    rc, not a follow-up exec's.
+  // 3. Key length boundaries (256-8192 bytes, see doc/crypto.md "Key
+  //    provisioning"). Out-of-range keys are rejected immediately by
+  //    sqlite3_key() itself -- not deferred to first table access -- and a
+  //    rejected key leaves the connection exactly as if no key had ever
+  //    been supplied, so a *subsequent* statement like CREATE TABLE
+  //    actually succeeds (on a plain, unencrypted connection) rather than
+  //    failing.
   // ---------------------------------------------------------------------
   try { Module.FS.unlink('/shortkey.db'); } catch (e) {}
   {
     const { db, rc } = openDb(Module, '/shortkey.db', shortKey);
     check('undersized key rejected', rc !== SQLITE_OK, `rc=${rc}`);
+
+    const erc = exec(Module, db, 'CREATE TABLE z(a); INSERT INTO z VALUES(1);');
+    check('rejected key leaves connection unkeyed (plain table succeeds)',
+      erc === SQLITE_OK, errmsg(Module, db));
+
+    Module._sqlite3_close(db);
+  }
+
+  try { Module.FS.unlink('/maxkey.db'); } catch (e) {}
+  {
+    const maxKey = hexKey(0x07, 8192);
+    const { db, rc } = openDb(Module, '/maxkey.db', maxKey);
+    check('key at exact maximum (8192 bytes) accepted', rc === SQLITE_OK, `rc=${rc}`);
+
+    const erc = exec(Module, db, 'CREATE TABLE m(a);');
+    check('create table with max-size key', erc === SQLITE_OK, errmsg(Module, db));
+
+    Module._sqlite3_close(db);
+  }
+
+  try { Module.FS.unlink('/overkey.db'); } catch (e) {}
+  {
+    const overKey = hexKey(0x07, 8193);
+    const { db, rc } = openDb(Module, '/overkey.db', overKey);
+    check('key one byte over maximum (8193 bytes) rejected', rc !== SQLITE_OK, `rc=${rc}`);
     Module._sqlite3_close(db);
   }
 
   // ---------------------------------------------------------------------
-  // 4. Raw leancrypto API: AEAD round trip + tamper detection
+  // 4. PRAGMA rekey: an out-of-range new key is rejected before any page is
+  //    rewritten (existing data/key remain fully intact, both on the same
+  //    connection and after closing and reopening with the original key),
+  //    and a valid rekey actually re-encrypts the database under the new
+  //    key (the old key stops working, the new key reads the same data).
+  // ---------------------------------------------------------------------
+  try { Module.FS.unlink('/rekey.db'); } catch (e) {}
+  {
+    const { db } = openDb(Module, '/rekey.db', validKey);
+    exec(Module, db, 'CREATE TABLE r(a); INSERT INTO r VALUES(42);');
+
+    const badRekeyRc = rekey(Module, db, shortKey);
+    check('rekey with undersized key rejected', badRekeyRc !== SQLITE_OK, `rc=${badRekeyRc}`);
+
+    const stillThereSameConn = queryScalarInt(Module, db, 'SELECT a FROM r;');
+    check('data intact after rejected rekey (same connection)',
+      stillThereSameConn === 42, `a=${stillThereSameConn}`);
+    Module._sqlite3_close(db);
+
+    const { db: db2, rc: rc2 } = openDb(Module, '/rekey.db', validKey);
+    check('reopen with original key after rejected rekey', rc2 === SQLITE_OK, `rc=${rc2}`);
+    const stillThereReopen = queryScalarInt(Module, db2, 'SELECT a FROM r;');
+    check('data intact after reopen with original key',
+      stillThereReopen === 42, `a=${stillThereReopen}`);
+
+    const newKey = hexKey(0x77, 256);
+    const goodRekeyRc = rekey(Module, db2, newKey);
+    check('valid rekey succeeds', goodRekeyRc === SQLITE_OK, `rc=${goodRekeyRc}`);
+    Module._sqlite3_close(db2);
+
+    const { db: db3 } = openDb(Module, '/rekey.db', validKey);
+    const oldKeyRead = queryScalarInt(Module, db3, 'SELECT a FROM r;');
+    check('old key no longer works after rekey', oldKeyRead === null, `a=${oldKeyRead}`);
+    Module._sqlite3_close(db3);
+
+    const { db: db4, rc: rc4 } = openDb(Module, '/rekey.db', newKey);
+    check('reopen with new key after rekey', rc4 === SQLITE_OK, `rc=${rc4}`);
+    const newKeyRead = queryScalarInt(Module, db4, 'SELECT a FROM r;');
+    check('data intact after rekey, read with new key', newKeyRead === 42, `a=${newKeyRead}`);
+    Module._sqlite3_close(db4);
+  }
+
+  // ---------------------------------------------------------------------
+  // 5. Page splicing is detected: copying one page's entire on-disk blob
+  //    onto a different page's slot must fail AEAD authentication, since
+  //    the AAD now binds the page number (see doc/crypto.md "Per-page
+  //    blob format" and the former "Known limitations" entry this closes).
+  // ---------------------------------------------------------------------
+  try { Module.FS.unlink('/splice.db'); } catch (e) {}
+  {
+    const PAGE_SZ = 4096;
+    const { db } = openDb(Module, '/splice.db', validKey);
+    exec(Module, db, 'CREATE TABLE s(a INTEGER PRIMARY KEY, b);');
+    exec(Module, db, 'BEGIN;');
+    for (let i = 1; i <= 20; i++) {
+      exec(Module, db, `INSERT INTO s(a,b) VALUES(${i}, zeroblob(1500));`);
+    }
+    exec(Module, db, 'COMMIT;');
+    Module._sqlite3_close(db);
+
+    const bytes = Module.FS.readFile('/splice.db');
+    check('splice test db has at least 3 pages', bytes.length >= 3 * PAGE_SZ, `size=${bytes.length}`);
+
+    // copy page 2's entire on-disk blob onto page 3's slot (0-indexed offsets)
+    const page2 = bytes.slice(1 * PAGE_SZ, 2 * PAGE_SZ);
+    bytes.set(page2, 2 * PAGE_SZ);
+    Module.FS.writeFile('/splice.db', bytes);
+
+    const { db: db2 } = openDb(Module, '/splice.db', validKey);
+    const failRows = collectTextRows(Module, db2, 'PRAGMA cipher_integrity_check;');
+    check('page splicing detected by cipher_integrity_check',
+      failRows.length > 0, JSON.stringify(failRows));
+    Module._sqlite3_close(db2);
+  }
+
+  // ---------------------------------------------------------------------
+  // 6. Raw leancrypto API: AEAD round trip + tamper detection
   // ---------------------------------------------------------------------
   {
     const keySz = Module._lc_wasm_key_size();
@@ -234,7 +359,7 @@ async function main() {
     check('lc_wasm_aead_decrypt detects tampering', tamperRc !== 0, `rc=${tamperRc}`);
 
     // ---------------------------------------------------------------------
-    // 5. Raw leancrypto API: HKDF-SHA3-512
+    // 7. Raw leancrypto API: HKDF-SHA3-512
     // ---------------------------------------------------------------------
     const ikm = Module._malloc(300);
     for (let i = 0; i < 300; i++) Module.setValue(ikm + i, (i * 5 + 1) & 0xff, 'i8');
