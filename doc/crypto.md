@@ -73,7 +73,7 @@ for that page.
 ```
 ciphertext (var)    page_size - reserve_size bytes
 magic (2 bytes)     0x54 0x58 ("TX")
-version (2 bytes)   major.minor, e.g. 0x01 0x00 = v1.0
+version (2 bytes)   major.minor, e.g. 0x01 0x01 = v1.1
 salt (64 bytes)     random per page, fresh on every write, HKDF input salt
 tag (64 bytes)      Ascon-Keccak authentication tag
 ```
@@ -100,8 +100,16 @@ and read back on decrypt.
 Additional Data (AD) passed to the AEAD call:
 
 ```
-AD = magic (2) || version (2) || salt (64)   -> 68 bytes total
+AD = magic (2) || version (2) || pgno (4, big-endian) || salt (64)   -> 72 bytes total
 ```
+
+`pgno` is the SQLite page number being encrypted/decrypted, folded into the AD
+so that a page's on-disk blob only authenticates in the file slot it was
+originally written to (see "Known limitations" below for the class of attack
+this closes, and why it was previously omitted). It is **not** stored on
+disk anywhere — it's already implicit in the page's byte offset in the file,
+the same way `magic`/`version` aren't stored either — so this adds no bytes
+to `reserve_size`, which stays 132.
 
 ### Why there is no on-disk plaintext header
 
@@ -207,19 +215,29 @@ a hard authentication failure.
 
 ## Known limitations
 
-- **The Additional Data does not include the SQLite page number.** Per the
-  exact format specified for this project, `AD = magic || version || salt`
-  only. Because each page's AEAD key is already unique (freshly derived from
-  a random salt on every write), an attacker who can read and write the raw
+- **Fixed: page-splicing/reordering was previously possible, closed by adding
+  `pgno` to the AAD (version 1.1).** Versions of this codec before
+  `CIPHER_VERSION_MINOR = 0x01` used `AD = magic || version || salt` only.
+  Because each page's AEAD key is already unique (freshly derived from a
+  random salt on every write), an attacker who could read and write the raw
   database file could copy one page's entire on-disk blob (`salt ||
   ciphertext || tag`) onto a different page's slot, and it would still
   decrypt and authenticate successfully there — SQLCipher's prior
   HMAC-over-(ciphertext ‖ IV ‖ page-number) design prevented exactly this
-  class of page-reordering/splicing attack. This design intentionally omits
-  that binding to match the specified format; it is documented here as a
-  known, accepted tradeoff rather than an oversight. A future revision could
-  add the page number to the AD (and to the HKDF `info` strings) to close
-  this gap without changing the on-disk field layout.
+  class of page-reordering/splicing attack, and this codec's earlier
+  omission of that binding reopened it. `pgno` is now folded into the AD
+  (see "Per-page blob format" above), so a spliced page fails AEAD
+  authentication in its new slot. This required bumping
+  `CIPHER_VERSION_MINOR`, since a page written under the old AAD
+  construction cannot re-authenticate under the new one — see "Per-page
+  blob format" for why that bump makes the failure a clean, pre-AEAD
+  "unrecognized magic/version" rejection rather than a confusing
+  authentication failure. This does **not** protect against replaying an
+  *old* ciphertext blob back into its *own* page slot (a same-page rollback
+  to a previous value) — that would require a whole-database freshness
+  mechanism (a monotonic counter or Merkle-style structure), which no
+  per-page-independent AEAD codec provides, including the original
+  AES/HMAC SQLCipher design.
 - **Reopening a database created with a non-default page size requires
   `PRAGMA cipher_default_page_size = N` before `PRAGMA key`** — see
   "Consequence: non-default page sizes require `cipher_default_page_size` on

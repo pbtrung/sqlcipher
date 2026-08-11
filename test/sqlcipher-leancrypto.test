@@ -288,4 +288,35 @@ do_test leancrypto-cipher-name {
 db close
 file delete -force test.db
 
+# ------------------------------------------------------------------------
+# 6. page splicing is detected: copying one page's entire on-disk blob onto a
+#    different page's slot must fail AEAD authentication, since the AAD now
+#    includes the page number (see doc/crypto.md "Per-page blob format" and
+#    the former "Known limitations" entry this closes).
+# ------------------------------------------------------------------------
+do_test leancrypto-detects-page-splicing {
+  sqlite_orig db test.db
+  execsql "
+    PRAGMA key = \"[sqlcipher_test_key 1]\";
+    CREATE TABLE t1(a INTEGER PRIMARY KEY, b);
+    BEGIN;
+  "
+  for {set i 1} {$i <= 20} {incr i} {
+    execsql "INSERT INTO t1(a,b) VALUES($i, zeroblob(1500));"
+  }
+  execsql { COMMIT; }
+  db close
+
+  # copy page 2's entire on-disk blob onto page 3's slot
+  set page2 [hexio_read test.db [expr {1 * $::PAGE_SZ}] $::PAGE_SZ]
+  hexio_write test.db [expr {2 * $::PAGE_SZ}] $page2
+
+  sqlite_orig db test.db
+  execsql "PRAGMA key = \"[sqlcipher_test_key 1]\";"
+  set result [execsql { PRAGMA cipher_integrity_check; }]
+  expr {[llength $result] > 0}
+} {1}
+db close
+file delete -force test.db
+
 finish_test
