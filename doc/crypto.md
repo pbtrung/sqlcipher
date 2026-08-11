@@ -19,10 +19,10 @@ automatic migration path from an AES-256 SQLCipher database to this format.
 |---|---|
 | AEAD cipher | leancrypto Ascon-Keccak, 512-bit variant (`lc_ascon_keccak`, `hash = lc_sha3_512`) |
 | KDF | HKDF-SHA3-512 (`lc_hkdf`, `hash = lc_sha3_512`) |
-| Key size | 64 bytes |
+| AEAD key size (derived per-page) | 64 bytes |
 | Nonce size | 64 bytes |
 | Tag size | 64 bytes |
-| Master key (user-supplied) | ≥ 256 random bytes, supplied raw (no passphrase stretching) |
+| Master key (user-supplied) | 256–8192 random bytes, supplied raw (no passphrase stretching) |
 | Per-page salt randomness | `getrandom(2)` Linux syscall, called directly (not via leancrypto) |
 
 ### Ascon-Keccak is not standard Ascon
@@ -39,17 +39,29 @@ vectors with, standard NIST Ascon.**
 
 ## Key provisioning
 
-The application must supply exactly one raw high-entropy master key, at least
-256 bytes long, from its own configuration (e.g. `PRAGMA key = x'...'` with a
-512+ hex-character blob, or the equivalent `sqlite3_key()` call). There is:
+The application must supply exactly one raw high-entropy master key, between
+256 and 8192 bytes long, from its own configuration (e.g. `PRAGMA key = x'...'`
+with a 512+ hex-character blob, or the equivalent `sqlite3_key()` call). There
+is:
 
 - no passphrase-based key derivation (no PBKDF2, no password stretching),
-- no minimum-entropy checking beyond a length check (≥ 256 bytes) — the
+- no minimum-entropy checking beyond a length check (256–8192 bytes) — the
   application is responsible for generating this key from a real CSPRNG,
 - no key storage or caching beyond what SQLCipher already does in memory for
   an open connection.
 
-Keys shorter than 256 bytes are rejected at `PRAGMA key` time with an error.
+Keys outside the 256–8192 byte range, or not supplied as a well-formed
+`x'...'` blob, are rejected immediately at `PRAGMA key`/`PRAGMA rekey` time
+with an error — before any pager or codec state is touched, so a rejected
+`PRAGMA rekey` never starts rewriting pages, and a rejected first-time
+`PRAGMA key` leaves the connection exactly as if no key had been supplied.
+There is no cryptographic reason for the 8192-byte upper bound (HKDF-Extract
+accepts arbitrary-length input key material); every page encrypt/decrypt
+re-hashes the master key as HKDF-Extract input, so the cap exists only to
+keep an accidental huge key (a misconfigured application, a typo) from
+turning into a per-page performance foot-gun. `CIPHER_MIN_KEY_SZ` /
+`CIPHER_MAX_RAW_KEY_SZ` in `src/sqlcipher.c` are compile-time overridable if
+a deployment needs a different range.
 
 ## Per-page blob format
 
@@ -162,7 +174,7 @@ identically to the native Linux build and the WASM build (`wasm/README.md`)
 
 ## Per-page key/nonce derivation
 
-Given the master key `K` (≥256 bytes, supplied by the application) and a
+Given the master key `K` (256–8192 bytes, supplied by the application) and a
 page's fresh random 64-byte `salt`:
 
 ```

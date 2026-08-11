@@ -124,6 +124,16 @@ void sqlite3pager_reset(Pager *pPager);
 #define CIPHER_MIN_KEY_SZ 256
 #endif
 
+/* maximum length, in bytes, of the raw master key. There is no cryptographic reason to
+** cap it -- HKDF-Extract accepts arbitrary-length IKM -- but every page encrypt/decrypt
+** re-hashes the master key as HKDF input, so an unbounded key turns an application typo
+** (or a huge blob passed by mistake) into a per-page performance foot-gun. This is a
+** generous ceiling, far above the >=256-byte recommended range, not a security boundary;
+** see doc/crypto.md "Key provisioning". */
+#ifndef CIPHER_MAX_RAW_KEY_SZ
+#define CIPHER_MAX_RAW_KEY_SZ 8192
+#endif
+
 #define SQLCIPHER_FLAG_GET(FLAG,BIT) ((FLAG & BIT) != 0)
 #define SQLCIPHER_FLAG_SET(FLAG,BIT) FLAG |= BIT
 #define SQLCIPHER_FLAG_UNSET(FLAG,BIT) FLAG &= ~BIT
@@ -378,6 +388,26 @@ static int cipher_isHex(const unsigned char *hex, int sz){
     }
   }
   return 1;
+}
+
+/* Validate that (pass, pass_sz) is a raw key blob formatted as x'...HEX...' whose
+** decoded length is between CIPHER_MIN_KEY_SZ and CIPHER_MAX_RAW_KEY_SZ bytes -- see
+** doc/crypto.md "Key provisioning". Shared by sqlcipher_cipher_ctx_set_pass (so a bad
+** key is rejected at PRAGMA key/rekey time, not deferred to the first page cipher
+** call) and sqlcipher_cipher_ctx_key_derive (defense in depth). On success, returns
+** non-zero and sets *raw_key_sz to the decoded byte length; on failure, returns zero
+** and *raw_key_sz is unspecified. */
+static int sqlcipher_validate_raw_key_blob(const unsigned char *pass, int pass_sz, int *raw_key_sz) {
+  int blob_format =
+    pass_sz >= 5
+    && sqlite3StrNICmp((const char *)pass, "x'", 2) == 0
+    && pass[pass_sz - 1] == '\''
+    && (pass_sz - 3) % 2 == 0
+    && cipher_isHex(pass + 2, pass_sz - 3);
+
+  *raw_key_sz = blob_format ? (pass_sz - 3) / 2 : 0;
+
+  return blob_format && *raw_key_sz >= CIPHER_MIN_KEY_SZ && *raw_key_sz <= CIPHER_MAX_RAW_KEY_SZ;
 }
 
 sqlite3_mutex* sqlcipher_mutex(int mutex) {
@@ -1312,9 +1342,13 @@ static int sqlcipher_cipher_ctx_get_keyspec(codec_ctx *ctx, cipher_ctx *c_ctx, c
 
 /**
   * Set the passphrase for the cipher_ctx
-  * 
+  *
   * returns SQLITE_OK if assignment was successfull
   * returns SQLITE_NOMEM if an error occured allocating memory
+  * returns SQLITE_ERROR if the key is not a well-formed x'...' blob of a valid length --
+  * validated here, at key-set time (PRAGMA key/rekey), rather than deferred to the first
+  * page cipher call, so a bad key is rejected immediately instead of surfacing later as
+  * an unrelated-looking error on first table access. See doc/crypto.md "Key provisioning".
   */
 static int sqlcipher_cipher_ctx_set_pass(cipher_ctx *ctx, const void *zKey, int nKey) {
   /* free, zero existing pointers and size */
@@ -1323,10 +1357,23 @@ static int sqlcipher_cipher_ctx_set_pass(cipher_ctx *ctx, const void *zKey, int 
   ctx->pass_sz = 0;
 
   if(zKey && nKey > 0) { /* if new password is provided, copy it */
+    int raw_key_sz;
+
     ctx->pass_sz = nKey;
     ctx->pass = sqlcipher_malloc(nKey);
     if(ctx->pass == NULL) return SQLITE_NOMEM;
     memcpy(ctx->pass, zKey, nKey);
+
+    if(!sqlcipher_validate_raw_key_blob(ctx->pass, ctx->pass_sz, &raw_key_sz)) {
+      sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE,
+        "sqlcipher_cipher_ctx_set_pass: key must be supplied as a raw key blob x'...' between %d and %d bytes "
+        "(%d-%d hex characters); passphrase-derived keys are not supported by this provider",
+        CIPHER_MIN_KEY_SZ, CIPHER_MAX_RAW_KEY_SZ, CIPHER_MIN_KEY_SZ * 2, CIPHER_MAX_RAW_KEY_SZ * 2);
+      sqlcipher_free(ctx->pass, ctx->pass_sz);
+      ctx->pass = NULL;
+      ctx->pass_sz = 0;
+      return SQLITE_ERROR;
+    }
   } 
   return SQLITE_OK;
 }
@@ -1636,46 +1683,34 @@ error:
   * Validate and store the raw master key for a cipher_ctx.
   *
   * This provider supports only a single input form: a raw key blob formatted as x'hex',
-  * where the hex-decoded length is at least CIPHER_MIN_KEY_SZ (256) bytes -- see
-  * doc/crypto.md "Key provisioning". There is no passphrase concept and no PBKDF2 (or any
-  * other) key-stretching path; keys shorter than CIPHER_MIN_KEY_SZ, or not supplied in
-  * x'...' form, are rejected here with a clear error.
+  * where the hex-decoded length is between CIPHER_MIN_KEY_SZ (256) and CIPHER_MAX_RAW_KEY_SZ
+  * bytes -- see doc/crypto.md "Key provisioning". There is no passphrase concept and no
+  * PBKDF2 (or any other) key-stretching path; keys outside that range, or not supplied in
+  * x'...' form, are rejected here with a clear error. This duplicates the check already
+  * performed eagerly by sqlcipher_cipher_ctx_set_pass at key-set time; it is kept here too,
+  * defensively, in case c_ctx->pass/pass_sz are ever populated by a path other than that
+  * function.
   *
   * Per-page salt/key/nonce derivation happens later, in sqlcipher_page_cipher, not here --
   * this function's job is just to validate and store the raw master key.
   *
   * returns SQLITE_OK if the key was valid and stored
-  * returns SQLITE_ERROR if the key material is missing, malformed, or too short
+  * returns SQLITE_ERROR if the key material is missing, malformed, or out of range
   * returns SQLITE_NOMEM if a memory allocation failed
   */
 static int sqlcipher_cipher_ctx_key_derive(codec_ctx *ctx, cipher_ctx *c_ctx) {
-  int raw_key_sz, blob_format;
+  int raw_key_sz;
 
   if(!c_ctx->pass || !c_ctx->pass_sz) {
     sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_cipher_ctx_key_derive: key material is not present on the context for key derivation");
     return SQLITE_ERROR;
   }
 
-  /* raw key must be BLOB formatted:
-   * 1. greater than or equal to 5 characters long
-   * 2. starting with x'
-   * 3. ending with '
-   * 4. length of contents between the x' and ' must be even (whole bytes)
-   * 5. contents must be hex */
-  blob_format =
-    c_ctx->pass_sz >= 5
-    && sqlite3StrNICmp((const char *)c_ctx->pass ,"x'", 2) == 0
-    && c_ctx->pass[c_ctx->pass_sz - 1] == '\''
-    && (c_ctx->pass_sz - 3) % 2 == 0
-    && cipher_isHex(c_ctx->pass + 2, c_ctx->pass_sz - 3);
-
-  raw_key_sz = blob_format ? (c_ctx->pass_sz - 3) / 2 : 0;
-
-  if(!blob_format || raw_key_sz < CIPHER_MIN_KEY_SZ) {
+  if(!sqlcipher_validate_raw_key_blob(c_ctx->pass, c_ctx->pass_sz, &raw_key_sz)) {
     sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE,
-      "%s: key must be supplied as a raw key blob x'...' of at least %d bytes (%d hex characters); "
-      "passphrase-derived keys are not supported by this provider", __func__,
-      CIPHER_MIN_KEY_SZ, CIPHER_MIN_KEY_SZ * 2);
+      "%s: key must be supplied as a raw key blob x'...' between %d and %d bytes "
+      "(%d-%d hex characters); passphrase-derived keys are not supported by this provider", __func__,
+      CIPHER_MIN_KEY_SZ, CIPHER_MAX_RAW_KEY_SZ, CIPHER_MIN_KEY_SZ * 2, CIPHER_MAX_RAW_KEY_SZ * 2);
     goto error;
   }
 
@@ -2719,6 +2754,25 @@ int sqlcipherCodecAttach(sqlite3* db, int nDb, const void *zKey, int nKey) {
     return SQLITE_MISUSE;
   }
 
+  /* validate the raw key blob format/length here, before any pager/codec state is
+  ** touched, so a bad key on a first-time PRAGMA key is rejected as a plain API-misuse
+  ** return (matching the "no key" check above) rather than by forcing the pager into an
+  ** error state mid-attach -- sqlite3pager_error() below is meant for failures once a
+  ** pager is already committed to being keyed (e.g. OOM), and doing that instead for an
+  ** ordinary validation failure was found (via SQLITE_DEBUG assertions) to leave the
+  ** pager in a state that trips assert_pager_state() on the next statement. See
+  ** doc/crypto.md "Key provisioning". */
+  {
+    int raw_key_sz;
+    if(!sqlcipher_validate_raw_key_blob((const unsigned char*)zKey, nKey, &raw_key_sz)) {
+      sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE,
+        "%s: key must be supplied as a raw key blob x'...' between %d and %d bytes "
+        "(%d-%d hex characters); passphrase-derived keys are not supported by this provider", __func__,
+        CIPHER_MIN_KEY_SZ, CIPHER_MAX_RAW_KEY_SZ, CIPHER_MIN_KEY_SZ * 2, CIPHER_MAX_RAW_KEY_SZ * 2);
+      return SQLITE_ERROR;
+    }
+  }
+
   if(!(db && nDb >= 0 && nDb < db->nDb && (pDb = &db->aDb[nDb]) && pDb->pBt)) {
     sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: invalid database %p %d", __func__, db, nDb);
     return SQLITE_MISUSE;
@@ -2917,9 +2971,16 @@ int sqlite3_rekey_v2(sqlite3 *db, const char *zDb, const void *pKey, int nKey) {
       sqlite3_mutex_enter(db->mutex);
       sqlcipher_log(SQLCIPHER_LOG_TRACE, SQLCIPHER_LOG_MUTEX, "sqlite3_rekey_v2: entered database mutex %p", db->mutex);
 
-      codec_set_pass_key(db, db_index, pKey, nKey, CIPHER_WRITE_CTX);
-    
-      /* do stuff here to rewrite the database 
+      if(codec_set_pass_key(db, db_index, pKey, nKey, CIPHER_WRITE_CTX) != SQLITE_OK) {
+        /* reject a malformed/out-of-range new key before rewriting any pages, rather than
+        ** starting the rewrite and failing partway through on first use of the bad key */
+        sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlite3_rekey_v2: rejecting invalid new key for db %s", zDb);
+        sqlcipher_log(SQLCIPHER_LOG_TRACE, SQLCIPHER_LOG_MUTEX, "sqlite3_rekey_v2: leaving database mutex %p", db->mutex);
+        sqlite3_mutex_leave(db->mutex);
+        return SQLITE_ERROR;
+      }
+
+      /* do stuff here to rewrite the database
       ** 1. Create a transaction on the database
       ** 2. Iterate through each page, reading it and then writing it.
       ** 3. If that goes ok then commit and put ctx->rekey into ctx->key

@@ -70,15 +70,18 @@ db close
 file delete -force test.db
 
 # ------------------------------------------------------------------------
-# 2. rejection of a key shorter than 256 bytes, with a clear error
+# 2. rejection of a key outside the 256-8192 byte range, with a clear error,
+#    at PRAGMA key/rekey time itself -- not deferred to first table access.
+#    See doc/crypto.md "Key provisioning".
 # ------------------------------------------------------------------------
+set ::BAD_KEY_ERR {An error occurred with PRAGMA key or rekey. PRAGMA key requires a key of one or more characters. PRAGMA rekey can only be run on an existing encrypted database. Use sqlcipher_export() and ATTACH to convert encrypted/plaintext databases.}
+
 do_test leancrypto-rejects-short-key {
   sqlite_orig db test.db
   catchsql {
     PRAGMA key = "x'0011223344556677'";
-    CREATE TABLE t1(a,b);
   }
-} {1 {out of memory}}
+} "1 {$::BAD_KEY_ERR}"
 db close
 file delete -force test.db
 
@@ -87,9 +90,8 @@ do_test leancrypto-rejects-key-one-byte-short-of-minimum {
   sqlite_orig db test.db
   catchsql "
     PRAGMA key = \"x'[string repeat 09 255]'\";
-    CREATE TABLE t1(a,b);
   "
-} {1 {out of memory}}
+} "1 {$::BAD_KEY_ERR}"
 db close
 file delete -force test.db
 
@@ -102,6 +104,71 @@ do_test leancrypto-accepts-key-at-exact-minimum {
     INSERT INTO t1 VALUES(1,2);
   "
 } {ok}
+db close
+file delete -force test.db
+
+# a key of exactly 8192 bytes (the maximum) is accepted...
+do_test leancrypto-accepts-key-at-exact-maximum {
+  sqlite_orig db test.db
+  execsql "
+    PRAGMA key = \"x'[string repeat 09 8192]'\";
+    CREATE TABLE t1(a,b);
+    INSERT INTO t1 VALUES(1,2);
+  "
+} {ok}
+db close
+file delete -force test.db
+
+# ...while a key of 8193 bytes (one byte over the maximum) is rejected, again at
+# PRAGMA key time itself.
+do_test leancrypto-rejects-key-one-byte-over-maximum {
+  sqlite_orig db test.db
+  catchsql "
+    PRAGMA key = \"x'[string repeat 09 8193]'\";
+  "
+} "1 {$::BAD_KEY_ERR}"
+db close
+file delete -force test.db
+
+# a rejected PRAGMA key leaves the connection exactly as if no key had ever been
+# supplied -- a plain, unencrypted database can still be created on it.
+do_test leancrypto-rejected-key-leaves-connection-unkeyed {
+  sqlite_orig db test.db
+  catchsql {
+    PRAGMA key = "x'0011223344556677'";
+  }
+  execsql {
+    CREATE TABLE t1(a,b);
+    INSERT INTO t1 VALUES(1,2);
+    SELECT * FROM t1;
+  }
+} {1 2}
+db close
+file delete -force test.db
+
+# PRAGMA rekey with an out-of-range key is rejected before any page is rewritten,
+# and the original key/data remain fully intact -- both on the same connection and
+# after closing and reopening with the original key.
+do_test leancrypto-rekey-rejects-out-of-range-key {
+  sqlite_orig db test.db
+  execsql "
+    PRAGMA key = \"[sqlcipher_test_key 1]\";
+    CREATE TABLE t1(a,b);
+    INSERT INTO t1 VALUES(1, 'original value');
+  "
+  set rekey_result [catchsql {
+    PRAGMA rekey = "x'0011223344556677'";
+  }]
+  set same_conn_result [execsql { SELECT * FROM t1; }]
+  db close
+
+  sqlite_orig db test.db
+  set reopen_result [execsql "
+    PRAGMA key = \"[sqlcipher_test_key 1]\";
+    SELECT * FROM t1;
+  "]
+  list $rekey_result $same_conn_result $reopen_result
+} "{1 {$::BAD_KEY_ERR}} {1 {original value}} {ok 1 {original value}}"
 db close
 file delete -force test.db
 
