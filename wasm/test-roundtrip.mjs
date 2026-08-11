@@ -171,13 +171,18 @@ async function main() {
   }
 
   // ---------------------------------------------------------------------
-  // 3. Undersized key is rejected
+  // 3. Undersized key is rejected immediately by sqlite3_key() itself (see
+  //    doc/crypto.md "Key provisioning") -- not deferred to first table
+  //    access. A rejected key leaves the connection exactly as if no key
+  //    had ever been supplied, so a *subsequent* statement like
+  //    CREATE TABLE would actually succeed (on a plain, unencrypted
+  //    connection) rather than fail; that's why this checks openDb's own
+  //    rc, not a follow-up exec's.
   // ---------------------------------------------------------------------
   try { Module.FS.unlink('/shortkey.db'); } catch (e) {}
   {
-    const { db } = openDb(Module, '/shortkey.db', shortKey);
-    const erc = exec(Module, db, 'CREATE TABLE z(a);');
-    check('undersized key rejected', erc !== SQLITE_OK, `erc=${erc}`);
+    const { db, rc } = openDb(Module, '/shortkey.db', shortKey);
+    check('undersized key rejected', rc !== SQLITE_OK, `rc=${rc}`);
     Module._sqlite3_close(db);
   }
 
