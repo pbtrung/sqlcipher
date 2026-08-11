@@ -1618,19 +1618,15 @@ static int sqlcipher_page_cipher(codec_ctx *ctx, int for_ctx, Pgno pgno, int mod
   memcpy(aad + 4, salt_out, ctx->salt_sz);
   aad_sz = 4 + ctx->salt_sz;
 
-  /* derive independent per-page key and nonce from (master key, salt) via two HKDF calls
-     with distinct info labels -- see doc/crypto.md "Per-page key/nonce derivation". Note
-     the master key (IKM) is variable-length (c_ctx->key_sz), unlike the fixed-size derived
-     page key/nonce (ctx->key_sz / ctx->nonce_sz, both 64 for this provider). */
+  /* derive independent per-page key and nonce from (master key, salt) via a single HKDF
+     extract shared across two expand calls with distinct info labels -- see
+     doc/crypto.md "Per-page key/nonce derivation". Note the master key (IKM) is
+     variable-length (c_ctx->key_sz), unlike the fixed-size derived page key/nonce
+     (ctx->key_sz / ctx->nonce_sz, both 64 for this provider). */
   sqlcipher_shield(c_ctx->key, c_ctx->key_sz);
   rc = ctx->provider->hkdf(ctx->provider_ctx, c_ctx->key, c_ctx->key_sz, salt_out, ctx->salt_sz,
-        (const unsigned char*) SQLCIPHER_HKDF_KEY_INFO, sizeof(SQLCIPHER_HKDF_KEY_INFO) - 1,
-        ctx->key_sz, page_key);
-  if(rc == SQLITE_OK) {
-    rc = ctx->provider->hkdf(ctx->provider_ctx, c_ctx->key, c_ctx->key_sz, salt_out, ctx->salt_sz,
-          (const unsigned char*) SQLCIPHER_HKDF_NONCE_INFO, sizeof(SQLCIPHER_HKDF_NONCE_INFO) - 1,
-          ctx->nonce_sz, page_nonce);
-  }
+        (const unsigned char*) SQLCIPHER_HKDF_KEY_INFO, sizeof(SQLCIPHER_HKDF_KEY_INFO) - 1, ctx->key_sz, page_key,
+        (const unsigned char*) SQLCIPHER_HKDF_NONCE_INFO, sizeof(SQLCIPHER_HKDF_NONCE_INFO) - 1, ctx->nonce_sz, page_nonce);
   sqlcipher_shield(c_ctx->key, c_ctx->key_sz);
 
   if(rc != SQLITE_OK) {

@@ -156,25 +156,32 @@ static int sqlcipher_leancrypto_add_random(void *ctx, const void *buffer, int le
   return SQLITE_OK;
 }
 
-/* HKDF-SHA3-512 (RFC 5869 extract-then-expand).
+/* HKDF-SHA3-512 (RFC 5869 extract-then-expand), deriving two independent outputs
+** (the page key and page nonce, see doc/crypto.md "Per-page key/nonce derivation")
+** from one extract phase shared via an explicit PRK, rather than calling a
+** single-output hkdf() twice: the extract phase's cost is dominated by hashing ikm
+** (the master key, which can be considerably larger than one page), so paying it
+** twice per page for what is conceptually one derivation event is pure waste.
+** lc_hkdf_extract_prk() leaves the HKDF context primed for lc_hkdf_expand(); the
+** second output uses lc_hkdf_expand_prk() with the saved PRK to re-prime the
+** expand phase (resetting its internal block counter) without recomputing extract.
 **
-** Note: this uses leancrypto's heap-allocating lc_hkdf_alloc()/
-** lc_hkdf_zero_free() plus the separate extract/expand calls, rather than
-** the one-shot lc_hkdf() convenience function. lc_hkdf() is internally
-** implemented via the LC_HKDF_CTX_ON_STACK() stack-allocation macro, the
+** Note: this uses leancrypto's heap-allocating lc_hkdf_alloc()/lc_hkdf_zero_free()
+** rather than the LC_HKDF_CTX_ON_STACK() stack-allocation macro. That macro is the
 ** same family of macro that lc_aead_zero() was found (via a reproducible
-** AddressSanitizer global-buffer-overflow, only when called from deep
-** inside SQLite's real call stack) to misbehave with -- see
-** sqlcipher_leancrypto_aead_encrypt/decrypt above and the migration's
-** test-pass notes. Heap allocation avoids the same class of risk here. */
+** AddressSanitizer global-buffer-overflow, only when called from deep inside
+** SQLite's real call stack) to misbehave with -- see
+** sqlcipher_leancrypto_aead_encrypt/decrypt above and the migration's test-pass
+** notes. Heap allocation avoids the same class of risk here. */
 static int sqlcipher_leancrypto_hkdf(
   void *ctx,
   const unsigned char *ikm, int ikm_sz,
   const unsigned char *salt, int salt_sz,
-  const unsigned char *info, int info_sz,
-  int key_sz, unsigned char *key
+  const unsigned char *info1, int info1_sz, int out1_sz, unsigned char *out1,
+  const unsigned char *info2, int info2_sz, int out2_sz, unsigned char *out2
 ) {
   struct lc_hkdf_ctx *hkdf_ctx = NULL;
+  unsigned char prk[LEANCRYPTO_KEY_SZ]; /* SHA3-512 digest size == HKDF PRK size */
   int rc;
 
   if((rc = lc_hkdf_alloc(lc_sha3_512, &hkdf_ctx)) < 0) {
@@ -182,11 +189,15 @@ static int sqlcipher_leancrypto_hkdf(
     return SQLITE_ERROR;
   }
 
-  rc = lc_hkdf_extract(hkdf_ctx, ikm, (size_t)ikm_sz, salt, (size_t)salt_sz);
+  rc = lc_hkdf_extract_prk(hkdf_ctx, ikm, (size_t)ikm_sz, salt, (size_t)salt_sz, prk, sizeof(prk));
   if(rc == 0) {
-    rc = lc_hkdf_expand(hkdf_ctx, info, (size_t)info_sz, key, (size_t)key_sz);
+    rc = lc_hkdf_expand(hkdf_ctx, info1, (size_t)info1_sz, out1, (size_t)out1_sz);
+  }
+  if(rc == 0) {
+    rc = lc_hkdf_expand_prk(hkdf_ctx, info2, (size_t)info2_sz, prk, sizeof(prk), out2, (size_t)out2_sz);
   }
   lc_hkdf_zero_free(hkdf_ctx);
+  sqlcipher_memset(prk, 0, sizeof(prk));
 
   if(rc != 0) {
     sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_PROVIDER, "sqlcipher_leancrypto_hkdf: extract/expand returned %d", rc);

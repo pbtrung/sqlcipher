@@ -190,6 +190,16 @@ blob. Deriving the key and nonce from independent `info` labels (rather than
 reusing the salt bytes directly as the nonce) avoids using one random value
 for two different cryptographic roles.
 
+The provider's `hkdf()` call computes `PRK` exactly once per page (via
+leancrypto's `lc_hkdf_extract_prk()`) and expands it twice (via `lc_hkdf_expand()`
+and `lc_hkdf_expand_prk()`) to produce `page_key` and `page_nonce` from that one
+shared `PRK`, rather than recomputing the extract phase (which hashes the whole
+master key `K`) separately for each output -- confirmed to produce bit-identical
+`page_key`/`page_nonce` values to two independent extract-then-expand calls, since
+`PRK` depends only on `(salt, K)` either way; this is purely a per-page performance
+optimization; it does not change the derivation, the on-disk format, or the
+version.
+
 On decrypt, the salt is read back out of the stored page, the same
 derivation is repeated, and the AEAD decrypt call both recovers the plaintext
 and verifies the tag; any mismatch (wrong key, corrupted page, wrong salt) is

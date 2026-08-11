@@ -54,11 +54,19 @@ struct sqlcipher_provider {
   const char* (*get_provider_name)(void *ctx);
   int (*add_random)(void *ctx, const void *buffer, int length);
   int (*random)(void *ctx, void *buffer, int length);
+  /* Derives two independent outputs (a page key and a page nonce) from a single
+  ** (ikm, salt) pair via one HKDF-Extract followed by two HKDF-Expand calls with
+  ** distinct info labels, sharing the one extracted PRK -- see doc/crypto.md
+  ** "Per-page key/nonce derivation". This exists instead of a single-output hkdf()
+  ** called twice because the extract phase hashes ikm (the master key, which can be
+  ** up to CIPHER_MAX_RAW_KEY_SZ bytes) and there's no cryptographic reason to pay
+  ** that cost twice per page for what is, from the caller's perspective, one
+  ** derivation event. */
   int (*hkdf)(void *ctx,
               const unsigned char *ikm, int ikm_sz,
               const unsigned char *salt, int salt_sz,
-              const unsigned char *info, int info_sz,
-              int key_sz, unsigned char *key);
+              const unsigned char *info1, int info1_sz, int out1_sz, unsigned char *out1,
+              const unsigned char *info2, int info2_sz, int out2_sz, unsigned char *out2);
   int (*aead_encrypt)(void *ctx,
               const unsigned char *key, int key_sz,
               const unsigned char *nonce, int nonce_sz,
