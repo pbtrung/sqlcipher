@@ -89,28 +89,35 @@ void sqlite3pager_reset(Pager *pPager);
 #define SQLCIPHER_CRYPTO_LEANCRYPTO
 #endif
 
-/* magic bytes ("TX") and version identifying this codec's on-disk blob format. These are
-** fixed, compile-time constants that are NEVER read from or written to disk anywhere --
-** they are only ever used as constant Additional Data (AAD) material for every page's AEAD
-** call (magic(2) || version(2) || pgno(8) || salt(64), see sqlcipher_page_cipher). Both the
-** encrypting and decrypting side agree on them out-of-band, simply by virtue of running this
-** exact codec version, the same way the choice of Ascon-Keccak-512 itself isn't stored
-** per-page either. See doc/crypto.md "Per-page blob format" and "Why there is no on-disk
-** plaintext header".
+/* magic bytes ("TX"), version, and page number identifying and authenticating each page's
+** on-disk blob. magic/version are fixed, compile-time constants (CIPHER_MAGIC_0/1,
+** CIPHER_VERSION_MAJOR/MINOR) written into every page's reserve region on every encrypt and
+** validated on every decrypt; pgno is the page's own SQLite page number, likewise written
+** into the reserve region on every encrypt and checked -- before any AEAD call is attempted
+** -- against the pgno the pager is actually asking for on every decrypt (see
+** sqlcipher_page_cipher). All three, plus the per-page salt, are also folded into the AEAD's
+** Additional Data (AAD) -- magic(2) || version(2) || pgno(8) || salt(64) -- so a page's
+** on-disk blob is cryptographically bound to its position in the file, not just
+** structurally checked. See doc/crypto.md "Per-page blob format" and "Why there is no
+** on-disk plaintext header".
 **
-** CIPHER_VERSION_MINOR was bumped 0x00 -> 0x01 when pgno was folded into the AAD: a page
-** written by the 0x00 codec has a tag computed without pgno in the AAD, so it would fail
-** AEAD authentication (not just look like a version mismatch) if decrypted under 0x01's
-** AAD construction. Bumping the on-disk version constant makes the magic/version check in
-** sqlcipher_page_cipher (which runs before any AEAD call is attempted) reject a 0x00 page
-** outright with a clear "unrecognized magic/version" error, instead of failing later with a
-** less specific "authentication failed" that looks like tampering or a wrong key. (The pgno
-** field was later widened from 4 to 8 bytes, still under 0x01 -- no 0x01-tagged database
-** with the narrower 4-byte encoding was ever released, so no further bump was needed.) */
+** CIPHER_VERSION_MAJOR was bumped 0x01 -> 0x02 when pgno was moved from AAD-only binding to
+** an explicit on-disk field (reserve_sz grew by CIPHER_PGNO_SZ bytes): this changes the
+** reserve-region layout itself, not just the AAD construction, so a 0x02 codec reading a
+** 0x01 page would misinterpret salt/tag bytes as the new pgno field and corrupt every
+** subsequent offset, not just fail an AEAD tag check. Bumping the major version makes the
+** magic/version check in sqlcipher_page_cipher (which runs before any AEAD call is
+** attempted) reject a 0x01 page outright with a clear "unrecognized magic/version" error.
+** There is no support for reading 0x01 (or earlier) databases -- there is no legacy data
+** that needs it. */
 #define CIPHER_MAGIC_0 0x54
 #define CIPHER_MAGIC_1 0x58
-#define CIPHER_VERSION_MAJOR 0x01
-#define CIPHER_VERSION_MINOR 0x01
+#define CIPHER_VERSION_MAJOR 0x02
+#define CIPHER_VERSION_MINOR 0x00
+
+/* on-disk / AAD width, in bytes, of the stored page-number field -- big-endian,
+** zero-extended since Pgno is currently a 32-bit type; see sqlcipher_page_cipher. */
+#define CIPHER_PGNO_SZ 8
 
 #define CIPHER_XSTR(s) CIPHER_STR(s)
 #define CIPHER_STR(s) #s
@@ -184,8 +191,8 @@ typedef struct {
   int nonce_sz;
   int tag_sz;
   int page_sz;
-  int reserve_sz; /* salt_sz + tag_sz, no block-size rounding (Ascon-Keccak has no block
-                  ** alignment requirement) */
+  int reserve_sz; /* magic(2) + version(2) + pgno(CIPHER_PGNO_SZ) + salt_sz + tag_sz, no
+                  ** block-size rounding (Ascon-Keccak has no block-alignment requirement) */
   int error;
   unsigned int flags;
   unsigned char *buffer;
@@ -1221,11 +1228,11 @@ static void sqlcipher_cipher_ctx_free(codec_ctx* ctx, cipher_ctx **iCtx) {
   sqlcipher_free(c_ctx, sizeof(cipher_ctx));
 }
 
-/* reserve = magic(2) + version(2) + salt(64) + tag(64) = 132 bytes; no block-size
-** rounding, Ascon-Keccak has no block-alignment requirement. See doc/crypto.md
-** "Per-page blob format". */
+/* reserve = magic(2) + version(2) + pgno(CIPHER_PGNO_SZ) + salt(64) + tag(64) = 140 bytes;
+** no block-size rounding, Ascon-Keccak has no block-alignment requirement. See
+** doc/crypto.md "Per-page blob format". */
 static int sqlcipher_codec_ctx_reserve_setup(codec_ctx *ctx) {
-  ctx->reserve_sz = 4 + ctx->salt_sz + ctx->tag_sz;
+  ctx->reserve_sz = 4 + CIPHER_PGNO_SZ + ctx->salt_sz + ctx->tag_sz;
 
   sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_reserve_setup: salt_sz=%d tag_sz=%d reserve=%d",
                 ctx->salt_sz, ctx->tag_sz, ctx->reserve_sz);
@@ -1417,8 +1424,9 @@ static void sqlcipher_codec_ctx_set_error(codec_ctx *ctx, int error) {
 }
 
 /* Read page 1's current on-disk salt (the salt_sz bytes of its reserve region, at file
-** offset page_sz - reserve_sz + 4, immediately after the 4-byte magic||version field --
-** see doc/crypto.md "Per-page blob format") directly off disk, for PRAGMA cipher_salt
+** offset page_sz - reserve_sz + 4 + CIPHER_PGNO_SZ, immediately after the 4-byte
+** magic||version field and the CIPHER_PGNO_SZ-byte pgno field -- see doc/crypto.md
+** "Per-page blob format") directly off disk, for PRAGMA cipher_salt
 ** reporting only. Page 1 is not special-cased any more -- its salt lives in its own
 ** reserve region exactly like every other page's, so there is no separate cached/
 ** persistent copy of it on codec_ctx: this simply reads it back out of the file on
@@ -1433,7 +1441,7 @@ static int sqlcipher_codec_ctx_get_page1_salt(codec_ctx *ctx, unsigned char *sal
   if(fd != NULL && fd->pMethods != 0) sqlite3OsFileSize(fd, &file_sz);
 
   if(fd == NULL || fd->pMethods == 0 || file_sz < ctx->page_sz ||
-     sqlite3OsRead(fd, salt, ctx->salt_sz, ctx->page_sz - ctx->reserve_sz + 4) != SQLITE_OK) {
+     sqlite3OsRead(fd, salt, ctx->salt_sz, ctx->page_sz - ctx->reserve_sz + 4 + CIPHER_PGNO_SZ) != SQLITE_OK) {
     sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_get_page1_salt: unable to read salt from page 1, generating random value for reporting purposes only");
     if(ctx->provider->random(ctx->provider_ctx, salt, ctx->salt_sz) != SQLITE_OK) {
       sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "sqlcipher_codec_ctx_get_page1_salt: error retrieving random bytes from provider");
@@ -1552,17 +1560,39 @@ static void sqlcipher_codec_ctx_free(codec_ctx **iCtx) {
 static const char SQLCIPHER_HKDF_KEY_INFO[]   = "sqlcipher-leancrypto-key-v1";
 static const char SQLCIPHER_HKDF_NONCE_INFO[] = "sqlcipher-leancrypto-nonce-v1";
 
+/* encode/decode a Pgno (currently u32) as a CIPHER_PGNO_SZ-byte, big-endian, zero-extended
+** field -- shared by the on-disk pgno field and the AAD construction in
+** sqlcipher_page_cipher. Pgno is widened to u64 before shifting since shifting a u32 by
+** more than 31 bits is undefined behavior. */
+static void sqlcipher_put_pgno_be(unsigned char *out, Pgno pgno) {
+  u64 pgno64 = (u64)pgno;
+  out[0] = (unsigned char)(pgno64 >> 56);
+  out[1] = (unsigned char)(pgno64 >> 48);
+  out[2] = (unsigned char)(pgno64 >> 40);
+  out[3] = (unsigned char)(pgno64 >> 32);
+  out[4] = (unsigned char)(pgno64 >> 24);
+  out[5] = (unsigned char)(pgno64 >> 16);
+  out[6] = (unsigned char)(pgno64 >> 8);
+  out[7] = (unsigned char)(pgno64);
+}
+
+static u64 sqlcipher_get_pgno_be(const unsigned char *in) {
+  return ((u64)in[0] << 56) | ((u64)in[1] << 48) | ((u64)in[2] << 40) | ((u64)in[3] << 32) |
+         ((u64)in[4] << 24) | ((u64)in[5] << 16) | ((u64)in[6] << 8)  | (u64)in[7];
+}
+
 /*
  * ctx - codec context
  * for_ctx - 1 to use ctx->write_ctx, 0 to use ctx->read_ctx
- * pgno - page number in database. Folded into the AAD (big-endian, 8 bytes, zero-extended
- *        since Pgno is currently u32) below; not stored on disk (it's implicit in the
- *        page's position in the file, so this adds no on-disk bytes) and not part of key
- *        derivation. Binding it into the AAD means a page's on-disk blob only
- *        authenticates in the slot it was written to -- see doc/crypto.md "Per-page blob
- *        format" and the former "Known limitations" entry this closes. The field is 8
- *        bytes wide (not 4) so a future widening of Pgno itself would not require another
- *        AAD-format/version bump.
+ * pgno - page number in database. Written into the on-disk pgno field (CIPHER_PGNO_SZ
+ *        bytes, big-endian, zero-extended since Pgno is currently u32) on encrypt, and
+ *        checked against that same on-disk field on decrypt -- before any AEAD call is
+ *        attempted -- to reject a page that has been relocated/spliced to a different slot
+ *        with a clear, pre-AEAD diagnostic. It is also folded into the AAD below, the same
+ *        way, so a page's on-disk blob only authenticates in the slot it was written to --
+ *        see doc/crypto.md "Per-page blob format" and "Known limitations". pgno is not part
+ *        of key derivation. The field is 8 bytes wide (not 4) so a future widening of Pgno
+ *        itself would not require another AAD-format/version bump.
  * mode - SQLCIPHER_ENCRYPT or SQLCIPHER_DECRYPT
  * page_sz - size in bytes of the input/output buffers (the full page size -- page 1 is
  *           NOT special-cased or offset any more, see doc/crypto.md "Why there is no
@@ -1572,7 +1602,7 @@ static const char SQLCIPHER_HKDF_NONCE_INFO[] = "sqlcipher-leancrypto-nonce-v1";
  *
  * Every page (including page 1) is stored identically, with no special-cased plaintext
  * region:
- *   [ ciphertext (page_sz - reserve_sz bytes) ][ magic(2) ][ version(2) ][ salt(salt_sz) ][ tag(tag_sz) ]
+ *   [ ciphertext (page_sz - reserve_sz bytes) ][ magic(2) ][ version(2) ][ pgno(CIPHER_PGNO_SZ) ][ salt(salt_sz) ][ tag(tag_sz) ]
  * AAD = magic(2) || version(2) || pgno(8, big-endian) || salt(salt_sz). magic/version are
  * always the fixed CIPHER_MAGIC_0/1 and CIPHER_VERSION_MAJOR/MINOR compile-time constants
  * on write, and are read back off disk (and checked against those same constants) on read
@@ -1580,7 +1610,7 @@ static const char SQLCIPHER_HKDF_NONCE_INFO[] = "sqlcipher-leancrypto-nonce-v1";
  */
 static int sqlcipher_page_cipher(codec_ctx *ctx, int for_ctx, Pgno pgno, int mode, int page_sz, unsigned char *in, unsigned char *out) {
   cipher_ctx *c_ctx = for_ctx ? ctx->write_ctx : ctx->read_ctx;
-  unsigned char *magic_in, *magic_out, *salt_in, *salt_out, *tag_in, *tag_out, *out_start;
+  unsigned char *magic_in, *magic_out, *pgno_in, *pgno_out, *salt_in, *salt_out, *tag_in, *tag_out, *out_start;
   unsigned char aad[12 + CIPHER_MAX_KEY_SZ];
   unsigned char page_key[CIPHER_MAX_KEY_SZ];
   unsigned char page_nonce[CIPHER_MAX_KEY_SZ];
@@ -1591,13 +1621,15 @@ static int sqlcipher_page_cipher(codec_ctx *ctx, int for_ctx, Pgno pgno, int mod
   magic_out = out + size;
   magic_in = in + size;
 
-  /* the salt is written immediately after magic||version, and the tag immediately after
-     the salt. note these pointers are only valid after magic||version and the salt have
-     been established (below) */
-  salt_out = out + size + 4;
-  salt_in = in + size + 4;
-  tag_in = in + size + 4 + ctx->salt_sz;
-  tag_out = out + size + 4 + ctx->salt_sz;
+  /* pgno is written immediately after magic||version, the salt immediately after pgno, and
+     the tag immediately after the salt. note these pointers are only valid after
+     magic||version, pgno, and the salt have been established (below) */
+  pgno_out = out + size + 4;
+  pgno_in = in + size + 4;
+  salt_out = out + size + 4 + CIPHER_PGNO_SZ;
+  salt_in = in + size + 4 + CIPHER_PGNO_SZ;
+  tag_in = in + size + 4 + CIPHER_PGNO_SZ + ctx->salt_sz;
+  tag_out = out + size + 4 + CIPHER_PGNO_SZ + ctx->salt_sz;
   out_start = out; /* note the original position of the output buffer pointer, as out will be rewritten during encryption */
 
   sqlcipher_log(SQLCIPHER_LOG_DEBUG, SQLCIPHER_LOG_CORE, "%s: pgno=%d, mode=%d, size=%d", __func__, pgno, mode, size);
@@ -1616,6 +1648,9 @@ static int sqlcipher_page_cipher(codec_ctx *ctx, int for_ctx, Pgno pgno, int mod
     magic_out[1] = CIPHER_MAGIC_1;
     magic_out[2] = CIPHER_VERSION_MAJOR;
     magic_out[3] = CIPHER_VERSION_MINOR;
+    /* store this page's own page number on disk, so a mismatch can be detected directly
+       on decrypt, before any AEAD call is attempted -- see the pgno doc comment above */
+    sqlcipher_put_pgno_be(pgno_out, pgno);
     /* generate a fresh random salt for this page, used both as the HKDF salt and stored
        on disk so it can be recovered on decrypt */
     if(ctx->provider->random(ctx->provider_ctx, salt_out, ctx->salt_sz) != SQLITE_OK) goto error;
@@ -1625,27 +1660,20 @@ static int sqlcipher_page_cipher(codec_ctx *ctx, int for_ctx, Pgno pgno, int mod
       sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: unrecognized magic/version bytes for pgno=%d", __func__, pgno);
       goto error;
     }
+    if(sqlcipher_get_pgno_be(pgno_in) != (u64)pgno) {
+      sqlcipher_log(SQLCIPHER_LOG_ERROR, SQLCIPHER_LOG_CORE, "%s: on-disk pgno does not match requested pgno=%d (page relocated or spliced?)", __func__, pgno);
+      goto error;
+    }
     memcpy(magic_out, magic_in, 4); /* copy magic||version from the input to output buffer */
+    memcpy(pgno_out, pgno_in, CIPHER_PGNO_SZ); /* copy the pgno field from the input to output buffer */
     memcpy(salt_out, salt_in, ctx->salt_sz); /* copy the salt from the input to output buffer */
   }
 
   /* AAD = magic(2) || version(2) || pgno(8, big-endian) || salt(salt_sz), see
-     doc/crypto.md. pgno is bound in explicitly (big-endian, independent of host
-     byte order, zero-extended to 8 bytes since Pgno is currently u32) rather than
-     reusing Pgno's in-memory representation. Widen to u64 before shifting: Pgno
-     (u32) shifted by more than 31 bits is undefined behavior. */
-  {
-    u64 pgno64 = (u64)pgno;
-    memcpy(aad, magic_out, 4);
-    aad[4]  = (unsigned char)(pgno64 >> 56);
-    aad[5]  = (unsigned char)(pgno64 >> 48);
-    aad[6]  = (unsigned char)(pgno64 >> 40);
-    aad[7]  = (unsigned char)(pgno64 >> 32);
-    aad[8]  = (unsigned char)(pgno64 >> 24);
-    aad[9]  = (unsigned char)(pgno64 >> 16);
-    aad[10] = (unsigned char)(pgno64 >> 8);
-    aad[11] = (unsigned char)(pgno64);
-  }
+     doc/crypto.md. pgno is bound in explicitly rather than reusing Pgno's in-memory
+     representation, using the same encoding as the on-disk pgno field above. */
+  memcpy(aad, magic_out, 4);
+  sqlcipher_put_pgno_be(aad + 4, pgno);
   memcpy(aad + 12, salt_out, ctx->salt_sz);
   aad_sz = 12 + ctx->salt_sz;
 

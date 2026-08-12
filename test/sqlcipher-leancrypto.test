@@ -187,7 +187,7 @@ do_test leancrypto-detects-single-byte-tamper {
   db close
 
   # flip a single byte inside page 1's ciphertext region (well before the
-  # reserve region, which starts at page_sz - reserve_sz = 4096 - 128 = 3968)
+  # reserve region, which starts at page_sz - reserve_sz = 4096 - 140 = 3956)
   set before [hexio_read test.db 200 1]
   set flipped [format %02X [expr {([scan $before %x] ^ 0xFF) & 0xFF}]]
   hexio_write test.db 200 $flipped
@@ -204,14 +204,16 @@ file delete -force test.db
 # ------------------------------------------------------------------------
 # 4. per-page salt uniqueness
 # ------------------------------------------------------------------------
-# reserve_sz = magic(2) + version(2) + salt(64) + tag(64) = 132 bytes (see
-# doc/crypto.md); the salt lives right after the 4-byte magic||version field,
-# at file offset (pgno-1)*page_sz + (page_sz - reserve_sz) + 4.
+# reserve_sz = magic(2) + version(2) + pgno(8) + salt(64) + tag(64) = 140 bytes
+# (see doc/crypto.md); the salt lives right after the 4-byte magic||version
+# field and the 8-byte pgno field, at file offset
+# (pgno-1)*page_sz + (page_sz - reserve_sz) + 4 + pgno_sz.
 set ::PAGE_SZ 4096
-set ::RESERVE_SZ 132
+set ::RESERVE_SZ 140
+set ::PGNO_SZ 8
 set ::SALT_SZ 64
 proc page_salt_offset {pgno} {
-  return [expr {($pgno - 1) * $::PAGE_SZ + ($::PAGE_SZ - $::RESERVE_SZ) + 4}]
+  return [expr {($pgno - 1) * $::PAGE_SZ + ($::PAGE_SZ - $::RESERVE_SZ) + 4 + $::PGNO_SZ}]
 }
 
 do_test leancrypto-different-pages-have-different-salts {

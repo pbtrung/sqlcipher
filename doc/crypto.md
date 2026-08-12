@@ -73,29 +73,32 @@ for that page.
 ```
 ciphertext (var)    page_size - reserve_size bytes
 magic (2 bytes)     0x54 0x58 ("TX")
-version (2 bytes)   major.minor, e.g. 0x01 0x01 = v1.1
+version (2 bytes)   major.minor, e.g. 0x02 0x00 = v2.0
+pgno (8 bytes)      big-endian, zero-extended; this page's own SQLite page number
 salt (64 bytes)     random per page, fresh on every write, HKDF input salt
 tag (64 bytes)      Ascon-Keccak authentication tag
 ```
 
-`magic`, `version`, `salt`, and `tag` all live in the page's *reserve* region
-(the same trailing bytes SQLite already reserves per page for the codec,
-exactly as IV+HMAC did in the previous AES design) —
-`reserve_size = magic(2) + version(2) + salt(64) + tag(64) = 132` bytes, with
-no block-size rounding (Ascon-Keccak has no block-alignment requirement).
-This layout is identical for **every** page, including page 1 — there is no
-special per-database salt storage and no *leading* plaintext prefix at the
-start of the file (see "Why there is no on-disk plaintext header" below;
-that section is about avoiding a prefix at the *start* of page 1 specifically
-— it does not apply to the reserve region, which was always fully opaque to
-SQLite's own page-1 parsing regardless of what the codec puts there).
+`magic`, `version`, `pgno`, `salt`, and `tag` all live in the page's *reserve*
+region (the same trailing bytes SQLite already reserves per page for the
+codec, exactly as IV+HMAC did in the previous AES design) —
+`reserve_size = magic(2) + version(2) + pgno(8) + salt(64) + tag(64) = 140`
+bytes, with no block-size rounding (Ascon-Keccak has no block-alignment
+requirement). This layout is identical for **every** page, including page 1
+— there is no special per-database salt storage and no *leading* plaintext
+prefix at the start of the file (see "Why there is no on-disk plaintext
+header" below; that section is about avoiding a prefix at the *start* of
+page 1 specifically — it does not apply to the reserve region, which was
+always fully opaque to SQLite's own page-1 parsing regardless of what the
+codec puts there).
 
 `magic` and `version` are written fresh from the fixed `CIPHER_MAGIC_0/1`/
 `CIPHER_VERSION_MAJOR/MINOR` compile-time constants on every encrypt, and
-read back and checked against those same constants on every decrypt (a page
-whose on-disk magic/version don't match is rejected outright, before an AEAD
-call is even attempted) — the same way `salt` is generated fresh on encrypt
-and read back on decrypt.
+`pgno` is written fresh from the page number being written; all three are
+read back and checked against their expected values on every decrypt (a page
+whose on-disk magic, version, or stored pgno don't match what's expected is
+rejected outright, before an AEAD call is even attempted) — the same way
+`salt` is generated fresh on encrypt and read back on decrypt.
 
 Additional Data (AD) passed to the AEAD call:
 
@@ -109,10 +112,20 @@ originally written to (see "Known limitations" below for the class of attack
 this closes, and why it was previously omitted). It is encoded as 8 bytes
 (zero-extended, since `Pgno` is currently a 32-bit type) rather than 4 so a
 future widening of `Pgno` itself would not require another AAD-format/version
-bump. It is **not** stored on disk anywhere — it's already implicit in the
-page's byte offset in the file, the same way `magic`/`version` aren't stored
-either — so this adds no bytes
-to `reserve_size`, which stays 132.
+bump.
+
+As of version 2.0, `pgno` is also stored explicitly in the reserve region
+(see the layout above), using the same 8-byte big-endian encoding as the AD
+above, rather than existing only inside the AD. On decrypt, the stored value
+is compared against the pgno the pager is actually asking for, and any
+mismatch is rejected immediately, before the AEAD call is attempted — the
+same clean, pre-AEAD rejection already used for `magic`/`version`, instead of
+only surfacing later as a less specific AEAD authentication failure. This is
+a diagnostic/defense-in-depth improvement, not a new security boundary: the
+AD binding introduced in version 1.1 already made a spliced page fail AEAD
+authentication in its new slot; storing `pgno` on-disk just makes that
+failure mode explicit, at the cost of 8 extra bytes in `reserve_size` (132 ->
+140).
 
 ### Why there is no on-disk plaintext header
 
@@ -196,7 +209,7 @@ page_nonce = HKDF-Expand-SHA3-512(PRK, info = "sqlcipher-leancrypto-nonce-v1", L
 
 `page_key` and `page_nonce` are then used as the Ascon-Keccak-512 key and
 nonce respectively, with the AEAD call over the page's plaintext and the
-68-byte AD above, producing the ciphertext and 64-byte tag stored in the
+76-byte AD above, producing the ciphertext and 64-byte tag stored in the
 blob. Deriving the key and nonce from independent `info` labels (rather than
 reusing the salt bytes directly as the nonce) avoids using one random value
 for two different cryptographic roles.
@@ -241,6 +254,24 @@ a hard authentication failure.
   mechanism (a monotonic counter or Merkle-style structure), which no
   per-page-independent AEAD codec provides, including the original
   AES/HMAC SQLCipher design.
+- **Version 2.0: `pgno` is also stored explicitly on disk, in addition to
+  being folded into the AD.** Versions 1.x only bound `pgno` into the AEAD's
+  Additional Data (see above); it was never written to disk, since it's
+  already implicit in a page's byte offset in the file. Version 2.0 adds an
+  explicit `CIPHER_PGNO_SZ`-byte on-disk `pgno` field (widening
+  `reserve_size` from 132 to 140 bytes) so a mismatch between a page's stored
+  pgno and the pgno actually being requested is rejected immediately, before
+  any AEAD call is attempted — the same clean, pre-AEAD diagnostic already
+  used for `magic`/`version`. This does not change what attacks are
+  prevented (the AD binding introduced in 1.1 already made a spliced page
+  fail AEAD authentication in its new slot); it only makes that failure mode
+  explicit and gives a clearer error. Because it changes `reserve_size`
+  itself — a 1.x reader would misinterpret the new pgno bytes as part of the
+  salt/tag and corrupt every subsequent reserve-region offset, not just fail
+  an AEAD tag check — this required a MAJOR version bump
+  (`CIPHER_VERSION_MAJOR` 0x01 -> 0x02), not just a minor one. There is no
+  support for reading version 1.x databases; there is no legacy data that
+  needs it.
 - **Reopening a database created with a non-default page size requires
   `PRAGMA cipher_default_page_size = N` before `PRAGMA key`** — see
   "Consequence: non-default page sizes require `cipher_default_page_size` on
