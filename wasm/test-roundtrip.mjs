@@ -279,7 +279,56 @@ async function main() {
   }
 
   // ---------------------------------------------------------------------
-  // 5. Page splicing is detected: copying one page's entire on-disk blob
+  // 5. On-disk v2 header layout: magic/version/pgno match doc/crypto.md's
+  //    "Per-page blob format" (CIPHER_VERSION_MAJOR/MINOR = 0x02/0x00,
+  //    reserve_sz = 140 bytes, with an 8-byte big-endian pgno field stored
+  //    right after magic||version -- see src/sqlcipher.c
+  //    sqlcipher_page_cipher). This checks the raw on-disk bytes directly,
+  //    the same way test/sqlcipher-leancrypto.test's salt-offset checks do
+  //    for the native build, so a wasm-specific layout regression would be
+  //    caught even if it didn't happen to break the splicing test below.
+  // ---------------------------------------------------------------------
+  try { Module.FS.unlink('/header.db'); } catch (e) {}
+  {
+    const PAGE_SZ = 4096;
+    const RESERVE_SZ = 140;
+    const { db } = openDb(Module, '/header.db', validKey);
+    exec(Module, db, 'CREATE TABLE h(a INTEGER PRIMARY KEY, b);');
+    exec(Module, db, 'BEGIN;');
+    for (let i = 1; i <= 20; i++) {
+      exec(Module, db, `INSERT INTO h(a,b) VALUES(${i}, zeroblob(1500));`);
+    }
+    exec(Module, db, 'COMMIT;');
+    Module._sqlite3_close(db);
+
+    const bytes = Module.FS.readFile('/header.db');
+    check('header test db has at least 3 pages', bytes.length >= 3 * PAGE_SZ, `size=${bytes.length}`);
+
+    // reads the reserve-region header (magic||version||pgno) for a given
+    // 1-indexed page number directly out of the raw file bytes
+    function readHeader(pgno) {
+      const pageStart = (pgno - 1) * PAGE_SZ;
+      const off = pageStart + (PAGE_SZ - RESERVE_SZ);
+      const magic0 = bytes[off], magic1 = bytes[off + 1];
+      const verMajor = bytes[off + 2], verMinor = bytes[off + 3];
+      let storedPgno = 0n;
+      for (let i = 0; i < 8; i++) storedPgno = (storedPgno << 8n) | BigInt(bytes[off + 4 + i]);
+      return { magic0, magic1, verMajor, verMinor, storedPgno };
+    }
+
+    for (const pgno of [1, 2, 3]) {
+      const h = readHeader(pgno);
+      check(`page ${pgno} magic bytes are "TX"`, h.magic0 === 0x54 && h.magic1 === 0x58,
+        `0x${h.magic0.toString(16)} 0x${h.magic1.toString(16)}`);
+      check(`page ${pgno} version is 0x02 0x00`, h.verMajor === 0x02 && h.verMinor === 0x00,
+        `0x${h.verMajor.toString(16)} 0x${h.verMinor.toString(16)}`);
+      check(`page ${pgno} on-disk pgno matches its own page number`,
+        h.storedPgno === BigInt(pgno), `stored=${h.storedPgno}`);
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // 6. Page splicing is detected: copying one page's entire on-disk blob
   //    onto a different page's slot must fail AEAD authentication, since
   //    the AAD now binds the page number (see doc/crypto.md "Per-page
   //    blob format" and the former "Known limitations" entry this closes).
@@ -312,7 +361,7 @@ async function main() {
   }
 
   // ---------------------------------------------------------------------
-  // 6. Raw leancrypto API: AEAD round trip + tamper detection
+  // 7. Raw leancrypto API: AEAD round trip + tamper detection
   // ---------------------------------------------------------------------
   {
     const keySz = Module._lc_wasm_key_size();
@@ -359,7 +408,7 @@ async function main() {
     check('lc_wasm_aead_decrypt detects tampering', tamperRc !== 0, `rc=${tamperRc}`);
 
     // ---------------------------------------------------------------------
-    // 7. Raw leancrypto API: HKDF-SHA3-512
+    // 8. Raw leancrypto API: HKDF-SHA3-512
     // ---------------------------------------------------------------------
     const ikm = Module._malloc(300);
     for (let i = 0; i < 300; i++) Module.setValue(ikm + i, (i * 5 + 1) & 0xff, 'i8');
