@@ -440,6 +440,56 @@ async function main() {
     Module._free(out1); Module._free(out2);
   }
 
+  // ---------------------------------------------------------------------
+  // 9. SQLITE_ENABLE_DBSTAT_VTAB / SQLITE_ENABLE_DBPAGE_VTAB (tool/build-wasm.sh):
+  //    confirm both virtual tables actually work against an encrypted
+  //    connection, not just that the module still links with them compiled
+  //    in -- values are cross-checked against PRAGMA page_count/page_size
+  //    and sqlite_master.rootpage rather than just "query didn't error".
+  // ---------------------------------------------------------------------
+  try { Module.FS.unlink('/vtab.db'); } catch (e) {}
+  {
+    const { db } = openDb(Module, '/vtab.db', validKey);
+    exec(Module, db, 'CREATE TABLE v(a INTEGER PRIMARY KEY, b);');
+    exec(Module, db, 'BEGIN;');
+    for (let i = 1; i <= 20; i++) {
+      exec(Module, db, `INSERT INTO v(a,b) VALUES(${i}, zeroblob(1500));`);
+    }
+    exec(Module, db, 'COMMIT;');
+
+    const pageCount = queryScalarInt(Module, db, 'PRAGMA page_count;');
+    const pageSize = queryScalarInt(Module, db, 'PRAGMA page_size;');
+    check('vtab test db has at least 3 pages', pageCount >= 3, `page_count=${pageCount}`);
+
+    const dbpageCount = queryScalarInt(Module, db, 'SELECT count(*) FROM sqlite_dbpage;');
+    check('sqlite_dbpage row count matches PRAGMA page_count', dbpageCount === pageCount,
+      `dbpage=${dbpageCount} page_count=${pageCount}`);
+
+    const dbpageMaxPgno = queryScalarInt(Module, db, 'SELECT max(pgno) FROM sqlite_dbpage;');
+    check('sqlite_dbpage max(pgno) matches PRAGMA page_count', dbpageMaxPgno === pageCount,
+      `max(pgno)=${dbpageMaxPgno} page_count=${pageCount}`);
+
+    const page1Len = queryScalarInt(Module, db, 'SELECT length(data) FROM sqlite_dbpage WHERE pgno=1;');
+    check('sqlite_dbpage page 1 data length matches PRAGMA page_size', page1Len === pageSize,
+      `len=${page1Len} page_size=${pageSize}`);
+
+    const rootpage = queryScalarInt(Module, db, "SELECT rootpage FROM sqlite_master WHERE name='v';");
+    const dbstatRows = queryScalarInt(Module, db,
+      `SELECT count(*) FROM dbstat WHERE name='v' AND pageno=${rootpage};`);
+    check('dbstat resolves table v root page', dbstatRows === 1, `rows=${dbstatRows}`);
+
+    const dbstatPgsize = queryScalarInt(Module, db,
+      `SELECT pgsize FROM dbstat WHERE name='v' AND pageno=${rootpage};`);
+    check('dbstat pgsize matches PRAGMA page_size', dbstatPgsize === pageSize,
+      `pgsize=${dbstatPgsize} page_size=${pageSize}`);
+
+    const dbstatTotal = queryScalarInt(Module, db, 'SELECT count(*) FROM dbstat;');
+    check('dbstat total row count is within page_count', dbstatTotal > 0 && dbstatTotal <= pageCount,
+      `dbstat_total=${dbstatTotal} page_count=${pageCount}`);
+
+    Module._sqlite3_close(db);
+  }
+
   console.log('');
   if (failures === 0) {
     console.log('ALL TESTS PASSED');
