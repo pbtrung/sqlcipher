@@ -232,6 +232,8 @@ echo "==> Linking wasm/sqlcipher.js + .wasm"
 	-DSQLITE_THREADSAFE=1 \
 	-DSQLITE_TEMP_STORE=2 \
 	-DSQLITE_ENABLE_FTS5 \
+	-DSQLITE_ENABLE_DBSTAT_VTAB \
+	-DSQLITE_ENABLE_DBPAGE_VTAB \
 	-DBUILD_sqlite \
 	-I"$GEN_DIR" \
 	-I"$GEN_DIR/build" \
