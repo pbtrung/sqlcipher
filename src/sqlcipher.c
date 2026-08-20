@@ -247,7 +247,10 @@ uint64_t xoshiro_next(void) {
   volatile uint64_t result, t;
   /* if the state has not been initialized (all zeros), seed */
   if(!(xoshiro_s[0] | xoshiro_s[1] | xoshiro_s[2] | xoshiro_s[3])) {
-    uint64_t a = (uint64_t)(uintptr_t) &xoshiro_s;
+    /* split assignment to a to avoid "relocation truncated to fit: R_X86_64_TPOFF32" error
+     * under GCC see issue #600 */
+    volatile uintptr_t a_addr = (uintptr_t) &xoshiro_s;
+    uint64_t a = (uint64_t) a_addr;
     xoshiro_s[0] = splitmix64(&a);
     xoshiro_s[1] = splitmix64(&a);
     xoshiro_s[2] = splitmix64(&a);
@@ -1942,11 +1945,47 @@ static int sqlcipher_codec_add_random(codec_ctx *ctx, const char *zRight, int ra
   return SQLITE_ERROR;
 }
 
+#define MAX_LOG_LEN 4096
+
 #if defined(_WIN32)
 /* On windows convert to utf-16 when writing to stderr or stdout to avoid
  * a potential exception when writing mixed context to those streams
- * when using the shell. */
+ * when using the shell. This implements two variations of the code
+ * one that operats on a stack buffer, and the other that will use heap
+ * memory. The former is used for logging output since failure and log
+ * operations in the allocation code could inadvertantly cause
+ * recursion. The latter is used for profile output (i.e. containing SQL
+ * statments which we can't control the length of, and will thus will
+ * allocate heap mem for output. The conversion logic is identical between them */
+
+/* this function uses stack and trauncates to 4K */
 static int sqlcipher_fprintf(FILE* stream, const char* format, ...) {
+  int sz;
+  va_list ap;
+
+  if (stream == stderr || stream == stdout) {
+    char buffer[MAX_LOG_LEN];
+    wchar_t wbuffer[MAX_LOG_LEN];
+
+    va_start(ap, format);
+    sqlite3_vsnprintf(sizeof(buffer), buffer, format, ap);
+    va_end(ap);
+
+    sz = (int)strlen(buffer);
+
+    sz = MultiByteToWideChar(CP_UTF8, 0, buffer, sz, wbuffer, (int) (sizeof(wbuffer) / sizeof(wbuffer[0])) - 1);
+    wbuffer[sz] = (wchar_t) 0;
+    fputws(wbuffer, stream);
+  } else {
+    va_start(ap, format);
+    sz = vfprintf(stream, format, ap);
+    va_end(ap);
+  }
+  return sz;
+}
+
+/* this function allocates memory for the output */
+static int sqlcipher_mfprintf(FILE* stream, const char* format, ...) {
   int sz;
   va_list ap;
 
@@ -1957,10 +1996,15 @@ static int sqlcipher_fprintf(FILE* stream, const char* format, ...) {
     va_start(ap, format);
     buffer = sqlite3_vmprintf(format, ap);
     va_end(ap);
+
+    if(!buffer) return -1;
     sz = (int)strlen(buffer);
 
     wbuffer = sqlite3_malloc((sz + 1) * sizeof(wchar_t));
-    if (wbuffer == NULL) return -1;
+    if (!wbuffer){
+      sqlite3_free(buffer);
+      return -1;
+    }
 
     sz = MultiByteToWideChar(CP_UTF8, 0, buffer, sz, wbuffer, sz);
     wbuffer[sz] = (wchar_t) 0;
@@ -1976,8 +2020,10 @@ static int sqlcipher_fprintf(FILE* stream, const char* format, ...) {
   return sz;
 }
 #else
+/* on all non-Windows platforms, defer to standard fprintf for output */
 #define sqlcipher_fprintf fprintf
-#endif
+#define sqlcipher_mfprintf fprintf
+#endif /* defined(_WIN32) */
 
 #if !defined(SQLITE_OMIT_TRACE)
 
@@ -1996,7 +2042,7 @@ static int sqlcipher_profile_callback(unsigned int trace, void *file, void *stmt
 #endif
 #endif
   } else {
-    sqlcipher_fprintf(f, SQLCIPHER_PROFILE_FMT, elapsed, sqlite3_sql((sqlite3_stmt*)stmt));
+    sqlcipher_mfprintf(f, SQLCIPHER_PROFILE_FMT, elapsed, sqlite3_sql((sqlite3_stmt*)stmt));
   }
   return SQLITE_OK;
 }
@@ -2088,10 +2134,14 @@ static char *sqlcipher_get_log_sources_str(unsigned int source) {
 }
 
 #ifndef SQLCIPHER_OMIT_LOG
+
+void sqlcipher_log_write() {
+
+}
+
 /* constants from https://github.com/Alexpux/mingw-w64/blob/master/mingw-w64-crt/misc/gettimeofday.c */
 #define FILETIME_1970 116444736000000000ull /* seconds between 1/1/1601 and 1/1/1970 */
 #define HECTONANOSEC_PER_SEC 10000000ull
-#define MAX_LOG_LEN 8192
 void sqlcipher_log(unsigned int level, unsigned int source, const char *message, ...) {
   va_list params;
   va_start(params, message);
