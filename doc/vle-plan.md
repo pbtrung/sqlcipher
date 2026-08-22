@@ -168,3 +168,9 @@ Found during implementation:
   unrelated `fuzzcheck`/`fuzzcheck-asan`/`fuzzcheck-ubsan`/`sessionfuzz`
   build targets (confirmed present at the pre-VLE baseline commit too, via a
   throwaway git worktree) — not caused by this feature.
+- `VLE_MIN_KEY_SZ` was raised from 32 to 128 bytes after initial
+  implementation (see `doc/vle.md`'s "Per-connection key state"), well above
+  conventional symmetric-key security levels rather than at the floor of
+  them. `sqlcipher_vle_key()`'s error message and every VLE test key in
+  `wasm/test-roundtrip.mjs` were updated to match; re-verified natively that
+  127 bytes is rejected and 128 bytes is accepted.
