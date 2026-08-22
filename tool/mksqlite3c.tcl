@@ -436,6 +436,7 @@ set flist {
    memjournal.c
 
    sqlcipher.c
+   sqlcipher_vle.c
 
    walker.c
    resolve.c

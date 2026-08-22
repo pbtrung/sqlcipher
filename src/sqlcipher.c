@@ -643,6 +643,16 @@ int sqlcipher_extra_init(const char* arg) {
    * uses SQLITE_MUTEX_STATIC_MASTER itself */
   sqlite3_auto_extension((void (*)(void))sqlcipher_export_init);
 
+  /* value-level encryption + encrypted virtual tables, see doc/vle.md and
+  ** src/sqlcipher_vle.c; declared extern here since that file is folded
+  ** into the amalgamation alongside this one (or compiled as its own
+  ** translation unit in a non-amalgamation build), never given its own
+  ** header. */
+  {
+    extern int sqlcipher_vle_init(sqlite3*, char**, const struct sqlite3_api_routines*);
+    sqlite3_auto_extension((void (*)(void))sqlcipher_vle_init);
+  }
+
   return SQLITE_OK;
  
 error:

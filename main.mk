@@ -519,16 +519,25 @@ clean: clean-sanity-check
 # BEGIN SQLCIPHER
 SQLCIPHER_OBJ = \
   sqlcipher.o \
+  sqlcipher_vle.o \
   crypto_leancrypto.o
 
 SQLCIPHER_SRC = \
   $(TOP)/src/sqlcipher.h \
   $(TOP)/src/sqlcipher.c \
+  $(TOP)/src/sqlcipher_vle.c \
   $(TOP)/src/crypto_leancrypto.c \
   $(TOP)/src/crypto_leancrypto_rng_wasm.c
 
 sqlcipher.o: $(TOP)/src/sqlcipher.c $(DEPS_OBJ_COMMON)
 	$(T.cc.sqlite) $(CFLAGS.libsqlite3) -c $(TOP)/src/sqlcipher.c
+# sqlcipher_vle.c (value-level encryption + encrypted virtual tables, see
+# doc/vle.md) only uses sqlcipher.h's provider interface and public SQLite
+# APIs -- no leancrypto headers directly -- so unlike crypto_leancrypto.o it
+# needs no LEANCRYPTO_CFLAGS and is folded into the amalgamation (see
+# tool/mksqlite3c.tcl); this rule only matters for non-amalgamation builds.
+sqlcipher_vle.o: $(TOP)/src/sqlcipher_vle.c $(DEPS_OBJ_COMMON)
+	$(T.cc.sqlite) $(CFLAGS.libsqlite3) -c $(TOP)/src/sqlcipher_vle.c
 crypto_leancrypto.o: $(TOP)/src/crypto_leancrypto.c $(DEPS_OBJ_COMMON) $(LEANCRYPTO_LIB)
 	$(T.cc.sqlite) $(CFLAGS.libsqlite3) -c $(TOP)/src/crypto_leancrypto.c
 
