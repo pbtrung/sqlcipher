@@ -1,6 +1,27 @@
 # SQLCipher Change Log
 Notable changes to this project are documented in this file.
 
+## [Unreleased]
+- Add value-level encryption (VLE): seven SQL functions
+  (`sqlcipher_vle_random`/`_kdf`/`_key`/`_encrypt`/`_decrypt`/`_cipher`/
+  `_hmac`) for encrypting individual values independently of `PRAGMA key`,
+  reusing the same leancrypto Ascon-Keccak-512/HKDF-SHA3-512 primitives as
+  full-database encryption. See `doc/vle.md`.
+- Add encrypted virtual tables: a `sqlcipher_vle` virtual table module that
+  transparently encrypts selected columns of a real `<table>_shadow` backing
+  table (rtree-style shadow-table pattern), with each cell's AEAD
+  authenticated data bound to `table||column||rowid` to prevent cell
+  splicing. See `doc/vle.md`.
+- Both are from-scratch reimplementations inspired by SQLCipher's publicly
+  documented commercial-only "value-level encryption" and "encrypted virtual
+  tables" features (only the public documentation was consulted; no
+  proprietary source was available or used) -- see `doc/vle-plan.md` for
+  design notes and deviations from the public API surface.
+- Exposed to WASM/JS: both features are SQL-surfaced, so they are already
+  reachable through the existing `sqlite3_exec`/`sqlite3_prepare_v2` wasm
+  exports with no new low-level bindings needed; see
+  `wasm/test-roundtrip.mjs` sections 10/10b/11/11b for JS usage examples.
+
 ## [5.0.0] - (July 2026 - [5.0.0 changes])
 - **Breaking change**: replace the AES-256-CBC / HMAC-SHA512 / PBKDF2 crypto
   stack with a single new provider based on

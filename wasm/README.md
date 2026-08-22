@@ -125,6 +125,14 @@ $ node wasm/test-js-vfs.mjs
 - **leancrypto's raw API** (via `leancrypto_wasm_api.c`'s thin wrappers):
   an AEAD encrypt/decrypt round trip, tamper detection (a flipped
   ciphertext byte fails to decrypt), and HKDF-SHA3-512 determinism.
+- **Value-level encryption and encrypted virtual tables** (`doc/vle.md`):
+  unlike leancrypto's raw API above, these are ordinary SQL functions and a
+  virtual table module, so no dedicated wasm export exists for them -- they
+  are driven purely through `sqlite3_exec`/`sqlite3_prepare_v2`, the same as
+  any other SQL. Round trips for every SQLite storage type, key/context/
+  tamper rejection, the low-level `sqlcipher_vle_cipher()` call, and the
+  `sqlcipher_vle` virtual table's create/insert/select/update/delete plus
+  cell-splicing protection are all covered.
 
 `test-js-vfs.mjs` exercises the JS-backed `sqlite3_vfs` (see below): an
 unencrypted create/insert/close/reopen round trip through it, confirms the

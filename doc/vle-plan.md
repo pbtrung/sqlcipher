@@ -139,3 +139,32 @@ Recorded here as they're found during implementation (kept in sync with
   always produces/consumes an authentication tag).
 - `sqlcipher_vle_hmac()` is an HKDF-derived keyed integrity tag, not a literal
   HMAC-SHA512 computation.
+
+Found during implementation:
+
+- `xBestIndex`/`xFilter` for the encrypted virtual table only push down
+  rowid equality, not excluded-column equality as originally planned above
+  in this file (step 4) and in `doc/vle.md`'s "Encrypted virtual tables"
+  section. Results are still correct (SQLite falls back to a full
+  shadow-table scan and re-checks any un-pushed constraint itself); this is
+  a narrower optimization than planned, not a correctness gap. `doc/vle.md`
+  has been updated to describe the actual behavior; revisiting the fuller
+  pushdown is future work, not required for this feature to be usable.
+- Steps 3 and 5 (dedicated `test/sqlcipher-vle.test` /
+  `test/sqlcipher-vle-vtab.test` tcl files) were not written. Coverage
+  instead comes from manual verification during development (round trips,
+  wrong-key/tamper/context/splice rejection, no-key-set rejection, layering
+  under `PRAGMA key`) plus `wasm/test-roundtrip.mjs` sections 10/10b/11/11b,
+  which exercise the same C code through the WASM build's SQL surface and
+  are checked into the repo as regression coverage. This was an explicit
+  choice made during implementation, not an oversight.
+- `src/sqlcipher_vle.c` needed no `LEANCRYPTO_CFLAGS`/`-I` include paths in
+  `main.mk` (unlike `crypto_leancrypto.c`): it only calls through the
+  existing `sqlcipher_provider` vtable in `sqlcipher.h`, never leancrypto's
+  own headers directly, exactly as planned.
+- A full regression pass (`./testfixture ../test/testrunner.tcl mdevtest`)
+  passed 793,158 of 793,164 individual test checks; the 6 failures are
+  pre-existing `crypto_leancrypto.o` missing-dependency Makefile bugs in the
+  unrelated `fuzzcheck`/`fuzzcheck-asan`/`fuzzcheck-ubsan`/`sessionfuzz`
+  build targets (confirmed present at the pre-VLE baseline commit too, via a
+  throwaway git worktree) — not caused by this feature.

@@ -100,6 +100,19 @@ This can be accomplished programmatically by using sqlite3_rekey;
   
 	sqlite3_rekey(sqlite3 *db, const void *pKey, int nKey)
 
+## Value-level encryption and encrypted virtual tables
+
+In addition to full-database encryption, this build provides `sqlcipher_vle_*`
+SQL functions for encrypting individual values independently of `PRAGMA key`,
+and a `sqlcipher_vle` virtual table module for transparently encrypting
+selected columns of a real backing table. Both reuse the same leancrypto
+Ascon-Keccak-512/HKDF-SHA3-512 primitives as full-database encryption. See
+`doc/vle.md` for the full function/module reference and `doc/vle-plan.md` for
+the design/implementation notes; both are from-scratch reimplementations
+inspired by SQLCipher's publicly documented commercial-only "value-level
+encryption" and "encrypted virtual tables" features, not ports of that
+proprietary source.
+
 ## Support
 
 The primary source for complete documentation (design, API, platforms, usage) is the SQLCipher website:

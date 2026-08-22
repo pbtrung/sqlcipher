@@ -186,14 +186,22 @@ SELECT name, secret FROM app_secrets WHERE id = 1;
   different row or column fails to decrypt. This directly reuses the
   page-splicing lesson recorded in `doc/crypto.md`'s "Known limitations"
   (folding `pgno` into the page AAD), applied at cell granularity.
-- `xBestIndex`/`xFilter` push rowid and excluded-column equality constraints
-  down to the shadow table's own `WHERE` clause (a real SQL index on the
-  shadow table's excluded columns works normally); encrypted columns are
-  never filterable at the SQL level (each cell's ciphertext differs even for
-  equal plaintext values, since the salt is fresh per cell) — matching the
-  public API's documented limitation that encrypted columns generally cannot
-  be indexed or filtered directly. Every query touching an encrypted column
-  decrypts it row-by-row after the shadow-table scan.
+- `xBestIndex`/`xFilter` push down only rowid equality (`WHERE rowid = ?` or
+  `WHERE id = ?` when `id` is the `INTEGER PRIMARY KEY`) to the shadow
+  table's own `WHERE` clause. This is narrower than originally planned here:
+  excluded (plaintext) column equality is *not* pushed down as of the first
+  implementation — every other constraint, including on excluded columns,
+  falls back to a full shadow-table scan with SQLite re-checking the
+  constraint itself after `xColumn` returns. This is correct (no wrong
+  results) but not as optimized as it could be; a real index on the shadow
+  table's excluded columns still speeds up *manual* queries run directly
+  against `<table>_shadow`, just not through the virtual table's own query
+  planner integration yet. Encrypted columns are never filterable at the SQL
+  level regardless (each cell's ciphertext differs even for equal plaintext
+  values, since the salt is fresh per cell) — matching the public API's
+  documented limitation that encrypted columns generally cannot be indexed
+  or filtered directly. Every query touching an encrypted column decrypts it
+  row-by-row after the shadow-table scan.
 - `xUpdate`'s insert path is two-step: insert the row with excluded columns
   set and encrypted columns temporarily `NULL`, to obtain the assigned
   rowid, then `UPDATE` the shadow row's encrypted columns using that rowid in
@@ -207,9 +215,15 @@ SELECT name, secret FROM app_secrets WHERE id = 1;
 ## Known limitations
 
 - Encrypted columns cannot be indexed or used in `WHERE`/`JOIN` predicates
-  pushed to SQLite's query planner — only excluded (plaintext) columns and
-  `rowid` support pushdown. This matches the public commercial feature's own
-  documented limitation, not a shortcut taken here.
+  pushed to SQLite's query planner. This matches the public commercial
+  feature's own documented limitation, not a shortcut taken here.
+- As implemented, only `rowid` equality is actually pushed down through
+  `xBestIndex`/`xFilter` — excluded (plaintext) column equality is *not*
+  pushed down yet, despite that being the original plan (see "Encrypted
+  virtual tables" above). Queries filtering on an excluded column still
+  return correct results (SQLite falls back to a full shadow-table scan and
+  re-checks the constraint itself), just without index acceleration through
+  the virtual table layer.
 - No support for `ALTER TABLE` on an encrypted virtual table (adding/removing
   columns, changing the excluded-column list) — a table's encrypted/excluded
   column layout is fixed at `CREATE VIRTUAL TABLE` time. Migrating requires
