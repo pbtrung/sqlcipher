@@ -27,7 +27,7 @@
 #include <string.h>
 #include <ctype.h>
 
-#define SQLCIPHER_VLE_MIN_KEY_SZ 32
+#define SQLCIPHER_VLE_MIN_KEY_SZ 128
 #define SQLCIPHER_VLE_MAX_KEY_SZ 8192
 #define SQLCIPHER_VLE_SALT_SZ 64
 
@@ -467,7 +467,7 @@ static void sqlcipher_vle_key_func(sqlite3_context *ctx, int argc, sqlite3_value
   }
   if( key_sz<SQLCIPHER_VLE_MIN_KEY_SZ || key_sz>SQLCIPHER_VLE_MAX_KEY_SZ ){
     sqlite3_free(key);
-    sqlite3_result_error(ctx, "sqlcipher_vle_key: key length out of range (32-8192 bytes)", -1);
+    sqlite3_result_error(ctx, "sqlcipher_vle_key: key length out of range (128-8192 bytes)", -1);
     return;
   }
   if( vctx->key ){

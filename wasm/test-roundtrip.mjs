@@ -520,9 +520,9 @@ async function main() {
     const { db, rc } = openDb(Module, ':memory:', null);
     check('open :memory: db with no key for VLE tests', rc === SQLITE_OK, `rc=${rc}`);
 
-    const vleKey = hexKey(0x5a, 64);      // a valid 64-byte VLE key
-    const vleKey2 = hexKey(0xa5, 64);     // a different valid 64-byte VLE key
-    const shortVleKey = hexKey(0x11, 16); // too short (min is 32 bytes)
+    const vleKey = hexKey(0x5a, 128);      // a valid 128-byte VLE key
+    const vleKey2 = hexKey(0xa5, 128);     // a different valid 128-byte VLE key
+    const shortVleKey = hexKey(0x11, 16);  // too short (min is 128 bytes)
 
     const randLen = queryScalarInt(Module, db, 'SELECT length(sqlcipher_vle_random(37));');
     check('sqlcipher_vle_random returns the requested length', randLen === 37, `len=${randLen}`);
@@ -654,7 +654,7 @@ async function main() {
     check('open full-db-encrypted connection for layered VLE test', rc === SQLITE_OK, `rc=${rc}`);
 
     const layeredOk = queryScalarInt(Module, db,
-      `SELECT sqlcipher_vle_decrypt(sqlcipher_vle_encrypt('layered', ${hexKey(0x33, 48)}), ${hexKey(0x33, 48)}) = 'layered';`);
+      `SELECT sqlcipher_vle_decrypt(sqlcipher_vle_encrypt('layered', ${hexKey(0x33, 128)}), ${hexKey(0x33, 128)}) = 'layered';`);
     check('VLE round trip inside a full-db-encrypted connection', layeredOk === 1, `=${layeredOk}`);
 
     Module._sqlite3_close(db);
@@ -669,7 +669,7 @@ async function main() {
     const { db, rc } = openDb(Module, ':memory:', null);
     check('open :memory: db for encrypted-vtab tests', rc === SQLITE_OK, `rc=${rc}`);
 
-    const vtabKey = hexKey(0x7c, 40);
+    const vtabKey = hexKey(0x7c, 128);
     let erc = exec(Module, db, `SELECT sqlcipher_vle_key(${vtabKey});`);
     check('set VLE key before creating the encrypted vtab', erc === SQLITE_OK, errmsg(Module, db));
 
@@ -744,7 +744,7 @@ async function main() {
     check('insert into encrypted vtab without a key fails cleanly', ist.rc !== SQLITE_DONE, `rc=${ist.rc} msg=${ist.msg}`);
     if (ist.stmt) Module._sqlite3_finalize(ist.stmt);
 
-    exec(Module, db, `SELECT sqlcipher_vle_key(${hexKey(0x21, 32)});`);
+    exec(Module, db, `SELECT sqlcipher_vle_key(${hexKey(0x21, 128)});`);
     let ist2 = prepareStep(Module, db, 'INSERT INTO t VALUES (1,2);');
     check('insert succeeds once a key is set', ist2.rc === SQLITE_DONE, `rc=${ist2.rc} msg=${ist2.msg}`);
     if (ist2.stmt) Module._sqlite3_finalize(ist2.stmt);

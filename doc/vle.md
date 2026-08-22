@@ -32,13 +32,14 @@ connection close. There is no key storage across connections/processes and no
 key-derivation-from-the-main-codec-key path — VLE keys are entirely
 independent of any `PRAGMA key` in effect on the same connection.
 
-- `VLE_MIN_KEY_SZ` = 32 bytes, `VLE_MAX_KEY_SZ` = 8192 bytes.
+- `VLE_MIN_KEY_SZ` = 128 bytes, `VLE_MAX_KEY_SZ` = 8192 bytes.
 - Unlike the main per-database codec key (`CIPHER_MIN_KEY_SZ` = 256 bytes,
   see `doc/crypto.md`), VLE keys are meant for lighter, per-value/per-column
   use — often the direct output of `sqlcipher_vle_kdf()`, or an
-  application-managed 256-bit symmetric key — so the floor is set at 32 bytes
-  (256 bits), a conventional symmetric-key security level, rather than
-  reusing the full-database key's much larger floor. The 8192-byte ceiling
+  application-managed high-entropy symmetric key — so the floor is set at
+  128 bytes (1024 bits), well above conventional symmetric-key security
+  levels, rather than reusing the full-database key's much larger floor. The
+  8192-byte ceiling
   exists for the same reason as the main key's ceiling: HKDF-Extract accepts
   arbitrary-length input key material, so the cap is purely to keep an
   accidentally huge key from becoming a per-value performance foot-gun, not a
@@ -152,7 +153,7 @@ AD = magic (2) || version (2) || type (1) || context (var, caller-supplied, defa
 
 ## Per-value key/nonce derivation
 
-Given a key `K` (32-8192 bytes) and the value's fresh random 64-byte `salt`,
+Given a key `K` (128-8192 bytes) and the value's fresh random 64-byte `salt`,
 identical in structure to the per-page derivation in `doc/crypto.md`:
 
 ```
